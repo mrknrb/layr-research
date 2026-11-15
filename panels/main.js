@@ -202,6 +202,8 @@ async function openDataset(id, loaded) {
       '<div class="layr-empty">Choose a number column and the column that says each row\'s group.</div>';
     els.summary.innerHTML = "";
   }
+  state.current.groupHint = await groupingColumn();
+  if (state.current?.dataset !== id) return;
   setupChartControls();
   setupCompareControls();
   fillSelect(els.by, cols((c) => !NUM.has(c.type)).map((c) => ({ value: c.name, label: c.name })), state.by, {
@@ -356,7 +358,7 @@ function setupChartControls() {
   const all = cols().map((x) => ({ value: x.name, label: x.name }));
   $("cxLabel").textContent = f.x;
   const xOptions = f.xFilter === "num" ? num : f.xFilter === "cat" ? cat : all;
-  const firstCat = cat[0]?.value;
+  const firstCat = state.current?.groupHint ?? cat[0]?.value;
   c.x = fillSelect(els.cx, xOptions, c.x ?? (f.xFilter === "cat" ? firstCat : xOptions[0]?.value), {
     empty: f.xEmpty,
   });
@@ -406,8 +408,22 @@ async function setupCompareControls() {
   const num = cols((x) => NUM.has(x.type)).map((x) => ({ value: x.name, label: x.name }));
   const cat = cols((x) => !NUM.has(x.type)).map((x) => ({ value: x.name, label: x.name }));
   c.column = fillSelect(els.tc, num, c.column ?? num[0]?.value);
-  c.group = fillSelect(els.tg, cat, c.group ?? cat[0]?.value);
+  c.group = fillSelect(els.tg, cat, c.group ?? state.current?.groupHint ?? cat[0]?.value);
   await loadLevels();
+}
+
+// The text column that splits the rows into groups best: the fewest different values, at least two. The first text
+// column is often an id (one value per row), a poor default for comparing or a box plot.
+async function groupingColumn() {
+  const text = cols((x) => !NUM.has(x.type)).map((x) => x.name);
+  try {
+    const d = await layr.tools.run("describe", { dataset: state.current.dataset, remember: false });
+    const ok = d.columns.filter((x) => text.includes(x.name) && x.unique >= 2 && x.unique < (x.count ?? Infinity));
+    ok.sort((a, b) => a.unique - b.unique);
+    return ok[0]?.name ?? text[0] ?? null;
+  } catch {
+    return text[0] ?? null;
+  }
 }
 
 async function loadLevels() {
