@@ -1,0 +1,21 @@
+{
+  "id": "research",
+  "name": "Research",
+  "version": "0.1.0",
+  "description": "Load a CSV table, see its summary, draw charts and compare groups (t-test, ANOVA) with Python.",
+  "author": "layr",
+  "layr": "^0.1",
+  "icon": "science",
+  "permissions": ["data", "pc"],
+  "needs": ["pc", "python"],
+  "panels": [{ "id": "main", "title": "Research", "page": "panels/main.html", "icon": "science" }],
+  "commands": [
+    { "id": "open", "title": "Research: Open", "panel": "main" },
+    { "id": "sample", "title": "Research: Load the sample data", "tool": "load_sample" }
+  ],
+  "menus": [
+    { "menu": "View", "command": "open" },
+    { "menu": "Tools", "command": "sample" }
+  ],
+  "backend": { "kind": "process", "runtime": "python", "entry": "backend/server.py" }
+}
