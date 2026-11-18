@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Experiments</title>
+    <link rel="stylesheet" href="/_layr/layr.css" />
+    <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./lab.css" />
+    <script src="/_layr/layr.js"></script>
+    <script src="./vendor/katex/katex.min.js"></script>
+    <script type="module" src="./lab.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="layr-toolbar">
+        <svg viewBox="0 0 24 24" width="18" height="18" class="logo"><path d="M9 2h6v2h-1v5.3l5.6 9.4A2 2 0 0 1 17.9 22H6.1a2 2 0 0 1-1.7-3.3L10 9.3V4H9zm3 9.2L8.8 16h6.4z" fill="currentColor" /></svg>
+        <nav class="crumbs" id="crumbs"></nav>
+        <span class="layr-spacer"></span>
+        <span class="status layr-muted" id="status"></span>
+        <span class="actions" id="actions"></span>
+      </header>
+      <main id="view" class="view">
+        <div class="layr-empty"><span class="layr-spinner"></span>
+          <div id="startingText">Starting the analysis engine…</div>
+          <div class="layr-muted" id="startingHint" hidden>The first start installs Python's science packages: this
+            takes a minute or two, once.</div>
+        </div>
+      </main>
+    </div>
+    <dialog id="dialog" class="dialog"></dialog>
+  </body>
+</html>

@@ -1,13 +1,16 @@
 [project]
 name = "layr-research"
-version = "0.1.0"
-description = "layr research plugin: load CSV data, describe it, plot it and test it."
+version = "0.2.0"
+description = "layr research plugin: explainable analysis methods (GC-FID assays and tables), quick stats and plots."
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.12,<2",
   "pandas>=2.2",
   "matplotlib>=3.9",
   "scipy>=1.13",
+  "pyyaml>=6",
+  "openpyxl>=3.1",
+  "python-docx>=1.1",
 ]
 
 [dependency-groups]

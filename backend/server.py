@@ -56,8 +56,20 @@ MAX_GROUPS = 8  # categorical colors; more groups fold into "Other"
 mcp = FastMCP(
     "research",
     instructions=(
-        "Small data analyses for researchers. Start with load_csv (or load_sample), which returns a dataset id; "
-        "then describe, plot, ttest or anova that dataset. list_datasets shows what is loaded."
+        "Explainable data analysis for a researcher (a microbiologist; GC-FID activity assays and tables). "
+        "Two parts. (1) Methods and experiments: a method is a named, versioned list of steps (step_catalog lists "
+        "the step types; methods / method_get show methods); an experiment applies a method to raw files with "
+        "parameter values and corrections (experiments, experiment_create, experiment_update); run computes it; "
+        "result_table, figure, explain (formulas with this run's numbers) and provenance read the results; "
+        "database_query compares results across all experiments. Rules: every number you tell the user comes from "
+        "result_table / provenance / database_query, with the run id; never compute statistics yourself. Change "
+        "methods only with method_patch (one validated batch, a new version with a diff the user sees). Corrections "
+        "(rename, exclude, manual_integration) always need a reason and stay proposed until the user approves them; "
+        "don't call correction_decide yourself unless the user asks. A new kind of analysis is a new method made of "
+        "existing step types (table.compute takes formulas like mean(x[group == \"control\"])); if no step type can "
+        "do it, say so rather than faking it. "
+        "(2) Quick one-off analyses: load_csv (or load_sample) returns a dataset id; then describe, plot, ttest or "
+        "anova it; list_datasets shows what is loaded."
     ),
 )
 
@@ -283,19 +295,19 @@ def _history(limit: int) -> list[dict[str, Any]]:
 _background: set[asyncio.Task] = set()
 
 
-def _emit_soon(data: dict[str, Any]) -> None:
+def _emit_soon(data: dict[str, Any], topic: str = "research:result") -> None:
     """Tells the plugin's panels (topic research:result) through the hub. Best effort: no hub, no event."""
     if not (os.environ.get("LAYR_HUB_URL") and os.environ.get("LAYR_HUB_TOKEN")):
         return
     try:
-        task = asyncio.get_running_loop().create_task(_emit(data))
+        task = asyncio.get_running_loop().create_task(_emit(data, topic))
     except RuntimeError:
         return
     _background.add(task)
     task.add_done_callback(_background.discard)
 
 
-async def _emit(data: dict[str, Any]) -> None:
+async def _emit(data: dict[str, Any], topic: str = "research:result") -> None:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
@@ -305,9 +317,9 @@ async def _emit(data: dict[str, Any]) -> None:
             async with streamablehttp_client(os.environ["LAYR_HUB_URL"], headers=headers) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    await session.call_tool("layr__events_emit", {"topic": "research:result", "data": data})
+                    await session.call_tool("layr__events_emit", {"topic": topic, "data": data})
     except Exception as e:  # the hub is optional for this plugin
-        log.info("couldn't emit research:result through the hub: %s", e)
+        log.info("couldn't emit %s through the hub: %s", topic, e)
 
 
 # ---------- charts ----------
@@ -806,6 +818,12 @@ def remove_dataset(dataset: Annotated[str, Field(description="The dataset id to 
     (DATASETS / f"{dataset}.csv").unlink(missing_ok=True)
     _cache.pop(dataset, None)
     return {"removed": dataset}
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lab import tools as lab_tools  # noqa: E402
+
+LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
 
 
 if __name__ == "__main__":
