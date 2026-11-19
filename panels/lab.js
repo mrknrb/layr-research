@@ -1,5 +1,5 @@
-// Experiments: methods explained step by step, GC peak review, results, checks, corrections, the PhD database.
-// Everything goes through the plugin's own tools (layr.tools.run), the same ones AI agents use.
+// Experiments: methods as Python code explained from itself, GC peak review, results, checks, corrections, the PhD
+// database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI agents use.
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -14,6 +14,9 @@ const S = {
   method: null,
   step: null,
   general: false,
+  fn: null,
+  line: null,
+  numbersExp: null,
   inj: null,
   comp: null,
   injFilter: "all",
@@ -90,6 +93,25 @@ function save() {
 }
 
 function go(patch) {
+  const leaving =
+    S.view === "method" && ((patch.view && patch.view !== "method") || (patch.method && patch.method !== S.method));
+  if (leaving && ME?.dirty) {
+    openDialog({
+      title: "Leave without saving?",
+      body: "Your changes to the method's code aren't saved.",
+      buttons: [
+        { label: "Stay", id: false, kind: "ghost" },
+        { label: "Leave", id: true, kind: "danger" },
+      ],
+    }).then((ok) => {
+      if (ok) {
+        ME.dirty = false;
+        go(patch);
+      }
+    });
+    return;
+  }
+  if (leaving) ME = null;
   Object.assign(S, patch);
   save();
   render();
@@ -161,7 +183,7 @@ async function askReason(title, hint) {
   });
 }
 
-function table(rows, columns, { onRow, limit = 200 } = {}) {
+function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
   if (!rows.length) return h("div", { class: "layr-muted pad" }, "No rows.");
   const cols = columns || Object.keys(rows[0]);
   return h(
@@ -186,7 +208,17 @@ function table(rows, columns, { onRow, limit = 200 } = {}) {
           h(
             "tr",
             { class: onRow ? "click" : "", onclick: onRow && (() => onRow(r)) },
-            cols.map((c) => h("td", { class: typeof r[c] === "number" ? "num" : "" }, fmt(r[c]))),
+            cols.map((c) =>
+              h(
+                "td",
+                {
+                  class: typeof r[c] === "number" ? (onCell ? "num click" : "num") : "",
+                  title: typeof r[c] === "number" && onCell ? "How was this number calculated?" : null,
+                  onclick: typeof r[c] === "number" && onCell ? () => onCell(r, c) : null,
+                },
+                fmt(r[c]),
+              ),
+            ),
           ),
         ),
       ),
@@ -244,6 +276,55 @@ async function readText(types) {
   return { name: ref.name, text: new TextDecoder().decode(await layr.files.read(ref.id)) };
 }
 
+// ------------------------------------------------------------------------------------------------ Claude (optional)
+
+// Explain and the Methods paragraph ask Claude through the claude plugin's `ask` tool, an optional connection
+// (layr.json): the buttons show only while it is usable (or not decided yet: the first call asks the user).
+const AI = { claude: false };
+
+async function checkAi() {
+  try {
+    const { connections = [] } = await layr.connections.get();
+    const c = connections.find((x) => x.plugin === "claude");
+    AI.claude = Boolean(
+      c?.usable ||
+      (c?.installed &&
+        c.state === "ungranted" &&
+        !c.blocked &&
+        (c.groups ?? []).every((g) => g.exists !== false && g.rule !== "deny")),
+    );
+  } catch {
+    AI.claude = false;
+  }
+  return AI.claude;
+}
+
+async function askClaude(kind, args) {
+  const p = await call("ai_prompt", { kind, ...args });
+  let result;
+  try {
+    result = await layr.tools.run("ask", { prompt: p.prompt, system: p.system, model: "sonnet" }, { plugin: "claude" });
+  } catch (err) {
+    if (err?.code === layr.errors?.NOT_ALLOWED)
+      throw new Error("Research isn't allowed to ask Claude: allow it in Settings › Tool access (Research).");
+    if (err?.code === layr.errors?.NOT_FOUND)
+      throw new Error("Claude Code isn't installed: install it from the store.");
+    throw err;
+  }
+  const text = typeof result === "string" ? result : result?.text;
+  if (!text?.trim()) throw new Error("Claude gave an empty answer: try again.");
+  return text.trim();
+}
+
+function aiAnswer(text, label = "Written by AI (Claude): check it against the code.") {
+  return h(
+    "div",
+    { class: "ai-answer" },
+    h("div", { class: "ai-label" }, label),
+    text.split(/\n{2,}/).map((p) => h("p", {}, p)),
+  );
+}
+
 // ------------------------------------------------------------------------------------------------ chrome
 
 function setCrumbs(items) {
@@ -280,6 +361,7 @@ async function renderHome(t) {
   setCrumbs([{ label: "Experiments" }]);
   layr.panel.setTitle("Experiments").catch(() => {});
   setActions([
+    h("button", { class: "layr-button ghost", onclick: () => go({ view: "guide" }) }, "Python guide"),
     h("button", { class: "layr-button ghost", onclick: () => go({ view: "database" }) }, "Results database"),
   ]);
   const cards = exps.map((e) =>
@@ -299,7 +381,7 @@ async function renderHome(t) {
           : e.last_run
             ? [
                 badge(
-                  e.last_run.status === "done" ? "calculated" : "failed",
+                  e.last_run.status === "done" ? "calculated" : e.last_run.status,
                   e.last_run.status === "done" ? "success" : "danger",
                 ),
                 ...flagBadges(e.last_run.summary?.flags),
@@ -341,8 +423,9 @@ async function renderHome(t) {
         h(
           "p",
           { class: "layr-muted" },
-          "A method is the recipe: the same steps for every experiment, each explained with its formulas. " +
-            "Ask Claude to make a new one for another kind of analysis; every change becomes a version you can go back from.",
+          "A method is the recipe, written in plain Python: small formulas, steps that work on tables, and a recipe " +
+            "that calls the steps. Open one to read or change its code; every number it makes can be traced back to " +
+            "its line. Changes Claude makes wait for you to accept them.",
         ),
         h(
           "ul",
@@ -350,14 +433,23 @@ async function renderHome(t) {
           methods.map((m) =>
             h(
               "li",
-              { class: "click", onclick: () => go({ view: "method", method: m.id, step: null }) },
+              {
+                class: m.legacy ? "" : "click",
+                onclick: m.legacy ? null : () => go({ view: "method", method: m.id, fn: null }),
+              },
               h("b", {}, m.name),
               " ",
               h(
                 "span",
                 { class: "layr-muted" },
-                `version ${m.version} · ${m.steps} steps${m.builtin ? " · built in" : ""}`,
+                m.legacy
+                  ? "old step method (0.2): no longer runs"
+                  : m.draft_only
+                    ? "new, proposed by Claude"
+                    : `version ${m.version} · ${m.steps} steps${m.builtin ? " · built in" : ""}`,
               ),
+              m.draft && !m.draft_only ? [" ", badge("change proposed", "warning")] : null,
+              m.draft_only ? [" ", badge("waiting for you", "warning")] : null,
               h("div", { class: "layr-muted small" }, m.description),
             ),
           ),
@@ -533,6 +625,16 @@ async function renderExperiment(t) {
       { class: "layr-button ghost", disabled: !exp.last_run, onclick: (e) => exportMenu(e, exp) },
       "Export ▾",
     ),
+    running
+      ? h(
+          "button",
+          {
+            class: "layr-button danger",
+            onclick: () => call("run_stop", { experiment: exp.id }).catch(fail),
+          },
+          "Stop",
+        )
+      : null,
     h(
       "button",
       { class: "layr-button primary", disabled: running, onclick: () => startRun(exp.id) },
@@ -559,12 +661,36 @@ async function renderExperiment(t) {
     ),
   );
   const body = h("div", { class: "tab-body" });
-  const banner =
-    exp.last_run?.status === "failed"
-      ? h("div", { class: "banner danger" }, "The last run failed: ", exp.last_run.error || "")
-      : !exp.last_run
+  const last = exp.last_run;
+  const at = last?.error_at;
+  const banner = exp.method_problem
+    ? h("div", { class: "banner danger" }, exp.method_problem)
+    : last && last.status !== "done"
+      ? h(
+          "div",
+          { class: "banner danger" },
+          `The last run ${last.status === "stopped" ? "was stopped" : "failed"}: `,
+          last.error || "",
+          at?.line
+            ? [
+                " ",
+                h(
+                  "a",
+                  {
+                    href: "#",
+                    onclick: (e) => {
+                      e.preventDefault();
+                      go({ view: "method", method: exp.method, fn: at.function, line: at.line });
+                    },
+                  },
+                  `line ${at.line} in ${at.function}`,
+                ),
+              ]
+            : null,
+        )
+      : !last
         ? h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run.")
-        : exp.changed && exp.changed > (exp.last_run.started || exp.last_run.finished)
+        : exp.changed && exp.changed > (last.started || last.finished)
           ? h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate.")
           : null;
   put(view, h("div", { class: "exp" }, tabs, banner, body));
@@ -602,9 +728,53 @@ function exportMenu(ev, exp) {
       { label: "Report (web page, prints to PDF)", icon: "description", run: () => doExport("html", ".html") },
       { label: "Word document", icon: "article", run: () => doExport("docx", ".docx") },
       { label: "Excel workbook (every table)", icon: "table_chart", run: () => doExport("xlsx", ".xlsx") },
+      "-",
+      {
+        label: "Folder that runs without layr (zip)",
+        icon: "folder_zip",
+        run: () => exportFolder({ experiment: exp.id }),
+      },
+      { label: "Open this run in a notebook (JupyterLab)", icon: "data_object", run: () => openNotebook(exp) },
     ],
     ev,
   );
+}
+
+async function exportFolder(args) {
+  try {
+    setStatus("Writing the folder…");
+    const out = await call("method_export", { ...args, inline: true });
+    const ref = await layr.files.saveAs({ name: out.name, types: [".zip"] });
+    if (ref) {
+      await layr.files.write(ref.id, b64ToBytes(out.data));
+      layr.ui.notify(`Saved ${ref.name}: unzip it and run python run.py`, "success");
+    }
+  } catch (err) {
+    fail(err);
+  } finally {
+    setStatus("");
+  }
+}
+
+async function openNotebook(exp) {
+  try {
+    setStatus("Writing the notebook…");
+    const nb = await call("notebook", { experiment: exp.id });
+    if (nb.jupyter) {
+      try {
+        await layr.panels.open("lab", {}, { plugin: "jupyter", where: "right" });
+        layr.ui.notify(`In JupyterLab, open ${nb.in_jupyter}`, "success");
+        return;
+      } catch (err) {
+        console.warn("JupyterLab didn't open", err);
+      }
+    }
+    layr.ui.notify(`The notebook is in ${nb.folder} (install the JupyterLab plugin to open it in layr).`, "info");
+  } catch (err) {
+    fail(err);
+  } finally {
+    setStatus("");
+  }
 }
 
 function startRun(expId) {
@@ -617,11 +787,11 @@ function startRun(expId) {
       const r = await call("run_get", { experiment: expId });
       if (r.status === "running") {
         setStatus(`Calculating: ${r.message || r.step || "…"}`);
-        live.timer = setTimeout(poll, 700);
+        live.timer = setTimeout(poll, 600);
         return;
       }
       live = null;
-      setStatus(r.status === "done" ? "" : "The run failed");
+      setStatus(r.status === "done" ? "" : r.status === "stopped" ? "The run was stopped" : "The run failed");
       if (r.status === "done") layr.ui.notify("Calculated", "success");
       render();
     } catch (err) {
@@ -634,13 +804,149 @@ function startRun(expId) {
   render();
 }
 
-// ---------- Method tab: the steps and their explanation
+// ---------- Method tab: the run explained step by step, from the code
+
+function human(name) {
+  const s = String(name || "").replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function kindBadge(kind) {
+  return h("span", { class: `kind ${kind || ""}` }, kind || "");
+}
+
+function stepStatus(s) {
+  if (s.status === "failed") return badge("failed", "danger");
+  if (s.status && s.status !== "done") return badge(s.status, "");
+  return h("span", { class: "layr-muted small" }, s.ms != null ? `${Math.round(s.ms)} ms` : "");
+}
+
+// The step that made a saved table, from its file name (steps/03_integrate_peaks.csv).
+function stepOfFile(file) {
+  const m = /steps\/\d+_(.+?)(_in_.+|_\d+)?\.csv$/.exec(file || "");
+  return m ? m[1] : null;
+}
+
+function tableChips(inputs, output, fnName, exp) {
+  const open = (step) => exp && step && go({ view: "experiment", exp: exp.id, tab: "results", table: `step:${step}` });
+  const chips = [];
+  for (const [k, v] of Object.entries(inputs || {}))
+    if (v && v.kind === "table")
+      chips.push(
+        h(
+          "button",
+          {
+            class: "layr-button small",
+            title: (v.columns || []).join(", "),
+            disabled: !exp || !stepOfFile(v.file),
+            onclick: () => open(stepOfFile(v.file)),
+          },
+          `${k}: ${v.rows} rows × ${(v.columns || []).length}`,
+        ),
+      );
+  const takes = chips.length ? [h("h4", {}, "Takes"), h("div", { class: "gives" }, chips)] : [];
+  const gives =
+    output && output.kind === "table"
+      ? [
+          h("h4", {}, "Gives"),
+          h(
+            "div",
+            { class: "gives" },
+            h(
+              "button",
+              { class: "layr-button small", title: (output.columns || []).join(", "), onclick: () => open(fnName) },
+              `a table: ${output.rows} rows × ${(output.columns || []).length} columns`,
+            ),
+          ),
+        ]
+      : [];
+  return [...takes, ...gives];
+}
+
+function codeBlock(code) {
+  const pre = h("pre", { class: "code-block cm-s-default" });
+  if (window.CodeMirror?.runMode) window.CodeMirror.runMode(code || "", "python", pre);
+  else pre.textContent = code || "";
+  return pre;
+}
+
+function usedBlock(used) {
+  if (!used?.length) return [];
+  return [
+    h("h4", {}, "Uses"),
+    used.map((u) =>
+      h(
+        "div",
+        { class: "used" },
+        h(
+          "div",
+          {},
+          h("b", {}, human(u.function)),
+          " ",
+          kindBadge(u.kind),
+          " ",
+          h("code", { class: "small" }, u.function),
+        ),
+        u.sentence ? h("div", { class: "layr-muted small" }, u.sentence) : null,
+        (u.formulas || []).map((f) => h("div", { class: "formula" }, tex(f.latex, true))),
+        (u.example?.latex || []).length
+          ? h(
+              "div",
+              { class: "example" },
+              h("div", { class: "flabel" }, `In this run${u.count > 1 ? ` (one of ${u.count} calculations)` : ""}`),
+              u.example.latex.map((l) => tex(l, true)),
+            )
+          : null,
+      ),
+    ),
+  ];
+}
+
+function renderStep(s, exp, ex) {
+  const parts = [
+    h("h3", {}, human(s.function), " ", kindBadge(s.kind)),
+    h("div", { class: "layr-muted small" }, h("code", {}, s.function), s.line ? ` · line ${s.line}` : ""),
+    h("p", { class: "sentence" }, s.sentence || ""),
+  ];
+  if (s.text) parts.push(h("p", { class: "layr-muted" }, s.text));
+  if (s.status === "failed") parts.push(h("div", { class: "banner danger" }, s.error || "failed"));
+  if (s.formulas?.length) {
+    parts.push(h("h4", {}, "Formula"));
+    for (const f of s.formulas) parts.push(h("div", { class: "formula" }, tex(f.latex, true)));
+  }
+  parts.push(...tableChips(s.inputs, s.output, s.function, ex.run ? exp : null));
+  parts.push(...usedBlock(s.used));
+  if (s.code)
+    parts.push(
+      h("details", { class: "code-details" }, h("summary", {}, "The code"), codeBlock(s.code)),
+      s.kind !== "toolbox"
+        ? h(
+            "p",
+            {},
+            h(
+              "a",
+              {
+                href: "#",
+                onclick: (e) => {
+                  e.preventDefault();
+                  go({ view: "method", method: exp.method, fn: s.function, line: null });
+                },
+              },
+              "Open it in the method's code",
+            ),
+          )
+        : null,
+    );
+  return h("div", { class: "sheet" }, parts);
+}
 
 async function tabMethod(body, exp, t) {
-  const ex = await call("explain", { experiment: exp.id, general: S.general });
+  const hasRun = exp.last_run?.status === "done";
+  const general = S.general || !hasRun;
+  const ex = await call("explain", general ? { method: exp.method } : { experiment: exp.id });
   if (t !== token) return;
-  const steps = ex.steps;
-  const sel = steps.find((s) => s.step === S.step) || steps[0];
+  const steps = ex.steps || [];
+  const sel = steps.find((s) => s.function === S.step) || steps[0];
   const list = h(
     "ol",
     { class: "steps" },
@@ -650,9 +956,8 @@ async function tabMethod(body, exp, t) {
         {
           class: `step ${s === sel ? "active" : ""}`,
           onclick: () => {
-            S.step = s.step;
+            S.step = s.function;
             save();
-            put(body);
             tabMethod(body, exp, token);
           },
         },
@@ -660,16 +965,17 @@ async function tabMethod(body, exp, t) {
           "div",
           { class: "step-head" },
           h("span", { class: "stepnum" }, i + 1),
-          h("b", {}, s.title),
+          h("b", {}, human(s.function)),
           h("span", { class: "layr-spacer" }),
-          s.run ? stepStatus(s.run) : null,
+          s.status ? stepStatus(s) : kindBadge(s.kind),
         ),
-        h("div", { class: "step-sentence" }, s.sentence),
-        s.formulas?.[0] ? h("div", { class: "step-formula" }, tex(s.formulas[0].latex)) : null,
+        h("div", { class: "step-sentence" }, s.sentence || ""),
       ),
     ),
   );
-  const mtext = h(
+  const ai = await checkAi();
+  const kept = exp.methods_text || "";
+  const methodsCard = h(
     "div",
     { class: "layr-card methods-text" },
     h(
@@ -677,42 +983,43 @@ async function tabMethod(body, exp, t) {
       { class: "section-head" },
       h("b", {}, "Methods paragraph"),
       h("span", { class: "layr-spacer" }),
-      h(
-        "button",
-        {
-          class: "layr-button small ghost",
-          onclick: () =>
-            navigator.clipboard.writeText(ex.methods_text).then(() => layr.ui.notify("Copied", "success"), fail),
-        },
-        "Copy",
-      ),
+      ai
+        ? h(
+            "button",
+            { class: "layr-button small ghost", onclick: () => draftMethods(exp) },
+            kept ? "Draft again with Claude…" : "Draft with Claude…",
+          )
+        : null,
+      kept
+        ? h(
+            "button",
+            {
+              class: "layr-button small ghost",
+              onclick: () => navigator.clipboard.writeText(kept).then(() => layr.ui.notify("Copied", "success"), fail),
+            },
+            "Copy",
+          )
+        : null,
     ),
-    h("p", { class: S.fullText ? "" : "clamp" }, ex.methods_text),
-    h(
-      "a",
-      {
-        href: "#",
-        class: "small",
-        onclick: (e) => {
-          e.preventDefault();
-          S.fullText = !S.fullText;
-          save();
-          e.target.previousSibling.classList.toggle("clamp", !S.fullText);
-          e.target.textContent = S.fullText ? "Show less" : "Show all";
-        },
-      },
-      S.fullText ? "Show less" : "Show all",
-    ),
+    kept
+      ? [h("p", { class: "clamp" }, kept), h("div", { class: "ai-label" }, "Drafted by Claude, kept by you.")]
+      : h(
+          "p",
+          { class: "layr-muted small" },
+          ai
+            ? "Claude can draft the Methods paragraph for a paper from this method's code and settings."
+            : "Install the Claude Code plugin to have the Methods paragraph drafted from the code.",
+        ),
   );
   const toggle = h(
     "div",
     { class: "seg" },
     h(
       "button",
-      { class: !S.general ? "active" : "", disabled: !ex.run && !S.general, onclick: () => go({ general: false }) },
+      { class: !general ? "active" : "", disabled: !hasRun, onclick: () => go({ general: false }) },
       "With this run's numbers",
     ),
-    h("button", { class: S.general ? "active" : "", onclick: () => go({ general: true }) }, "General"),
+    h("button", { class: general ? "active" : "", onclick: () => go({ general: true }) }, "General"),
   );
   put(
     body,
@@ -725,8 +1032,8 @@ async function tabMethod(body, exp, t) {
         h(
           "div",
           { class: "method-head" },
-          h("b", {}, ex.method.name),
-          h("span", { class: "layr-muted" }, ` version ${ex.method.version}`),
+          h("b", {}, ex.name || exp.method),
+          h("span", { class: "layr-muted" }, ` version ${(ex.method || {}).version ?? ""}`),
           h(
             "a",
             {
@@ -734,123 +1041,47 @@ async function tabMethod(body, exp, t) {
               class: "small",
               onclick: (e) => {
                 e.preventDefault();
-                go({ view: "method", method: ex.method.id, step: null });
+                go({ view: "method", method: exp.method, fn: null });
               },
             },
-            " · the method",
+            " · the code",
           ),
           h("span", { class: "layr-spacer" }),
           toggle,
         ),
-        mtext,
+        methodsCard,
         list,
       ),
-      h("div", { class: "sheet-col" }, sel ? renderSheet(sel, exp) : null),
+      h("div", { class: "sheet-col" }, sel ? renderStep(sel, exp, ex) : null),
     ),
   );
 }
 
-function stepStatus(run) {
-  if (run.status === "failed") return badge("failed", "danger");
-  if (run.status !== "done") return badge(run.status, "");
-  return h("span", { class: "layr-muted small" }, run.ms != null ? `${run.ms} ms` : "");
-}
-
-function renderSheet(s, exp) {
-  const parts = [h("h3", {}, s.title), h("p", { class: "sentence" }, s.sentence)];
-  if (s.note) parts.push(h("p", { class: "layr-muted" }, s.note));
-  if (s.run?.status === "failed") parts.push(h("div", { class: "banner danger" }, s.run.error));
-  if (s.formulas?.length) {
-    parts.push(h("h4", {}, "Formulas"));
-    for (const f of s.formulas)
-      parts.push(h("div", { class: "formula" }, h("div", { class: "flabel" }, f.label), tex(f.latex, true)));
-  }
-  if (s.symbols?.length) {
-    parts.push(
-      h(
-        "table",
-        { class: "symbols" },
-        s.symbols.map((x) =>
-          h(
-            "tr",
-            {},
-            h("td", {}, tex(x.symbol)),
-            h("td", {}, x.meaning),
-            h("td", { class: "layr-muted" }, x.unit || ""),
-          ),
-        ),
-      ),
-    );
-  }
-  if (s.run?.examples?.length) {
-    parts.push(h("h4", {}, "In this run"));
-    for (const x of s.run.examples) {
-      parts.push(
-        h("div", { class: "example" }, h("div", { class: "flabel" }, x.label), x.latex ? tex(x.latex, true) : null),
-      );
+async function draftMethods(exp) {
+  try {
+    setStatus("Claude is writing the Methods paragraph…");
+    const text = await askClaude("methods", { experiment: exp.id });
+    setStatus("");
+    const ta = h("textarea", { class: "layr-textarea", rows: 9 }, text);
+    const keep = await openDialog({
+      title: "Methods paragraph (draft by Claude)",
+      body: [
+        h("div", { class: "ai-label" }, "Drafted by AI from the method's code and settings: check every statement."),
+        ta,
+      ],
+      buttons: [
+        { label: "Close", id: false, kind: "ghost" },
+        { label: "Keep with the experiment", kind: "primary", value: () => ta.value },
+      ],
+    });
+    if (keep) {
+      await call("experiment_update", { experiment: exp.id, methods_text: keep });
+      render();
     }
+  } catch (err) {
+    setStatus("");
+    fail(err);
   }
-  if (s.rules?.length) {
-    parts.push(h("h4", {}, "How it decides"));
-    parts.push(
-      h(
-        "ul",
-        { class: "rules" },
-        s.rules.map((r) => h("li", {}, r)),
-      ),
-    );
-  }
-  if (s.assumptions?.length) {
-    parts.push(h("h4", {}, "Assumptions"));
-    parts.push(
-      h(
-        "ul",
-        { class: "rules" },
-        s.assumptions.map((r) => h("li", {}, r)),
-      ),
-    );
-  }
-  const params = (s.params || []).filter(
-    (p) => p.value != null && p.value !== "" && !(Array.isArray(p.value) && !p.value.length),
-  );
-  if (params.length) {
-    parts.push(h("h4", {}, "Settings used"));
-    parts.push(
-      h(
-        "table",
-        { class: "symbols" },
-        params.map((p) =>
-          h(
-            "tr",
-            {},
-            h("td", {}, p.label || p.id),
-            h("td", {}, fmt(p.value), p.unit ? ` ${p.unit}` : ""),
-            h("td", { class: "layr-muted small" }, p.from ? `experiment setting ${p.from.slice(1)}` : ""),
-          ),
-        ),
-      ),
-    );
-  }
-  const tables = Object.entries(s.run?.outputs || {}).filter(([, o]) => o.kind === "table");
-  if (tables.length) {
-    parts.push(h("h4", {}, "Gives"));
-    parts.push(
-      h(
-        "div",
-        { class: "gives" },
-        tables.map(([port, o]) =>
-          h(
-            "button",
-            { class: "layr-button small", onclick: () => go({ tab: "results", table: `${s.step}.${port}` }) },
-            `${port} (${o.rows} rows)`,
-          ),
-        ),
-      ),
-    );
-  }
-  if (s.code) parts.push(h("p", { class: "code" }, "Computed with ", h("code", {}, s.code)));
-  if (s.reference) parts.push(h("p", { class: "layr-muted small" }, "Reference: ", s.reference));
-  return h("div", { class: "sheet" }, parts);
 }
 
 // ---------- Peaks tab: review the integration, drag the boundaries
@@ -1388,15 +1619,24 @@ async function tabResults(body, exp, t) {
     put(body, h("div", { class: "layr-empty" }, "No results yet: run the experiment."));
     return;
   }
-  const [run, m] = await Promise.all([
-    call("run_get", { experiment: exp.id }),
-    call("method_get", { method: exp.method }),
-  ]);
+  const run = await call("run_get", { experiment: exp.id });
   if (t !== token) return;
-  const outs = m.method.outputs || {};
-  const tableNames = Object.keys(outs).filter((n) => !(outs[n].from || "").endsWith(".figure"));
-  const figs = Object.keys(outs).filter((n) => (outs[n].from || "").endsWith(".figure"));
-  if (!S.table || !(tableNames.includes(S.table) || S.table.includes("."))) S.table = tableNames[0];
+  if (run.legacy) {
+    put(
+      body,
+      h(
+        "div",
+        { class: "layr-empty" },
+        "This run is from an older version of the plugin: press Run to calculate it again.",
+      ),
+    );
+    return;
+  }
+  const outs = run.outputs || {};
+  const tableNames = Object.keys(outs).filter((n) => outs[n].kind === "table");
+  const figs = Object.keys(outs).filter((n) => outs[n].kind === "figure");
+  const stepTables = (run.steps || []).filter((s) => s.table).map((s) => `step:${s.function}`);
+  if (!S.table || !(tableNames.includes(S.table) || stepTables.includes(S.table))) S.table = tableNames[0];
   const figBox = h("div", { class: "figs" });
   for (const f of figs) {
     layr.tools
@@ -1413,8 +1653,16 @@ async function tabResults(body, exp, t) {
   const sel = h(
     "select",
     { class: "layr-select", onchange: (e) => go({ table: e.target.value }) },
-    tableNames.map((n) => h("option", { value: n, selected: n === S.table }, outs[n].label || n)),
-    S.table && !tableNames.includes(S.table) ? h("option", { value: S.table, selected: true }, S.table) : null,
+    h(
+      "optgroup",
+      { label: "Results" },
+      tableNames.map((n) => h("option", { value: n, selected: n === S.table }, outs[n].label || n)),
+    ),
+    h(
+      "optgroup",
+      { label: "Each step's table" },
+      stepTables.map((n) => h("option", { value: n, selected: n === S.table }, human(n.slice(5)))),
+    ),
   );
   const tbox = h("div", {}, h("span", { class: "layr-spinner" }));
   put(
@@ -1427,11 +1675,15 @@ async function tabResults(body, exp, t) {
         "div",
         { class: "section-head" },
         sel,
-        h("span", { class: "layr-muted small" }, " Click a row to see how it was calculated."),
+        h("span", { class: "layr-muted small" }, " Click a number to see how it was calculated."),
       ),
       tbox,
     ),
   );
+  if (!S.table) {
+    put(tbox, h("div", { class: "layr-empty" }, "This run returned no tables."));
+    return;
+  }
   const data = await call("result_table", { experiment: exp.id, table: S.table, limit: 2000 });
   if (t !== token) return;
   const filterCols = data.columns.filter((c) =>
@@ -1463,42 +1715,70 @@ async function tabResults(body, exp, t) {
         ),
         h("span", { class: "layr-muted small" }, `${rows.length} of ${data.total} rows`),
       ),
-      table(rows, data.columns, { onRow: (r) => showProvenance(exp, S.table, r) }),
+      table(rows, data.columns, { onCell: (r, c) => showProvenance(exp, S.table, r, c) }),
     );
   };
   draw();
 }
 
-async function showProvenance(exp, tableName, row) {
-  const keys = ["injection", "compound"].every((k) => k in row)
-    ? ["injection", "compound"]
-    : ["strain", "substrate_fed", "compound"].every((k) => k in row)
-      ? ["strain", "substrate_fed", "compound"]
-      : ["strain", "substrate", "compound", "time_min"].filter((k) => k in row);
+const PROV_KEYS = [
+  "injection",
+  "compound",
+  "strain",
+  "substrate",
+  "substrate_fed",
+  "time_min",
+  "interval_min",
+  "replicate",
+  "std_series",
+  "level",
+  "category",
+];
+
+async function showProvenance(exp, tableName, row, column) {
+  let keys = PROV_KEYS.filter((k) => k in row && row[k] !== null && row[k] !== "" && k !== column);
+  if (!keys.length) keys = Object.keys(row).filter((k) => typeof row[k] === "string");
   const where = Object.fromEntries(keys.map((k) => [k, row[k]]));
   try {
-    const p = keys.length ? await call("provenance", { experiment: exp.id, table: tableName, where }) : { chain: [] };
-    const body = p.chain.length
-      ? p.chain.map((c, i) =>
+    const p = await call("provenance", { experiment: exp.id, table: tableName, where, column });
+    const chain = p.chain || [];
+    const body = chain.length
+      ? chain.map((c, i) =>
           h(
             "div",
-            { class: "prov-step" },
-            h("div", {}, h("span", { class: "stepnum" }, i + 1), h("b", {}, c.title)),
-            c.examples.length
-              ? c.examples.map((x) =>
-                  h("div", { class: "example" }, h("div", { class: "flabel" }, x.label), tex(x.latex, true)),
+            { class: `prov-step level-${Math.min(c.level || 0, 4)}` },
+            h(
+              "div",
+              {},
+              h("span", { class: "stepnum" }, i + 1),
+              h("b", {}, human(c.function)),
+              " ",
+              kindBadge(c.kind),
+              c.field ? h("span", { class: "layr-muted small" }, ` (its ${c.field})`) : null,
+              c.row != null ? h("span", { class: "layr-muted small" }, ` (row ${c.row + 1} of a column)`) : null,
+              " = ",
+              h("b", {}, fmt(c.value)),
+            ),
+            c.sentence ? h("div", { class: "layr-muted small" }, c.sentence) : null,
+            (c.latex_numbers || []).length
+              ? h(
+                  "div",
+                  { class: "example" },
+                  c.latex_numbers.map((l) => tex(l, true)),
                 )
-              : h("div", { class: "layr-muted small" }, "(from the table above)"),
+              : (c.formulas || []).map((f) => h("div", { class: "formula" }, tex(f.latex, true))),
+            h(
+              "div",
+              { class: "prov-inputs small" },
+              Object.entries(c.inputs || {})
+                .filter(([, v]) => v !== null && typeof v !== "object")
+                .map(([k, v]) => h("span", {}, h("code", {}, k), " ", fmt(v))),
+            ),
           ),
         )
-      : h(
-          "p",
-          { class: "layr-muted" },
-          "This row combines several values (a mean, a regression or a sum): the step's own explanation in the " +
-            "Method tab shows its formula with this run's numbers.",
-        );
+      : h("p", { class: "layr-muted" }, p.note || "No recorded formula returned this number.");
     await openDialog({
-      title: `How this row was calculated`,
+      title: `How ${column} = ${fmt(row[column])} was calculated`,
       body: [h("div", { class: "layr-muted small" }, keys.map((k) => `${k} ${row[k]}`).join(" · ")), body],
       buttons: [{ label: "Close", id: null }],
     });
@@ -1965,28 +2245,544 @@ function rowsEditor(rows, cols, onChange) {
   return wrap;
 }
 
-// ------------------------------------------------------------------------------------------------ method
+// ------------------------------------------------------------------------------------------------ method (code)
+
+// The method editor: the outline on the left, the code in the middle (CodeMirror, Python), and on the right the
+// function at the cursor explained (its sentence, its formula drawn from the code, the last run's numbers) and the
+// style checker's messages. Saving makes a new version; a change Claude proposed waits in a banner.
+let ME = null;
+let toolboxCache = null;
+
+async function toolboxList() {
+  if (!toolboxCache)
+    toolboxCache = await call("toolbox_docs").then(
+      (r) => r.functions || [],
+      () => [],
+    );
+  return toolboxCache;
+}
+
+function diffBlock(lines) {
+  return h(
+    "pre",
+    { class: "diff" },
+    (lines || []).map((l) =>
+      h(
+        "div",
+        {
+          class:
+            l.startsWith("+++") || l.startsWith("---")
+              ? "meta"
+              : l.startsWith("+")
+                ? "add"
+                : l.startsWith("-")
+                  ? "del"
+                  : l.startsWith("@@")
+                    ? "hunk"
+                    : "",
+        },
+        l || " ",
+      ),
+    ),
+  );
+}
+
+function comparisonBlock(c) {
+  if (!c) return null;
+  if (c.status === "running")
+    return h(
+      "div",
+      { class: "layr-muted small" },
+      h("span", { class: "layr-spinner" }),
+      " Rerunning the reference experiment…",
+    );
+  if (c.status === "failed") return h("div", { class: "layr-error small" }, `The comparison failed: ${c.error || ""}`);
+  const moved = (c.tables || []).filter((t) => t.moved);
+  return h(
+    "div",
+    { class: "comparison" },
+    h(
+      "div",
+      {},
+      h("b", {}, c.summary || ""),
+      c.experiment_title ? h("span", { class: "layr-muted" }, ` on ${c.experiment_title}`) : null,
+    ),
+    moved.map((t) =>
+      h(
+        "details",
+        {},
+        h(
+          "summary",
+          {},
+          h("b", {}, t.table),
+          ` · ${t.cells_changed || 0} numbers` +
+            (t.rows_added ? ` · ${t.rows_added} rows added` : "") +
+            (t.rows_removed ? ` · ${t.rows_removed} rows removed` : "") +
+            (t.added ? " · new" : "") +
+            (t.removed ? " · gone" : ""),
+        ),
+        h(
+          "table",
+          { class: "layr-table small" },
+          (t.changes || []).map((ch) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, Object.values(ch.key || {}).join(" · ")),
+              h("td", {}, ch.column || ch.row || ""),
+              h("td", { class: "num" }, fmt(ch.before)),
+              h("td", {}, "→"),
+              h("td", { class: "num" }, fmt(ch.after)),
+              h(
+                "td",
+                { class: "num layr-muted" },
+                ch.change_pct != null ? `${ch.change_pct > 0 ? "+" : ""}${fmt(ch.change_pct)} %` : "",
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
 
 async function renderMethod(t) {
-  const [m, versions, ex] = await Promise.all([
+  const [m, docs, exps] = await Promise.all([
     call("method_get", { method: S.method }),
-    call("method_versions", { method: S.method }),
-    call("explain", { method: S.method }),
+    toolboxList(),
+    call("experiments"),
   ]);
   if (t !== token) return;
-  const method = m.method;
-  layr.panel.setTitle(method.name).catch(() => {});
-  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: `${method.name} (method)` }]);
-  setActions([h("button", { class: "layr-button ghost", onclick: () => duplicate(method) }, "Duplicate…")]);
-  const sel = ex.steps.find((s) => s.step === S.step) || ex.steps[0];
-  const diffBox = h("div", {});
-  const vlist = h(
-    "ul",
-    { class: "layr-list lined versions" },
-    versions
-      .slice()
-      .reverse()
-      .map((v) =>
+  await checkAi();
+  layr.panel.setTitle(m.name).catch(() => {});
+  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: `${m.name} (method)` }]);
+  const mine = exps.filter((e) => e.method === m.id);
+  const keep = ME && ME.method === m.id && ME.dirty ? ME.cm.getValue() : null;
+  const numbersExp = mine.some((e) => e.experiment === S.numbersExp)
+    ? S.numbersExp
+    : m.reference || mine.find((e) => e.last_run?.status === "done")?.experiment || null;
+  ME = {
+    method: m.id,
+    m,
+    saved: m.source,
+    dirty: false,
+    messages: m.check || [],
+    summary: m.summary,
+    fn: S.fn || null,
+    toolbox: docs,
+    exps: mine,
+    numbersExp,
+    ai: null,
+  };
+  const els = {
+    banners: h("div", { class: "mv-banners" }),
+    outline: h("div", { class: "mv-outline" }),
+    editor: h("div", { class: "mv-editor" }),
+    status: h("div", { class: "mv-status small" }),
+    inspector: h("div", { class: "mv-inspector" }),
+  };
+  ME.els = els;
+  put(
+    view,
+    h(
+      "div",
+      { class: "mv" },
+      els.banners,
+      h(
+        "div",
+        { class: "mv-grid" },
+        els.outline,
+        h("div", { class: "mv-middle" }, els.editor, els.status),
+        els.inspector,
+      ),
+    ),
+  );
+  const cm = window.CodeMirror(els.editor, {
+    value: keep ?? m.source,
+    mode: "python",
+    lineNumbers: true,
+    indentUnit: 4,
+    tabSize: 4,
+    indentWithTabs: false,
+    matchBrackets: true,
+    styleActiveLine: true,
+    lineWrapping: false,
+    gutters: ["mv-lint", "CodeMirror-linenumbers"],
+    extraKeys: {
+      "Ctrl-S": () => saveMethod(),
+      "Cmd-S": () => saveMethod(),
+      "Ctrl-/": "toggleComment",
+      Tab: (c) => (c.somethingSelected() ? c.indentSelection("add") : c.replaceSelection("    ", "end")),
+      "Shift-Tab": (c) => c.indentSelection("subtract"),
+    },
+  });
+  ME.cm = cm;
+  setTimeout(() => cm.refresh(), 0);
+  let checkTimer = null;
+  cm.on("changes", () => {
+    ME.dirty = cm.getValue() !== ME.saved;
+    methodActions();
+    drawStatus();
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(recheck, 500);
+  });
+  let cursorTimer = null;
+  cm.on("cursorActivity", () => {
+    clearTimeout(cursorTimer);
+    cursorTimer = setTimeout(() => {
+      const line = cm.getCursor().line + 1;
+      const f = (ME.summary?.outline || []).find((x) => x.line <= line && line <= x.end_line);
+      if (f && f.name !== ME.fn) {
+        ME.fn = f.name;
+        S.fn = f.name;
+        save();
+        drawOutline();
+        drawInspector();
+      }
+    }, 250);
+  });
+  methodActions();
+  drawBanners();
+  drawOutline();
+  drawLint();
+  drawStatus();
+  if (keep) recheck();
+  const target = S.line || (ME.summary?.outline || []).find((x) => x.name === ME.fn)?.line;
+  if (target) {
+    cm.setCursor(target - 1, 0);
+    setTimeout(() => cm.scrollIntoView({ line: target - 1, ch: 0 }, 120), 30);
+  }
+  S.line = null;
+  drawInspector();
+}
+
+function methodActions() {
+  if (!ME) return;
+  setActions([
+    h("button", { class: "layr-button ghost", onclick: () => go({ view: "guide" }) }, "Python guide"),
+    h("button", { class: "layr-button ghost", onclick: showVersions }, "Versions"),
+    h(
+      "button",
+      {
+        class: "layr-button ghost",
+        onclick: (e) =>
+          layr.ui.contextMenu(
+            [
+              {
+                label: "Folder that runs without layr (zip)",
+                icon: "folder_zip",
+                run: () => exportFolder(ME.numbersExp ? { experiment: ME.numbersExp } : { method: ME.method }),
+              },
+              { label: "Duplicate the method…", icon: "content_copy", run: () => duplicate(ME.m) },
+            ],
+            e,
+          ),
+      },
+      "More ▾",
+    ),
+    h("button", { class: "layr-button primary", disabled: !ME.dirty, onclick: () => saveMethod() }, "Save"),
+  ]);
+}
+
+function drawStatus() {
+  const errors = ME.messages.filter((x) => x.level === "error").length;
+  const warnings = ME.messages.length - errors;
+  put(
+    ME.els.status,
+    h(
+      "span",
+      { class: ME.dirty ? "dirty" : "" },
+      ME.dirty
+        ? "Unsaved changes"
+        : ME.m.draft_only
+          ? "Proposed by Claude: save to accept it"
+          : `Saved · version ${ME.m.version}`,
+    ),
+    h("span", { class: "layr-spacer" }),
+    errors ? h("span", { class: "lint-count error" }, `${errors} error${errors > 1 ? "s" : ""}`) : null,
+    warnings ? h("span", { class: "lint-count warning" }, `${warnings} style note${warnings > 1 ? "s" : ""}`) : null,
+    !errors && !warnings ? h("span", { class: "lint-count ok" }, "Style checker: all good") : null,
+  );
+}
+
+function drawLint() {
+  const cm = ME.cm;
+  cm.clearGutter("mv-lint");
+  for (const ln of ME.errLines || []) cm.removeLineClass(ln, "background", "lint-error-line");
+  ME.errLines = [];
+  for (const msg of ME.messages) {
+    if (!msg.line) continue;
+    const symbol = msg.level === "error" ? "●" : "▲";
+    const mark = h("span", { class: `lint-mark ${msg.level}`, title: msg.message }, symbol);
+    cm.setGutterMarker(msg.line - 1, "mv-lint", mark);
+    if (msg.level === "error") {
+      const handle = cm.addLineClass(msg.line - 1, "background", "lint-error-line");
+      ME.errLines.push(handle);
+    }
+  }
+}
+
+async function recheck() {
+  if (!ME) return;
+  const source = ME.cm.getValue();
+  try {
+    const r = await call("method_check", { source });
+    if (!ME || ME.cm.getValue() !== source) return;
+    ME.messages = r.messages;
+    if (r.summary) ME.summary = r.summary;
+    drawLint();
+    drawStatus();
+    drawOutline();
+    drawInspector();
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+function jumpTo(line, fnName) {
+  if (fnName) {
+    ME.fn = fnName;
+    S.fn = fnName;
+    save();
+  }
+  ME.cm.focus();
+  ME.cm.setCursor(Math.max(0, line - 1), 0);
+  ME.cm.scrollIntoView({ line: Math.max(0, line - 1), ch: 0 }, 120);
+  drawOutline();
+  drawInspector();
+}
+
+function drawOutline() {
+  const outline = ME.summary?.outline || [];
+  const groups = [
+    ["recipe", "Recipe"],
+    ["step", "Steps"],
+    ["formula", "Formulas"],
+    ["helper", "Helpers"],
+  ];
+  const count = (name) => ME.messages.filter((x) => x.function === name).length;
+  put(
+    ME.els.outline,
+    groups.map(([kind, label]) => {
+      const fns = outline.filter((f) => f.kind === kind);
+      if (!fns.length) return null;
+      return h(
+        "div",
+        { class: "ol-group" },
+        h("div", { class: "ol-head" }, label, h("span", { class: "layr-muted" }, ` ${fns.length}`)),
+        fns.map((f) =>
+          h(
+            "div",
+            {
+              class: `ol-item ${f.name === ME.fn ? "active" : ""}`,
+              title: f.sentence || "",
+              onclick: () => jumpTo(f.line, f.name),
+            },
+            h("span", { class: "ol-name" }, f.name),
+            count(f.name)
+              ? h("span", { class: "lint-dot", title: `${count(f.name)} style notes` }, count(f.name))
+              : null,
+          ),
+        ),
+      );
+    }),
+    h(
+      "details",
+      { class: "ol-group", open: ME.fn && !outline.some((f) => f.name === ME.fn) ? true : null },
+      h("summary", { class: "ol-head" }, "Toolbox", h("span", { class: "layr-muted" }, " read only")),
+      (ME.toolbox || []).map((t) =>
+        h(
+          "div",
+          {
+            class: `ol-item toolbox ${t.name === ME.fn ? "active" : ""}`,
+            title: t.sentence || "",
+            onclick: () => {
+              ME.fn = t.name;
+              S.fn = t.name;
+              save();
+              drawOutline();
+              drawInspector();
+            },
+          },
+          h("span", { class: "ol-name" }, t.name),
+        ),
+      ),
+    ),
+  );
+}
+
+function drawBanners() {
+  const m = ME.m;
+  const out = [];
+  const d = m.draft;
+  if (d && !m.draft_only) {
+    out.push(
+      h(
+        "div",
+        { class: "banner draft" },
+        h(
+          "div",
+          {},
+          h("b", {}, "Claude proposed a change"),
+          ` (${d.by || "an AI agent"}, ${when(d.at)}): `,
+          d.change || "",
+          d.messages?.length ? h("span", { class: "layr-muted" }, ` · ${d.messages.length} style notes`) : null,
+        ),
+        comparisonBlock(d.comparison),
+        h(
+          "div",
+          { class: "row-gap" },
+          h("button", { class: "layr-button small", onclick: showDraft }, "Show the changed lines"),
+          h("button", { class: "layr-button small primary", onclick: () => decideDraft("accept") }, "Accept"),
+          h("button", { class: "layr-button small ghost", onclick: () => decideDraft("reject") }, "Reject"),
+        ),
+      ),
+    );
+  }
+  if (m.draft_only) {
+    out.push(
+      h(
+        "div",
+        { class: "banner draft" },
+        h("b", {}, "A new method Claude proposed. "),
+        "Read it; accept it to use it, or change it and save.",
+        h(
+          "div",
+          { class: "row-gap" },
+          h("button", { class: "layr-button small primary", onclick: () => decideDraft("accept") }, "Accept"),
+          h("button", { class: "layr-button small ghost", onclick: () => decideDraft("reject") }, "Reject"),
+        ),
+      ),
+    );
+  }
+  const latest = (m.versions || [])[m.versions.length - 1];
+  if (latest?.comparison && latest.version === m.version) {
+    out.push(
+      h(
+        "div",
+        { class: "banner" },
+        h("div", {}, `Version ${latest.version} on the reference experiment: `),
+        comparisonBlock(latest.comparison),
+      ),
+    );
+  }
+  put(ME.els.banners, out);
+}
+
+async function decideDraft(decision) {
+  try {
+    if (ME.dirty && decision === "accept") {
+      const ok = await openDialog({
+        title: "Accept Claude's change?",
+        body: "Your unsaved changes in the editor are replaced by the accepted version.",
+        buttons: [
+          { label: "Cancel", id: false, kind: "ghost" },
+          { label: "Accept", id: true, kind: "primary" },
+        ],
+      });
+      if (!ok) return;
+    }
+    await call("draft_decide", { method: ME.method, decision });
+    ME.dirty = false;
+    layr.ui.notify(decision === "accept" ? "Accepted: it is the method's newest version now" : "Rejected", "success");
+    if (decision === "reject" && ME.m.draft_only) go({ view: "home", method: null });
+    else render();
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function showDraft() {
+  try {
+    const d = (await call("draft_get", { method: ME.method })).draft;
+    if (!d) return render();
+    await openDialog({
+      title: "Claude's proposed change",
+      body: [
+        h("div", { class: "layr-muted small" }, `${d.by || ""} · ${when(d.at)} · ${d.change || ""}`),
+        comparisonBlock(d.comparison),
+        (d.messages || []).length
+          ? h(
+              "ul",
+              { class: "small" },
+              d.messages.map((x) => h("li", { class: x.level }, `line ${x.line}: ${x.message}`)),
+            )
+          : null,
+        diffBlock(d.diff),
+      ],
+      buttons: [{ label: "Close", id: null }],
+    });
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function saveMethod() {
+  if (!ME || !ME.dirty) return;
+  const source = ME.cm.getValue();
+  const note = h("input", {
+    class: "layr-input",
+    placeholder: "e.g. Rates from 0-20 min instead of 0-30",
+    value: ME.fn ? `Changed ${ME.fn}` : "",
+  });
+  setTimeout(() => note.select(), 30);
+  const change = await openDialog({
+    title: "Save a new version",
+    body: [h("label", { class: "layr-label" }, "What changed, and why? (for the version history)"), note],
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      { label: "Save", kind: "primary", value: () => note.value.trim() || "Changed in the editor" },
+    ],
+  });
+  if (!change) return;
+  try {
+    const r = await call("method_write", { method: ME.method, source, change });
+    if (!r.saved) {
+      ME.messages = r.messages || ME.messages;
+      drawLint();
+      drawStatus();
+      layr.ui.notify(r.note || "Not saved: fix the errors (marked ● next to the lines) first.", "error");
+      return;
+    }
+    ME.saved = source;
+    ME.dirty = false;
+    layr.ui.notify(`Saved as version ${r.version}`, "success");
+    await refreshMethodMeta();
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// After a save or an event: new versions, drafts and comparisons, without touching the code being edited.
+async function refreshMethodMeta() {
+  if (!ME) return;
+  try {
+    const m = await call("method_get", { method: ME.method });
+    if (!ME) return;
+    ME.m = m;
+    if (!ME.dirty && m.source !== ME.cm.getValue()) {
+      const cur = ME.cm.getCursor();
+      ME.cm.setValue(m.source);
+      ME.cm.setCursor(cur);
+      ME.dirty = false;
+    }
+    ME.saved = ME.dirty ? ME.saved : m.source;
+    methodActions();
+    drawBanners();
+    drawStatus();
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+async function showVersions() {
+  try {
+    const versions = (await call("method_versions", { method: ME.method })).slice().reverse();
+    const box = h("div", {});
+    const list = h(
+      "ul",
+      { class: "layr-list lined versions" },
+      versions.map((v) =>
         h(
           "li",
           {},
@@ -1994,6 +2790,7 @@ async function renderMethod(t) {
           " ",
           h("span", { class: "layr-muted small" }, `${v.by || ""} ${when(v.at)}`),
           h("div", { class: "small" }, v.summary),
+          v.comparison ? comparisonBlock(v.comparison) : null,
           h(
             "div",
             {},
@@ -2004,47 +2801,28 @@ async function renderMethod(t) {
                     class: "layr-button small ghost",
                     onclick: async () => {
                       const lines = await call("method_diff", {
-                        method: method.id,
-                        from_version: v.version - 1,
+                        method: ME.method,
+                        from_version: versions.find((x) => x.version < v.version)?.version ?? 1,
                         to_version: v.version,
                       }).catch(fail);
-                      put(
-                        diffBox,
-                        h(
-                          "div",
-                          { class: "layr-card" },
-                          h("b", {}, `Changes in version ${v.version}`),
-                          h(
-                            "ul",
-                            { class: "small" },
-                            (lines || []).map((l) => h("li", {}, l)),
-                          ),
-                        ),
-                      );
+                      put(box, h("b", {}, `Changes in version ${v.version}`), diffBlock(lines));
                     },
                   },
-                  "Changes",
+                  "Changed lines",
                 )
               : null,
-            v.version !== method.version
+            v.version !== ME.m.version
               ? h(
                   "button",
                   {
                     class: "layr-button small ghost",
                     onclick: async () => {
-                      if (
-                        !(await openDialog({
-                          title: `Go back to version ${v.version}?`,
-                          body: "It is saved as a new version, so nothing is lost.",
-                          buttons: [
-                            { label: "Cancel", id: false, kind: "ghost" },
-                            { label: "Go back", id: true, kind: "primary" },
-                          ],
-                        }))
-                      )
-                        return;
                       try {
-                        await call("method_revert", { method: method.id, version: v.version });
+                        const r = await call("method_revert", { method: ME.method, version: v.version });
+                        dialog.close();
+                        if (r.saved)
+                          layr.ui.notify(`Back to version ${v.version}: saved as version ${r.version}`, "success");
+                        ME.dirty = false;
                         render();
                       } catch (err) {
                         fail(err);
@@ -2057,55 +2835,299 @@ async function renderMethod(t) {
           ),
         ),
       ),
-  );
-  put(
-    view,
-    h(
-      "div",
-      { class: "method-grid" },
-      h(
-        "div",
-        { class: "steps-col" },
-        h("p", {}, method.description),
-        m.problems.length
-          ? h(
-              "div",
-              { class: "banner danger" },
-              m.problems.map((p) => h("div", {}, `${p.step}: ${p.message}`)),
-            )
-          : null,
+    );
+    await openDialog({ title: "Versions", body: [list, box], buttons: [{ label: "Close", id: null }] });
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function drawInspector() {
+  if (!ME) return;
+  const box = ME.els.inspector;
+  const name = ME.fn;
+  const msgs = ME.messages;
+  const allMessages = msgs.length
+    ? [
+        h("h4", {}, `Style checker (${msgs.length})`),
         h(
-          "div",
-          { class: "layr-card methods-text" },
-          h("b", {}, "Methods paragraph (general)"),
-          h("p", {}, ex.methods_text),
-        ),
-        h(
-          "ol",
-          { class: "steps" },
-          ex.steps.map((s, i) =>
+          "ul",
+          { class: "lint-list" },
+          msgs.map((x) =>
             h(
               "li",
-              { class: `step ${s === sel ? "active" : ""}`, onclick: () => go({ step: s.step }) },
-              h(
-                "div",
-                { class: "step-head" },
-                h("span", { class: "stepnum" }, i + 1),
-                h("b", {}, s.title),
-                h("span", { class: "layr-spacer" }),
-                h("code", { class: "small" }, s.type),
-              ),
-              h("div", { class: "step-sentence" }, s.sentence),
+              { class: `${x.level} click`, onclick: () => x.line && jumpTo(x.line, x.function) },
+              h("b", {}, x.line ? `line ${x.line}: ` : ""),
+              x.message,
             ),
           ),
         ),
-        h("h4", {}, "Versions"),
-        vlist,
-        diffBox,
+      ]
+    : [];
+  const picker = ME.exps.length
+    ? h(
+        "div",
+        { class: "numbers-from small" },
+        "Numbers from ",
+        h(
+          "select",
+          {
+            class: "layr-select small",
+            onchange: (e) => {
+              ME.numbersExp = e.target.value || null;
+              S.numbersExp = ME.numbersExp;
+              save();
+              drawInspector();
+            },
+          },
+          h("option", { value: "" }, "no experiment"),
+          ME.exps.map((e) => h("option", { value: e.experiment, selected: e.experiment === ME.numbersExp }, e.title)),
+        ),
+        ME.numbersExp
+          ? h(
+              "label",
+              { class: "ref-toggle", title: "Rerun it after every change and list the numbers that moved" },
+              h("input", {
+                type: "checkbox",
+                checked: ME.m.reference === ME.numbersExp,
+                onchange: async (e) => {
+                  try {
+                    await call("method_reference", {
+                      method: ME.method,
+                      experiment: e.target.checked ? ME.numbersExp : null,
+                    });
+                    await refreshMethodMeta();
+                  } catch (err) {
+                    fail(err);
+                  }
+                },
+              }),
+              " reference",
+            )
+          : null,
+      )
+    : h("div", { class: "layr-muted small" }, "No experiment uses this method yet: its numbers show here after a run.");
+  if (!name) {
+    const s = ME.summary || {};
+    put(
+      box,
+      h(
+        "div",
+        { class: "sheet" },
+        h("h3", {}, ME.m.name),
+        h("p", { class: "sentence" }, ME.m.description || ""),
+        h(
+          "p",
+          { class: "layr-muted small" },
+          `${(s.outline || []).length} functions · ${(s.settings || []).length} settings · inputs: ` +
+            ((s.inputs || []).map((i) => i.id).join(", ") || "none"),
+        ),
+        h("p", { class: "layr-muted" }, "Put the cursor in a function, or pick one on the left: it is explained here."),
+        picker,
+        allMessages,
       ),
-      h("div", { class: "sheet-col" }, sel ? renderSheet(sel, null) : null),
+    );
+    return;
+  }
+  put(box, h("div", { class: "sheet" }, h("h3", {}, name), h("span", { class: "layr-spinner" })));
+  let v;
+  try {
+    v = await call("explain_function", {
+      function: name,
+      source: ME.cm.getValue(),
+      experiment: ME.numbersExp || undefined,
+    });
+  } catch (err) {
+    if (ME?.fn === name)
+      put(
+        box,
+        h(
+          "div",
+          { class: "sheet" },
+          h("h3", {}, name),
+          h("div", { class: "layr-error" }, err.message),
+          picker,
+          allMessages,
+        ),
+      );
+    return;
+  }
+  if (!ME || ME.fn !== name) return;
+  const mine = msgs.filter((x) => x.function === name);
+  const parts = [
+    h("h3", {}, human(name), " ", kindBadge(v.kind)),
+    h(
+      "div",
+      { class: "layr-muted small" },
+      h("code", {}, v.signature || name),
+      v.line ? ` · line ${v.line}` : v.module ? ` · ${v.module}` : "",
     ),
-  );
+    h("p", { class: "sentence" }, v.sentence || h("span", { class: "layr-muted" }, "(no docstring yet)")),
+  ];
+  if (v.text) parts.push(h("p", { class: "layr-muted small pre-line" }, v.text));
+  if (v.formulas?.length) {
+    parts.push(h("h4", {}, "Formula"));
+    for (const f of v.formulas) parts.push(h("div", { class: "formula", title: f.code || "" }, tex(f.latex, true)));
+  }
+  parts.push(picker);
+  if (v.step)
+    parts.push(
+      ...tableChips(
+        v.step.inputs,
+        v.step.output,
+        name,
+        ME.exps.find((e) => e.experiment === ME.numbersExp) ? { id: ME.numbersExp } : null,
+      ),
+    );
+  if (v.count != null) {
+    parts.push(
+      h(
+        "h4",
+        {},
+        `In the last run: ${v.count} call${v.count === 1 ? "" : "s"}${v.kept < v.count ? ` (${v.kept} kept)` : ""}`,
+      ),
+    );
+    if (v.example?.latex?.length)
+      parts.push(
+        h(
+          "div",
+          { class: "example" },
+          h(
+            "div",
+            { class: "flabel" },
+            v.example.row != null ? `row ${v.example.row + 1} of ${v.example.column_length}` : "first call",
+          ),
+          v.example.latex.map((l) => tex(l, true)),
+        ),
+      );
+    const sample = (v.sample || []).filter((c) => !c.error);
+    if (sample.length && v.kind !== "step" && v.kind !== "recipe") {
+      const names = Object.keys(sample[0].inputs || {});
+      parts.push(
+        h(
+          "div",
+          { class: "table-wrap" },
+          h(
+            "table",
+            { class: "layr-table small calls" },
+            h(
+              "tr",
+              {},
+              names.map((k) => h("th", {}, k)),
+              h("th", {}, "→ result"),
+            ),
+            sample.map((c) =>
+              h(
+                "tr",
+                {},
+                names.map((k) =>
+                  h(
+                    "td",
+                    { class: typeof c.inputs[k] === "number" ? "num" : "" },
+                    typeof c.inputs[k] === "object" ? "…" : fmt(c.inputs[k]),
+                  ),
+                ),
+                h(
+                  "td",
+                  { class: "num" },
+                  typeof c.result === "object" ? JSON.stringify(c.result).slice(0, 60) : fmt(c.result),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    const err = (v.sample || []).find((c) => c.error);
+    if (err) parts.push(h("div", { class: "banner danger" }, err.error));
+  } else if (ME.numbersExp) {
+    parts.push(h("div", { class: "layr-muted small" }, "Not called in the last run (or it hasn't run yet)."));
+  }
+  if (mine.length)
+    parts.push(
+      h("h4", {}, "Style notes"),
+      h(
+        "ul",
+        { class: "lint-list" },
+        mine.map((x) =>
+          h(
+            "li",
+            { class: `${x.level} click`, onclick: () => x.line && jumpTo(x.line) },
+            h("b", {}, `line ${x.line}: `),
+            x.message,
+          ),
+        ),
+      ),
+    );
+  if (v.kind === "toolbox") {
+    parts.push(
+      h("h4", {}, "The code (toolbox, read only)"),
+      codeBlock(v.code),
+      v.is_function
+        ? h(
+            "button",
+            {
+              class: "layr-button small",
+              onclick: async () => {
+                try {
+                  const r = await call("toolbox_copy", { name, source: ME.cm.getValue() });
+                  ME.cm.setValue(r.source);
+                  layr.ui.notify(`${name} is copied into your method: change it there, then save`, "success");
+                  const f = (r.messages && ME.summary?.outline) || [];
+                  recheck().then(() => {
+                    const line = (ME.summary?.outline || []).find((x) => x.name === name)?.line;
+                    if (line) jumpTo(line, name);
+                  });
+                  void f;
+                } catch (err) {
+                  fail(err);
+                }
+              },
+            },
+            "Copy into my method to change it",
+          )
+        : null,
+    );
+  }
+  if (AI.claude) {
+    const aiBox = h("div", {});
+    const ask = async () => {
+      const selection = ME.cm.getSelection();
+      put(
+        aiBox,
+        h("div", { class: "layr-muted small" }, h("span", { class: "layr-spinner" }), " Claude is reading the code…"),
+      );
+      try {
+        const text = await askClaude(
+          "explain",
+          selection.trim()
+            ? { source: ME.cm.getValue(), code: selection }
+            : v.kind === "toolbox"
+              ? { source: ME.cm.getValue(), code: v.code }
+              : { source: ME.cm.getValue(), function: name },
+        );
+        ME.ai = { fn: name, text };
+        put(aiBox, aiAnswer(text));
+      } catch (err) {
+        put(aiBox, h("div", { class: "layr-error small" }, err.message));
+      }
+    };
+    parts.push(
+      h(
+        "div",
+        { class: "row-gap" },
+        h(
+          "button",
+          { class: "layr-button small", onclick: ask, title: "Select lines first to explain only those" },
+          "Explain in plain words (AI)",
+        ),
+      ),
+      aiBox,
+    );
+    if (ME.ai?.fn === name) put(aiBox, aiAnswer(ME.ai.text));
+  }
+  parts.push(...allMessages);
+  put(box, h("div", { class: "sheet" }, parts));
 }
 
 async function duplicate(method) {
@@ -2127,11 +3149,45 @@ async function duplicate(method) {
   if (!ok) return;
   try {
     const r = await call("method_create", { method: id.value.trim(), name: name.value.trim(), copy_of: method.id });
-    if (!r.saved) return layr.ui.notify(r.problems.map((p) => p.message).join("; "), "error");
-    go({ view: "method", method: id.value.trim(), step: null });
+    if (!r.saved) return layr.ui.notify(r.messages.map((p) => p.message).join("; ") || r.note, "error");
+    ME = null;
+    go({ view: "method", method: id.value.trim(), fn: null });
   } catch (err) {
     fail(err);
   }
+}
+
+// ------------------------------------------------------------------------------------------------ guide
+
+async function renderGuide(t) {
+  const { GUIDE } = await import("./guide.js");
+  if (t !== token) return;
+  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: "Python for methods" }]);
+  setActions([]);
+  layr.panel.setTitle("Python for methods").catch(() => {});
+  put(
+    view,
+    h(
+      "div",
+      { class: "page narrow guide" },
+      h("h2", {}, "Python for methods"),
+      h(
+        "p",
+        { class: "layr-muted" },
+        "The few Python and pandas patterns the methods use, each with a short example. Open a method to see them " +
+          "in real code; the Explain button there asks Claude about any function or selected lines.",
+      ),
+      GUIDE.map((g, i) =>
+        h(
+          "section",
+          {},
+          h("h3", {}, `${i + 1}. ${g.title}`),
+          g.text.map((p) => h("p", {}, p)),
+          codeBlock(g.code),
+        ),
+      ),
+    ),
+  );
 }
 
 // ------------------------------------------------------------------------------------------------ database
@@ -2254,6 +3310,7 @@ async function render() {
     else if (S.view === "method" && S.method) await renderMethod(t);
     else if (S.view === "new") await renderNew(t, S.preset);
     else if (S.view === "database") await renderDatabase(t);
+    else if (S.view === "guide") await renderGuide(t);
     else await renderHome(t);
   } catch (err) {
     if (t !== token) return;
@@ -2317,20 +3374,28 @@ if (opened && !(layr.info.state || {}).openedFile) {
     fail(err);
   }
 }
+checkAi();
+try {
+  layr.connections.onChange?.(() => checkAi().then(() => S.view === "method" && drawInspector()));
+} catch {
+  // an older layr: checked once
+}
 layr.events.on("research:lab", (ev) => {
   if (live && ev.what === "run") return; // the poll redraws when it's done
   if (ev.what === "run" && !ev.finished) return;
-  if (
-    S.view === "home" ||
-    (S.view === "experiment" && (!ev.experiment || ev.experiment === S.exp)) ||
-    (S.view === "method" && ev.method === S.method)
-  )
-    render();
+  if (S.view === "method") {
+    if ((ev.method && ev.method === S.method) || ev.what === "comparison") refreshMethodMeta();
+    return;
+  }
+  if (S.view === "home" || (S.view === "experiment" && (!ev.experiment || ev.experiment === S.exp))) render();
 });
 window.addEventListener("resize", () => {
   if (S.tab === "peaks" && S.view === "experiment") {
     clearTimeout(window.__rz);
     window.__rz = setTimeout(render, 250);
   }
+});
+window.addEventListener("beforeunload", (e) => {
+  if (ME?.dirty) e.preventDefault();
 });
 render();

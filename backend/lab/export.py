@@ -1,8 +1,9 @@
 """Reports of a run: a self-contained HTML page, an Excel workbook of every table, and a Word document.
 
-All three say the same: what went in (files with checksums, parameters, corrections with reasons), the method
-step by step (sentence, formulas, rules, this run's numbers substituted), the Methods paragraph, the results and
-the quality flags. Formulas are drawn with matplotlib's mathtext, so the files need no JavaScript or fonts.
+All three say the same: what went in (files with checksums, settings, corrections with reasons), how every number
+was calculated (each step in the recipe's order: its sentence from the docstring, the formulas drawn from the code,
+this run's numbers put in), the results and the quality flags, and the method's source as an appendix. Formulas are
+drawn with matplotlib's mathtext, so the files need no JavaScript or fonts.
 """
 
 from __future__ import annotations
@@ -10,13 +11,14 @@ from __future__ import annotations
 import base64
 import html
 import io
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from . import engine
+from . import explain
 from .store import Store, jsonable
 
 MAX_ROWS = 80
@@ -40,23 +42,33 @@ def tex_image(latex: str, fmt: str = "svg", size: float = 12.0) -> bytes | None:
     return buf.getvalue()
 
 
+def methods_paragraph(exp: dict, run: dict) -> tuple[str, bool]:
+    """(text, drafted by Claude): the experiment's kept Methods paragraph, or a factual sentence about the software."""
+    if (exp.get("methods_text") or "").strip():
+        return exp["methods_text"].strip(), True
+    v = run.get("versions") or {}
+    m = run.get("method") or {}
+    return (f"Calculations were done in Python {v.get('python')} (pandas {v.get('pandas')}, NumPy {v.get('numpy')}, "
+            f"SciPy {v.get('scipy')}) with the layr Research plugin, method '{m.get('name')}' version "
+            f"{m.get('version')}; its source code is in the appendix."), False
+
+
 def model(store: Store, exp: dict, run: dict) -> dict[str, Any]:
-    method = store.get_method(run["method"]["id"], run["method"]["version"])
-    sheets = engine.explain_method(store, method, run.get("params"), run)
+    explained = explain.explain_run(store, run)
     tables = []
     rdir = store.run_dir(run["id"])
     for name, o in (run.get("outputs") or {}).items():
-        f = store.output_file(run, name)
-        if f and f.get("kind") == "table":
+        if o.get("kind") == "table":
             try:
-                df = pd.read_csv(rdir / f["file"])
+                df = pd.read_csv(rdir / o["file"])
             except pd.errors.EmptyDataError:
                 df = pd.DataFrame()
             tables.append({"name": name, "label": o.get("label") or name, "df": df})
-        elif f and f.get("kind") == "figure":
-            tables.append({"name": name, "label": o.get("label") or name, "png": (rdir / f["file"]).read_bytes()})
-    return {"exp": exp, "run": run, "method": method, "sheets": sheets, "outputs": tables,
-            "methods_text": engine.methods_text(store, method, run.get("params"), run)}
+        elif o.get("kind") == "figure":
+            tables.append({"name": name, "label": o.get("label") or name, "png": (rdir / o["file"]).read_bytes()})
+    text, drafted = methods_paragraph(exp, run)
+    return {"exp": exp, "run": run, "explained": explained, "outputs": tables, "methods_text": text,
+            "methods_drafted": drafted, "source": explained["source"]}
 
 
 def _slug(s: str) -> str:
@@ -85,14 +97,32 @@ def _fmt(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:.4g}"
     if isinstance(v, (dict, list)):
-        import json
-
         return json.dumps(v, ensure_ascii=False)
     return str(v)
 
 
-def _corrections(run: dict, exp: dict) -> list[dict]:
-    return exp.get("corrections") or []
+def human(name: str) -> str:
+    return name.replace("_", " ").capitalize()
+
+
+def table_text(summary: dict | None) -> str:
+    if not isinstance(summary, dict):
+        return _fmt(summary)
+    if summary.get("kind") == "table":
+        return f"table, {summary.get('rows')} rows: {', '.join(summary.get('columns') or [])}"
+    return _fmt(explain.show(summary))
+
+
+def step_parts(step: dict) -> dict[str, Any]:
+    """What a report shows of one step: formulas (general) and examples (this run's numbers)."""
+    formulas = [{"label": f"{human(step['function'])}", "latex": f["latex"]} for f in step.get("formulas") or []]
+    examples = []
+    for u in step.get("used") or []:
+        for f in u.get("formulas") or []:
+            formulas.append({"label": f"{human(u['function'])}: {u.get('sentence') or ''}", "latex": f["latex"]})
+        for line in (u.get("example") or {}).get("latex") or []:
+            examples.append({"label": f"{human(u['function'])} (one of {u.get('count')} calls)", "latex": line})
+    return {"formulas": formulas, "examples": examples}
 
 
 # ---------------------------------------------------------------------------------------------------- HTML
@@ -108,9 +138,11 @@ td,th{border:1px solid #e6e8ec;padding:3px 7px;text-align:left}
 th{background:#f4f5f7}.formula{margin:6px 0 2px}.formula img{vertical-align:middle;max-width:100%}
 .label{font-size:12.5px;color:#646b78;margin-top:8px}
 .ex{background:#f2f7fd;border-radius:6px;padding:6px 10px;margin:6px 0}
-code{font:12px Consolas,monospace;background:#f4f5f7;padding:1px 4px;border-radius:3px}
+code,pre{font:12px Consolas,monospace;background:#f4f5f7;border-radius:3px}code{padding:1px 4px}
+pre{padding:10px;overflow:auto;white-space:pre}
+.draft{border-left:3px solid #eda100;padding-left:10px}
 .warning{color:#a15c00}.error{color:#c62828}.step{page-break-inside:avoid}
-@media print{body{margin:0}h2{page-break-after:avoid}}
+@media print{body{margin:0}h2{page-break-after:avoid}pre{white-space:pre-wrap}}
 """
 
 
@@ -132,64 +164,61 @@ def _table_html(df: pd.DataFrame, limit: int = MAX_ROWS) -> str:
 
 
 def to_html(m: dict) -> str:
-    exp, run, method = m["exp"], m["run"], m["method"]
+    exp, run = m["exp"], m["run"]
+    meth = run.get("method") or {}
     e = html.escape
     out = [f"<!doctype html><html><head><meta charset='utf-8'><title>{e(exp.get('title') or '')}</title>"
            f"<style>{CSS}</style></head><body>",
            f"<h1>{e(exp.get('title') or exp['id'])}</h1>",
-           f"<p class='muted'>{e(method.get('name') or '')} (method version {method['version']}) · run {run['id']} · "
+           f"<p class='muted'>{e(meth.get('name') or '')} (method version {meth.get('version')}) · run {run['id']} · "
            f"{e(run.get('finished') or '')} · status {e(run['status'])}</p>"]
     if exp.get("notes"):
         out.append(f"<p>{e(exp['notes'])}</p>")
     out.append("<h2>Methods</h2>")
-    out.append(f"<p>{e(m['methods_text'])}</p>")
+    if m["methods_drafted"]:
+        out.append(f"<p class='draft'>{e(m['methods_text'])}</p><p class='muted'>Drafted by Claude from the method's "
+                   "code and settings, kept with the experiment.</p>")
+    else:
+        out.append(f"<p>{e(m['methods_text'])}</p>")
     out.append("<h2>What went in</h2><h3>Raw files</h3><table><tr><th>Input</th><th>File</th><th>SHA-256</th></tr>")
     for k, f in (run.get("inputs") or {}).items():
         out.append(f"<tr><td>{e(k)}</td><td>{e(str(f.get('name')))}</td><td><code>{e(str(f.get('sha256')))}</code>"
                    "</td></tr>")
-    out.append("</table><h3>Parameters</h3><table><tr><th>Parameter</th><th>Value</th></tr>")
-    labels = {p["id"]: p for p in method.get("params") or []}
+    out.append("</table><h3>Settings</h3><table><tr><th>Setting</th><th>Value</th></tr>")
     for k, v in (run.get("params") or {}).items():
-        p = labels.get(k, {})
-        out.append(f"<tr><td>{e(p.get('label') or k)}</td><td>{e(_fmt(v))} {e(p.get('unit') or '')}</td></tr>")
+        out.append(f"<tr><td>{e(k)}</td><td>{e(_fmt(v))}</td></tr>")
     out.append("</table><h3>Corrections</h3>")
-    corr = _corrections(run, exp)
+    corr = exp.get("corrections") or []
     if corr:
         out.append("<table><tr><th>Injection</th><th>Kind</th><th>Details</th><th>Reason</th><th>Status</th>"
                    "<th>By</th></tr>")
         for c in corr:
-            details = c.get("new_name") or (f"{c.get('compound', '')} {c.get('start_min', '')}–{c.get('end_min', '')} "
-                                            "min" if c["kind"] == "manual_integration" else c.get("compound", "all"))
+            span = f"{c.get('compound', '')} {c.get('start_min', '')}–{c.get('end_min', '')} min"
+            details = c.get("new_name") or (span if c["kind"] == "manual_integration" else c.get("compound", "all"))
             out.append(f"<tr><td>#{c['injection']}</td><td>{e(c['kind'])}</td><td>{e(str(details))}</td>"
                        f"<td>{e(c.get('reason', ''))}</td><td>{e(c.get('status', ''))}</td>"
-                       f"<td>{e(c.get('by', ''))}</td>"
-                       "</tr>")
+                       f"<td>{e(c.get('by', ''))}</td></tr>")
         out.append("</table>")
     else:
         out.append("<p class='muted'>None: every number comes from the automatic method.</p>")
-    out.append("<h2>How every number was calculated</h2>")
-    for i, s in enumerate(m["sheets"], 1):
-        out.append(f"<div class='step'><h3>{i}. {e(s['title'])}</h3><p class='sentence'>{e(s.get('sentence', ''))}"
-                   "</p>")
-        if s.get("note"):
-            out.append(f"<p class='muted'>{e(s['note'])}</p>")
-        for f in s.get("formulas") or []:
-            out.append(f"<div class='label'>{e(f.get('label', ''))}</div><div class='formula'>{_img(f['latex'])}</div>")
-        if s.get("symbols"):
-            out.append("<table>" + "".join(f"<tr><td>{_img(x['symbol'])}</td><td>{e(x['meaning'])}</td>"
-                                           f"<td>{e(x.get('unit', ''))}</td></tr>" for x in s["symbols"]) + "</table>")
-        if s.get("rules"):
-            out.append("<ul>" + "".join(f"<li>{e(r)}</li>" for r in s["rules"]) + "</ul>")
-        if s.get("assumptions"):
-            out.append("<p><b>Assumptions:</b></p><ul>" + "".join(f"<li>{e(a)}</li>" for a in s["assumptions"])
-                       + "</ul>")
-        for x in (s.get("run") or {}).get("examples") or []:
-            out.append(f"<div class='ex'><div class='label'>In this run: {e(x.get('label', ''))}</div>"
-                       f"<div class='formula'>{_img(x.get('latex', ''))}</div></div>")
-        if s.get("code"):
-            out.append(f"<p class='muted'>Computed with <code>{e(s['code'])}</code></p>")
-        if s.get("reference"):
-            out.append(f"<p class='muted'>Reference: {e(s['reference'])}</p>")
+    out.append("<h2>How every number was calculated</h2><p class='muted'>Each step of the method, in the order the "
+               "recipe calls it: what it does (from its docstring), the formulas it uses (drawn from the code), and "
+               "one of this run's calculations with its numbers. The full code is in the appendix.</p>")
+    for i, s in enumerate(m["explained"]["steps"], 1):
+        parts = step_parts(s)
+        out.append(f"<div class='step'><h3>{i}. {e(human(s['function']))} <span class='muted'>"
+                   f"<code>{e(s['function'])}</code></span></h3><p class='sentence'>{e(s.get('sentence') or '')}</p>")
+        if s.get("text"):
+            out.append(f"<p class='muted'>{e(s['text'])}</p>")
+        ins = ", ".join(f"{k}: {table_text(v)}" for k, v in (s.get("inputs") or {}).items()
+                        if isinstance(v, dict) and v.get("kind") == "table")
+        if ins:
+            out.append(f"<p class='muted'>Takes {e(ins)}. Gives {e(table_text(s.get('output')))}.</p>")
+        for f in parts["formulas"]:
+            out.append(f"<div class='label'>{e(f['label'])}</div><div class='formula'>{_img(f['latex'])}</div>")
+        for x in parts["examples"]:
+            out.append(f"<div class='ex'><div class='label'>In this run: {e(x['label'])}</div>"
+                       f"<div class='formula'>{_img(x['latex'])}</div></div>")
         out.append("</div>")
     out.append("<h2>Results</h2>")
     for t in m["outputs"]:
@@ -203,6 +232,10 @@ def to_html(m: dict) -> str:
     if flags is not None:
         out.append(f"<h2>Quality checks ({len(flags)})</h2>{_table_html(flags, 400)}")
     v = run.get("versions") or {}
+    out.append(f"<h2>Appendix: the method's code</h2><p class='muted'>{e(meth.get('name') or '')}, version "
+               f"{meth.get('version')}, exactly as this run ran it. It imports the plugin's toolbox (reading GAML, "
+               "peaks, straight lines).</p>")
+    out.append(f"<pre>{e(m['source'])}</pre>")
     out.append(f"<p class='muted'>Python {e(str(v.get('python')))}, pandas {e(str(v.get('pandas')))}, NumPy "
                f"{e(str(v.get('numpy')))}, SciPy {e(str(v.get('scipy')))}, matplotlib {e(str(v.get('matplotlib')))}. "
                f"Made with the layr Research plugin.</p></body></html>")
@@ -224,9 +257,10 @@ def _sheet_name(s: str, used: set[str]) -> str:
 
 def to_xlsx(m: dict, path: Path) -> None:
     used: set[str] = set()
-    exp, run, method = m["exp"], m["run"], m["method"]
+    exp, run = m["exp"], m["run"]
+    meth = run.get("method") or {}
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
-        info = [("Experiment", exp.get("title")), ("Method", f"{method.get('name')} (version {method['version']})"),
+        info = [("Experiment", exp.get("title")), ("Method", f"{meth.get('name')} (version {meth.get('version')})"),
                 ("Run", run["id"]), ("Finished", run.get("finished")), ("Status", run["status"]),
                 ("Methods", m["methods_text"])]
         info += [(f"File: {k}", f"{f.get('name')} (SHA-256 {f.get('sha256')})") for k, f in
@@ -235,14 +269,16 @@ def to_xlsx(m: dict, path: Path) -> None:
         for t in m["outputs"]:
             if "df" in t:
                 t["df"].to_excel(xw, sheet_name=_sheet_name(t["name"], used), index=False)
-        pd.DataFrame([{"parameter": k, "value": _fmt(v)} for k, v in (run.get("params") or {}).items()]) \
-            .to_excel(xw, sheet_name=_sheet_name("parameters", used), index=False)
-        corr = _corrections(run, exp)
+        pd.DataFrame([{"setting": k, "value": _fmt(v)} for k, v in (run.get("params") or {}).items()]) \
+            .to_excel(xw, sheet_name=_sheet_name("settings", used), index=False)
+        corr = exp.get("corrections") or []
         pd.DataFrame(corr or [{"kind": "none"}]).to_excel(xw, sheet_name=_sheet_name("corrections", used), index=False)
-        pd.DataFrame([{"step": s["step"], "title": s["title"], "what it does": s.get("sentence", ""),
-                       "formulas": " ; ".join(f["latex"] for f in s.get("formulas") or []),
-                       "rules": " ".join(s.get("rules") or [])} for s in m["sheets"]]) \
+        pd.DataFrame([{"step": i, "function": s["function"], "what it does": s.get("sentence") or "",
+                       "uses": ", ".join(u["function"] for u in s.get("used") or [])}
+                      for i, s in enumerate(m["explained"]["steps"], 1)]) \
             .to_excel(xw, sheet_name=_sheet_name("method", used), index=False)
+        pd.DataFrame({"code": m["source"].splitlines()}).to_excel(xw, sheet_name=_sheet_name("code", used),
+                                                                  index=False)
 
 
 # ---------------------------------------------------------------------------------------------------- Word
@@ -252,14 +288,17 @@ def to_docx(m: dict, path: Path) -> None:
     from docx import Document
     from docx.shared import Cm, Pt
 
-    exp, run, method = m["exp"], m["run"], m["method"]
+    exp, run = m["exp"], m["run"]
+    meth = run.get("method") or {}
     doc = Document()
     doc.styles["Normal"].font.size = Pt(10.5)
     doc.add_heading(exp.get("title") or exp["id"], 0)
-    doc.add_paragraph(f"{method.get('name')} (method version {method['version']}) · run {run['id']} · "
+    doc.add_paragraph(f"{meth.get('name')} (method version {meth.get('version')}) · run {run['id']} · "
                       f"{run.get('finished') or ''}")
     doc.add_heading("Methods", 1)
     doc.add_paragraph(m["methods_text"])
+    if m["methods_drafted"]:
+        doc.add_paragraph().add_run("Drafted by Claude from the method's code and settings.").italic = True
 
     def formula(latex: str, width_cm: float = 12) -> None:
         png = tex_image(latex, "png", 11)
@@ -291,28 +330,22 @@ def to_docx(m: dict, path: Path) -> None:
     doc.add_heading("What went in", 1)
     for k, f in (run.get("inputs") or {}).items():
         doc.add_paragraph(f"{k}: {f.get('name')} (SHA-256 {f.get('sha256')})", style="List Bullet")
-    corr = _corrections(run, exp)
+    corr = exp.get("corrections") or []
     doc.add_paragraph("Corrections: " + ("none." if not corr else ""))
     for c in corr:
         doc.add_paragraph(f"#{c['injection']} {c['kind']} {c.get('compound', '')} {c.get('new_name', '')}: "
                           f"{c.get('reason', '')} ({c.get('status')}, {c.get('by', '')})", style="List Bullet")
     doc.add_heading("How every number was calculated", 1)
-    for i, s in enumerate(m["sheets"], 1):
-        doc.add_heading(f"{i}. {s['title']}", 2)
-        doc.add_paragraph(s.get("sentence", ""))
-        for f in s.get("formulas") or []:
-            if f.get("label"):
-                doc.add_paragraph().add_run(f["label"]).italic = True
+    for i, s in enumerate(m["explained"]["steps"], 1):
+        parts = step_parts(s)
+        doc.add_heading(f"{i}. {human(s['function'])}", 2)
+        doc.add_paragraph(s.get("sentence") or "")
+        for f in parts["formulas"]:
+            doc.add_paragraph().add_run(f["label"]).italic = True
             formula(f["latex"])
-        for r in s.get("rules") or []:
-            doc.add_paragraph(r, style="List Bullet")
-        for a in s.get("assumptions") or []:
-            doc.add_paragraph("Assumption: " + a, style="List Bullet")
-        for x in (s.get("run") or {}).get("examples") or []:
-            doc.add_paragraph("In this run: " + x.get("label", ""))
-            formula(x.get("latex", ""))
-        if s.get("code"):
-            doc.add_paragraph().add_run("Computed with: " + s["code"]).font.size = Pt(9)
+        for x in parts["examples"]:
+            doc.add_paragraph("In this run: " + x["label"])
+            formula(x["latex"])
     doc.add_heading("Results", 1)
     for t in m["outputs"]:
         if "png" in t:
@@ -326,4 +359,11 @@ def to_docx(m: dict, path: Path) -> None:
     if flags is not None:
         doc.add_heading(f"Quality checks ({len(flags)})", 1)
         table(flags, 400)
+    doc.add_heading("Appendix: the method's code", 1)
+    for line in m["source"].splitlines():
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(0)
+        run_ = p.add_run(line or " ")
+        run_.font.name = "Consolas"
+        run_.font.size = Pt(8)
     doc.save(path)

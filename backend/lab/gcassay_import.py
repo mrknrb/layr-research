@@ -1,6 +1,6 @@
 """Experiments from gcassay's files: its experiment config (YAML) and its corrections file.
 
-The config's sections map onto the GC-FID activity assay method's parameters; each correction (rename, exclude,
+The config's sections map onto the GC-FID activity assay method's settings; each correction (rename, exclude,
 manual_integration) becomes an approved correction with its reason, marked as imported.
 """
 
@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from .core import StepError
+from .errors import LabError
 from .store import now
 
 MAP = {
@@ -36,9 +36,9 @@ def parse_yaml(text: str, what: str) -> dict[str, Any]:
     try:
         data = yaml.safe_load(text) or {}
     except yaml.YAMLError as e:
-        raise StepError(f"The {what} is not valid YAML: {e}") from e
+        raise LabError(f"The {what} is not valid YAML: {e}") from e
     if not isinstance(data, dict):
-        raise StepError(f"The {what} should be a YAML mapping.")
+        raise LabError(f"The {what} should be a YAML mapping.")
     return data
 
 
@@ -46,7 +46,7 @@ def params_from_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
     """(method parameters, experiment info {title, raw_file, corrections, id}) from a gcassay config."""
     comps = (cfg.get("compounds") or {})
     if not comps.get("targets"):
-        raise StepError("This doesn't look like a gcassay config: it has no compounds.targets.")
+        raise LabError("This doesn't look like a gcassay config: it has no compounds.targets.")
     exp = cfg.get("experiment") or {}
     p: dict[str, Any] = {"compounds": comps["targets"], "internal_standard": comps.get("internal_standard"),
                          "channel": exp.get("channel")}
@@ -69,7 +69,7 @@ def corrections_from(data: dict[str, Any]) -> list[dict[str, Any]]:
         for item in data.get(kind) or []:
             reason = str(item.get("reason", "")).strip()
             if not reason:
-                raise StepError(f"Every correction needs a reason ({kind}: {item}).")
+                raise LabError(f"Every correction needs a reason ({kind}: {item}).")
             c = {"id": f"c{len(out) + 1:03d}", "kind": kind, "injection": int(item["injection"]), "reason": reason,
                  "status": "approved", "by": "imported from gcassay", "at": now()}
             if kind == "rename":

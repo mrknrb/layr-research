@@ -1,13 +1,17 @@
 {
   "id": "research",
   "name": "Research",
-  "version": "0.2.0",
-  "description": "Explainable data analysis: methods made of steps that show their formulas (GC-FID activity assays, tables, statistics), peak review, reports, a results database for the whole PhD; plus quick charts and tests.",
+  "version": "0.3.0",
+  "description": "Explainable data analysis: methods written as plain Python that explain every number from their own code (GC-FID activity assays, tables), peak review, reports, a results database for the whole PhD; plus quick charts and tests.",
   "author": "layr",
   "layr": "^0.1",
   "icon": "science",
   "permissions": ["data", "pc", "files"],
   "needs": ["pc", "python"],
+  "connections": [
+    { "plugin": "claude", "groups": ["ask"],
+      "why": "Explain a function or selected lines in plain words, and draft a Methods paragraph (one-off questions to Claude)" }
+  ],
   "panels": [
     { "id": "experiments", "title": "Experiments", "page": "panels/lab.html", "icon": "biotech", "opens": [".gaml"] },
     { "id": "main", "title": "Quick analysis", "page": "panels/main.html", "icon": "science" }
@@ -25,23 +29,26 @@
   "backend": { "kind": "process", "runtime": "python", "entry": "backend/server.py" },
   "access": {
     "groups": [
-      { "id": "read", "label": "See datasets, methods, experiments, results and their explanations",
+      { "id": "read", "label": "See datasets, methods and their code, experiments, results, explanations",
         "tools": ["list_datasets", "preview", "describe", "plot", "ttest", "anova", "history", "get_plot",
-                  "step_catalog", "methods", "method_get", "method_versions", "method_diff", "experiments",
-                  "experiment_get", "runs", "run_get", "result_table", "figure", "explain", "provenance",
+                  "methods", "method_get", "method_check", "method_versions", "method_diff", "draft_get",
+                  "toolbox_docs", "toolbox_copy", "explain", "explain_function", "ai_prompt", "experiments",
+                  "experiment_get", "runs", "run_get", "result_table", "figure", "provenance", "compare_runs",
                   "chromatogram", "database_tables", "database_query", "gcassay_settings"],
         "defaults": { "plugins": "allow", "agents": "allow" } },
       { "id": "load", "label": "Load data (also files from this PC) and create experiments",
         "tools": ["load_csv", "load_sample", "file_import", "file_fetch", "upload_chunk", "upload_finish",
                   "experiment_create", "lab_sample"],
         "defaults": { "agents": "allow" } },
-      { "id": "build", "label": "Build and change methods and experiments, run them and write reports",
-        "tools": ["method_create", "method_patch", "method_revert", "experiment_update", "run", "export"],
+      { "id": "build", "label": "Write methods (as drafts you approve), change and run experiments, write reports",
+        "tools": ["method_create", "method_write", "method_revert", "method_reference", "experiment_update", "run",
+                  "run_stop", "export", "method_export", "notebook"],
         "defaults": { "agents": "allow" } },
       { "id": "propose", "label": "Propose corrections (they wait for your approval)",
         "tools": ["correction_propose"],
         "defaults": { "agents": "allow" } },
-      { "id": "approve", "label": "Approve, reject or undo corrections", "tools": ["correction_decide"] },
+      { "id": "approve", "label": "Approve or reject corrections and method drafts",
+        "tools": ["correction_decide", "draft_decide"] },
       { "id": "remove", "label": "Delete datasets, experiments and methods",
         "tools": ["remove_dataset", "experiment_delete", "method_delete"] }
     ]

@@ -1,7 +1,7 @@
 [project]
 name = "layr-research"
-version = "0.2.0"
-description = "layr research plugin: explainable analysis methods (GC-FID assays and tables), quick stats and plots."
+version = "0.3.0"
+description = "layr research plugin: explainable analysis methods as plain Python (GC-FID assays, tables), quick stats and plots."
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.12,<2",
