@@ -1,0 +1,136 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research</title>
+    <link rel="stylesheet" href="/_layr/layr.css" />
+    <link rel="stylesheet" href="./main.css" />
+    <script src="/_layr/layr.js"></script>
+    <script type="module" src="./main.js"></script>
+  </head>
+  <body>
+    <div class="layout">
+      <header class="layr-toolbar">
+        <svg viewBox="0 0 24 24" width="18" height="18" class="logo"><path d="M9 2h6v2h-1v5.3l5.6 9.4A2 2 0 0 1 17.9 22H6.1a2 2 0 0 1-1.7-3.3L10 9.3V4H9zm3 9.2L8.8 16h6.4z" fill="currentColor" /></svg>
+        <select class="layr-select dataset-select" id="dataset" aria-label="Dataset" hidden></select>
+        <button class="layr-button" id="open">
+          <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 2h8l6 6v14H6zm7 1.5V9h5.5zM11 12v4H9l3 4 3-4h-2v-4z" fill="currentColor" /></svg>
+          Open CSV…
+        </button>
+        <input type="file" id="file" accept=".csv,.tsv,.txt,text/csv" hidden />
+        <button class="layr-button ghost" id="sample">Sample data</button>
+        <span class="layr-spacer"></span>
+        <span class="status layr-muted" id="status"></span>
+        <button class="layr-button ghost icon" id="toggleHistory" title="Results history" aria-label="Results history">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M13 3a9 9 0 1 1-8.5 12h2.1A7 7 0 1 0 6 8.5L8.5 11H2V4.5l2.6 2.6A9 9 0 0 1 13 3zm-1 5h1.5v4.2l3.3 2-.8 1.3-4-2.5z" fill="currentColor" /></svg>
+        </button>
+      </header>
+
+      <main class="content" id="content">
+        <section class="welcome" id="starting">
+          <div class="layr-empty">
+            <span class="layr-spinner"></span>
+            <div id="startingText">Starting the analysis engine…</div>
+            <div class="layr-muted" id="startingHint" hidden>The first start installs Python's science packages: this
+              takes a minute or two, once.</div>
+          </div>
+        </section>
+        <section class="welcome" id="welcome" hidden>
+          <div class="drop-card" id="dropCard">
+            <svg viewBox="0 0 24 24" width="44" height="44"><path d="M4 3h11l5 5v13H4zm10 1.5V9h4.5zM7 12h10v1.5H7zm0 3h10v1.5H7zm0 3h6v1.5H7z" fill="currentColor" /></svg>
+            <h2>Drop a CSV file here</h2>
+            <p class="layr-muted">A table with column names in the first row, from Excel, a lab device or anywhere.<br />
+              Commas, semicolons and decimal commas all work.</p>
+            <div class="drop-actions">
+              <button class="layr-button primary" id="open2">Choose a file</button>
+              <button class="layr-button" id="sample2">Try the sample: plant growth</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="dataset" id="datasetView" hidden>
+          <div class="ds-head">
+            <div>
+              <h1 id="dsName"></h1>
+              <div class="layr-muted" id="dsMeta"></div>
+            </div>
+            <span class="layr-spacer"></span>
+            <button class="layr-button ghost small danger" id="remove" title="Forget this dataset">Remove</button>
+          </div>
+          <div class="chips" id="chips"></div>
+
+          <nav class="tabs" role="tablist">
+            <button role="tab" data-tab="data">Data</button>
+            <button role="tab" data-tab="summary">Summary</button>
+            <button role="tab" data-tab="chart">Chart</button>
+            <button role="tab" data-tab="compare">Compare groups</button>
+          </nav>
+
+          <div class="tab" data-pane="data">
+            <div class="table-wrap"><table class="layr-table" id="dataTable"></table></div>
+            <div class="more"><button class="layr-button small" id="moreRows" hidden>Show more rows</button></div>
+          </div>
+
+          <div class="tab" data-pane="summary">
+            <div class="controls">
+              <label class="layr-label" for="by">Split by</label>
+              <select class="layr-select" id="by"></select>
+            </div>
+            <div id="summary"></div>
+          </div>
+
+          <div class="tab" data-pane="chart">
+            <div class="controls chart-controls">
+              <div class="seg" id="kinds" role="group" aria-label="Chart kind">
+                <button class="layr-button small" data-kind="box">Box</button>
+                <button class="layr-button small" data-kind="bar">Bar</button>
+                <button class="layr-button small" data-kind="scatter">Scatter</button>
+                <button class="layr-button small" data-kind="line">Line</button>
+                <button class="layr-button small" data-kind="hist">Histogram</button>
+              </div>
+              <div class="field"><label class="layr-label" for="cx" id="cxLabel">X</label><select class="layr-select" id="cx"></select></div>
+              <div class="field" id="cyField"><label class="layr-label" for="cy" id="cyLabel">Y</label><select class="layr-select" id="cy"></select></div>
+              <div class="field" id="cgField"><label class="layr-label" for="cg">Color by</label><select class="layr-select" id="cg"></select></div>
+              <button class="layr-button primary" id="draw">Draw</button>
+            </div>
+            <figure class="chart" id="chart">
+              <div class="layr-empty">Pick what to show and press Draw.</div>
+            </figure>
+          </div>
+
+          <div class="tab" data-pane="compare">
+            <div class="controls">
+              <div class="field"><label class="layr-label" for="tc">Measure</label><select class="layr-select" id="tc"></select></div>
+              <div class="field"><label class="layr-label" for="tg">Groups from</label><select class="layr-select" id="tg"></select></div>
+              <div class="field" id="pairField" hidden><label class="layr-label">Only these two (t-test)</label>
+                <div class="pair"><select class="layr-select" id="ta"></select><select class="layr-select" id="tb"></select></div>
+              </div>
+              <button class="layr-button primary" id="compare">Compare</button>
+            </div>
+            <div id="compareResult"><div class="layr-empty">Choose a number column and the column that says each row's group.</div></div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="history" id="history">
+        <div class="history-head">
+          <h3>Results</h3>
+          <span class="layr-badge" id="historyCount">0</span>
+        </div>
+        <ul class="layr-list history-list" id="historyList"></ul>
+      </aside>
+    </div>
+
+    <div class="drop-overlay" id="dropOverlay" hidden><div>Drop the CSV to load it</div></div>
+
+    <dialog class="result-dialog" id="resultDialog">
+      <div class="dialog-head">
+        <h3 id="dialogTitle"></h3>
+        <span class="layr-spacer"></span>
+        <button class="layr-button ghost icon" id="dialogClose" aria-label="Close">×</button>
+      </div>
+      <div id="dialogBody"></div>
+    </dialog>
+  </body>
+</html>
