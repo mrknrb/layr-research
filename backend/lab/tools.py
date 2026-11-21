@@ -18,6 +18,7 @@ import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -29,9 +30,11 @@ from . import explain as explainer
 from .errors import LabError
 from .gcassay_import import corrections_from, params_from_config, parse_yaml
 from .runner import Pool, Runner, experiment_inputs
-from .store import Store, method_name, new_id, now, records
+from .store import Store, method_name, new_id, now, records, step_output
 
 LIVE: dict[str, dict[str, Any]] = {}  # experiment id -> the run in progress
+TRIALS: dict[str, dict[str, Any]] = {}  # experiment id -> the trial run in progress (an unsaved source or settings)
+TRIAL_ASKED: dict[str, int] = {}  # experiment id -> how many trial runs were asked for (only the newest waits)
 TASKS: set[asyncio.Future] = set()
 GAML_LOCK = threading.Lock()
 
@@ -251,8 +254,10 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                         break
                 if before is None:
                     base = store.get_method(method_id, base_version)
-                    before = runner.run(exp, base, trial=True, reason=f"comparison base (version {base_version})")
-                after = runner.run(exp, after_method, trial=True, reason="comparison after a change")
+                    before = runner.run(exp, base, trial=True, reason=f"comparison base (version {base_version})",
+                                        fresh=True)
+                # every step calculated again: the comparison proves the numbers, it doesn't trust remembered ones
+                after = runner.run(exp, after_method, trial=True, reason="comparison after a change", fresh=True)
                 result = compare.compare_runs(store, before, after)
                 result.update(status="done", experiment=ref, experiment_title=exp.get("title"), finished=now())
                 save(result)
@@ -455,21 +460,47 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     def draft_decide(method: Annotated[str, Field(description="Method id.")],
                      decision: Annotated[Literal["accept", "reject"], Field(description="accept: it becomes the "
                                                                                          "next version")],
+                     source: Annotated[str | None, Field(description="accept: the text to save instead of the "
+                                                                     "draft's, when the user took only some of its "
+                                                                     "changes (merged in the panel).")] = None,
                      ctx: Context | None = None) -> dict[str, Any]:
-        """The user's decision on an AI draft (only the user decides, in the Research panel)."""
+        """The user's decision on an AI draft (only the user decides, in the Research panel). Accepting with
+        `source` saves that merged text as the next version (the user's, with the AI's change noted) and drops the
+        draft; the reference experiment is compared again when the text differs from the draft's."""
         if not _is_user(ctx):
             raise LabError("Only the user accepts or rejects a draft, in the Research panel (Methods).")
         d = store.get_draft(method)
         if d is None:
             raise LabError(f"Method {method} has no draft.")
-        store.drop_draft(method)
         if decision == "reject":
+            store.drop_draft(method)
             changed("method", method=method)
             return {"rejected": True}
-        saved = store.save_method(method, d["source"], f"{d.get('by')}, accepted by {_who(ctx)}",
-                                  d.get("change") or "AI change", {"comparison": d.get("comparison")})
+        text = d["source"]
+        merged = source is not None and (source if source.endswith("\n") else source + "\n") != d["source"]
+        if merged:
+            text = source if source.endswith("\n") else source + "\n"
+            result = checker.check(text)
+            if not result["ok"]:
+                return {"accepted": False, "messages": result["messages"], "note": "Not saved: fix the errors first."}
+        new_method = store.draft_only(method)
+        base = None if new_method else store.get_method(method)
+        if base is not None and text == base["source"]:
+            store.drop_draft(method)
+            changed("method", method=method)
+            return {"accepted": False, "rejected": True, "note": "None of the draft's changes were kept: nothing "
+                                                                 "changed."}
+        store.drop_draft(method)
+        if merged:
+            saved = store.save_method(method, text, f"{_who(ctx)}, with part of a change by {d.get('by')}",
+                                      d.get("change") or "AI change, in part")
+            if base is not None:
+                start_comparison(method, saved, base["version"], "version", saved["version"])
+        else:
+            saved = store.save_method(method, text, f"{d.get('by')}, accepted by {_who(ctx)}",
+                                      d.get("change") or "AI change", {"comparison": d.get("comparison")})
         changed("method", method=method, version=saved["version"])
-        return {"accepted": True, "version": saved["version"]}
+        return {"accepted": True, "version": saved["version"], "merged": merged}
 
     @mcp.tool()
     def method_delete(method: Annotated[str, Field(description="Method id.")]) -> dict[str, Any]:
@@ -564,24 +595,59 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     def ai_prompt(
-        kind: Annotated[Literal["explain", "methods"], Field(description="explain: a function or selected lines in "
-                                                                         "plain words · methods: a Methods paragraph "
-                                                                         "for a paper")],
+        kind: Annotated[Literal["explain", "methods", "step"], Field(
+            description="explain: a function or selected lines in plain words · methods: a Methods paragraph for a "
+                        "paper · step: write one new step function from the user's sentence")],
         method: Annotated[str | None, Field(description="Method id.")] = None,
         source: Annotated[str | None, Field(description="Or the method's source.")] = None,
-        function: Annotated[str | None, Field(description="explain: the function.")] = None,
+        function: Annotated[str | None, Field(description="explain: the function · step: the new step's name "
+                                                          "(e.g. remove_outliers).")] = None,
         code: Annotated[str | None, Field(description="explain: or the selected lines.")] = None,
         experiment: Annotated[str | None, Field(description="methods: the experiment (its settings, files).")]
         = None,
+        inputs: Annotated[dict[str, list[str] | None] | None, Field(
+            description="step: the step's inputs by parameter name, each with the columns its table had in the last "
+                        "run (null: not a table), e.g. {\"peaks\": [\"injection\", \"area\"], \"window_min\": "
+                        "null}.")] = None,
+        request: Annotated[str | None, Field(description="step: what the step should do, in the user's words.")]
+        = None,
     ) -> dict[str, Any]:
-        """For the panel: the prompt it sends to Claude (the claude plugin's ask tool) for an AI explanation or a
-        Methods paragraph, built from the code and settings only."""
+        """For the panel: the prompt it sends to Claude (the claude plugin's ask tool) for an AI explanation, a
+        Methods paragraph, or a new step, built from the code and settings only. For `step` the answer is one
+        ```python block defining exactly `function`: put it in with method_write(function=..., code=...) or
+        flow_edit's new_function / add_step, as a draft she reviews."""
         e = store.get_experiment(experiment) if experiment else None
         if source is None:
             mid = method or (e["method"] if e else None)
             if not mid:
                 raise LabError("Give a method, its source, or an experiment.")
             source = store.get_method(mid, e.get("method_version") if e else None)["source"]
+        if kind == "step":
+            if not function or not function.isidentifier():
+                raise LabError("Give the new step's name in `function` (letters, digits and _, e.g. remove_outliers).")
+            if not (request or "").strip():
+                raise LabError("Say in `request` what the step should do.")
+            taking = "\n".join(f"- {n}: " + (f"a table with the columns {', '.join(c)}" if c else "a value")
+                               for n, c in (inputs or {}).items()) or "- (no inputs given: choose them from the method)"
+            have = parsed(source).function(function)
+            system = (
+                "You write one step of an analysis method for a microbiology PhD student who is learning Python. The "
+                "method is one Python file in a strict, readable style: a step is a function that takes tables and "
+                "values and returns a new table; it picks rows, loops over groups ('for each group: calculate, add a "
+                "row dict to a list, make a table with pd.DataFrame(rows)'), and calls the method's formulas; it never "
+                "changes a table it was given (copy it); a plain loop or a merge rather than clever pandas (no "
+                "transform, no set_index().map(), no index tricks); about 25 lines at most. It starts with a docstring "
+                "whose first line is one plain sentence; a Formula: block in the docstring for what isn't one "
+                "expression. Units go in names (conc_mM, time_min). Imports only from toolbox, pandas, numpy, scipy, "
+                "math, statistics, and only those the method already has, unless one is needed. Use only the columns "
+                "listed for the inputs. Answer with exactly one ```python code block that defines the function, "
+                "nothing else in it (no imports, no example call), then at most three short sentences saying what it "
+                "does and anything you had to assume.")
+            prompt = (f"Write the step `{function}`" + (" (it exists: rewrite it)" if have else "") +
+                      f".\n\nWhat it should do: {request.strip()}\n\nIts inputs:\n{taking}\n\nThe whole method, for "
+                      f"its style, its formulas and the names it uses:\n\n```python\n{source}\n```")
+            return {"prompt": prompt, "system": system, "function": function,
+                    "answer": "One ```python block defining the function; take the code from it."}
         if kind == "explain":
             target = code or ""
             if function and not code:
@@ -842,49 +908,78 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     # ------------------------------------------------------------------ running
 
-    def start_run(exp_id: str, time_limit_s: float | None) -> asyncio.Future:
+    def start_run(exp_id: str, time_limit_s: float | None, fresh: bool = False, trial: dict | None = None
+                  ) -> asyncio.Future:
+        """Start a run in the background. `trial`: {method, params} for a trial run (an unsaved source or unsaved
+        settings): it reports like a run, with `trial: true` in its events, and is kept apart (see Runner.run)."""
         e = store.get_experiment(exp_id)
-        if exp_id in LIVE:
-            return LIVE[exp_id]["future"]
-        method = method_of(e)
-        state: dict[str, Any] = {"run": None, "status": "running", "step": None, "message": "", "started": now()}
+        live = TRIALS if trial else LIVE
+        if exp_id in live:
+            return live[exp_id]["future"]
+        method = trial["method"] if trial else method_of(e)
+        if trial and trial.get("params") is not None:
+            e = {**e, "params": trial["params"]}
+        state: dict[str, Any] = {"run": None, "status": "running", "step": None, "message": "", "started": now(),
+                                 "trial": bool(trial)}
         loop = asyncio.get_running_loop()
+        extra = {"trial": True} if trial else {}
 
         def on_change(ev: dict) -> None:
             state["run"], state["step"], state["message"] = ev["run"], ev.get("step"), ev.get("message") or ""
             loop.call_soon_threadsafe(lambda: changed("run", experiment=exp_id, run=ev["run"], step=ev.get("step"),
-                                                      status="running"))
+                                                      status="running", **extra))
 
         def work() -> dict:
-            return runner.run(e, method, on_change=on_change, time_limit_s=time_limit_s)
+            return runner.run(e, method, on_change=on_change, time_limit_s=time_limit_s, fresh=fresh,
+                              trial=bool(trial), reason="trial run while editing" if trial else None)
 
         fut = asyncio.ensure_future(asyncio.to_thread(work))
         state["future"] = fut
-        LIVE[exp_id] = state
+        live[exp_id] = state
 
         def done(f: asyncio.Future) -> None:
-            LIVE.pop(exp_id, None)
+            live.pop(exp_id, None)
             run = f.result() if not f.exception() else None
             changed("run", experiment=exp_id, run=(run or {}).get("id"), status=(run or {}).get("status", "failed"),
-                    finished=True)
+                    finished=True, **extra)
 
         fut.add_done_callback(done)
         TASKS.add(fut)
         fut.add_done_callback(TASKS.discard)
         return fut
 
+    def trial_of(e: dict, source: str | None, settings: dict[str, Any] | None) -> dict:
+        """What a trial run runs: the unsaved source (or the experiment's method) and the settings with the unsaved
+        ones put over the experiment's (null: the method's default)."""
+        method = method_of(e)
+        if source is not None:
+            parsed(source)
+            method = {**method, "source": source if source.endswith("\n") else source + "\n", "draft": True,
+                      "version": None}
+        params = dict(e.get("params") or {})
+        if settings:
+            known = {s["id"] for s in form(method)[0]}
+            for k, v in settings.items():
+                if k not in known:
+                    raise LabError(f"The method has no setting '{k}'. Settings: {', '.join(sorted(known))}.")
+                if v is None:
+                    params.pop(k, None)
+                else:
+                    params[k] = v
+        return {"method": method, "params": params}
+
     def run_brief(run: dict) -> dict:
         return {"run": run["id"], "experiment": run["experiment"], "status": run["status"], "error": run.get("error"),
                 "started": run["started"], "finished": run.get("finished"), "method": run["method"],
                 "summary": run.get("summary"), "trial": run.get("trial", False), "ms": run.get("ms"),
-                "notes": run.get("notes") or [],
+                "fresh": bool(run.get("fresh")), "cache": run.get("cache"), "reason": run.get("reason"),
+                "settings": run.get("settings"), "notes": run.get("notes") or [],
                 "legacy": bool(run.get("steps")) and not any(s.get("function") for s in run.get("steps") or []),
                 "steps": [{"function": s.get("function") or s.get("id"), "kind": s.get("kind"),
                            "status": s.get("status"),
                            "ms": s.get("ms"), "error": s.get("error"),
-                           "table": {"rows": (s.get("output") or {}).get("rows"),
-                                     "columns": (s.get("output") or {}).get("columns")}
-                           if (s.get("output") or {}).get("kind") == "table" else None}
+                           "table": {"rows": step_output(s).get("rows"), "columns": step_output(s).get("columns")}
+                           if step_output(s).get("kind") == "table" else None}
                           for s in run.get("steps") or []],
                 "outputs": {n: {k: v for k, v in o.items() if k != "file"}
                             for n, o in (run.get("outputs") or {}).items()}}
@@ -894,28 +989,65 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                   wait_s: Annotated[float, Field(description="How long to wait for it to finish (seconds, max 55); "
                                                              "if it is still running, ask run_get later.")] = 50,
                   time_limit_s: Annotated[float | None, Field(description="Stop it after this many seconds "
-                                                                          "(default 900).")] = None
+                                                                          "(default 900).")] = None,
+                  fresh: Annotated[bool, Field(description="Calculate every step again instead of reusing the ones "
+                                                           "remembered from earlier runs (same code, same inputs).")]
+                  = False,
+                  source: Annotated[str | None, Field(description="A trial run of this method source (e.g. unsaved "
+                                                                  "in the editor) instead of the saved method.")]
+                  = None,
+                  settings: Annotated[dict[str, Any] | None, Field(description="A trial run with these settings put "
+                                                                               "over the experiment's (null: the "
+                                                                               "method's default); not saved.")]
+                  = None,
                   ) -> dict[str, Any]:
         """Run an experiment's method on its raw files with its settings and approved corrections, in a separate
-        calculation process (slow parts like reading GAML and integrating peaks are remembered, so a rerun after a
-        correction is fast). Returns the run: status, each step's status and table, QC flag counts, and for a failed
-        run the method's line and what went wrong. Read numbers with result_table, explanations with explain."""
-        fut = start_run(experiment, time_limit_s)
+        calculation process. A step whose code and inputs are the same as in an earlier run isn't calculated again:
+        its result is reused and its status is `cached` (fresh=true calculates everything). Returns the run: status,
+        each step's status and table, QC flag counts, and for a failed run the method's line and what went wrong.
+        Read numbers with result_table, explanations with explain, the flow with its values with flow_get.
+        With `source` or `settings` it is a trial run: it doesn't become the experiment's latest run, doesn't go to
+        the results database and saves nothing; give its run id to flow_get / function_inside / result_table to see
+        its values. Only the newest trial of an experiment waits: an older one still waiting comes back
+        `replaced`."""
+        wait = max(0.0, min(wait_s, 55))
+        if source is None and settings is None:
+            fut = start_run(experiment, time_limit_s, fresh)
+            live = LIVE
+        else:
+            plan = trial_of(store.get_experiment(experiment), source, settings)
+            asked = TRIAL_ASKED[experiment] = TRIAL_ASKED.get(experiment, 0) + 1
+            while experiment in TRIALS:  # one trial at a time per experiment; a newer request replaces this one
+                try:
+                    await asyncio.wait_for(asyncio.shield(TRIALS[experiment]["future"]), timeout=wait)
+                except TimeoutError:
+                    return {"run": None, "status": "waiting", "trial": True,
+                            "note": "Another trial run of this experiment is still calculating: ask again."}
+                except Exception:  # noqa: S110  (that run's failure is its own; this one starts now)
+                    pass
+                if TRIAL_ASKED.get(experiment) != asked:
+                    return {"run": None, "status": "replaced", "trial": True}
+            fut = start_run(experiment, time_limit_s, fresh, plan)
+            live = TRIALS
         try:
-            r = await asyncio.wait_for(asyncio.shield(fut), timeout=max(0.0, min(wait_s, 55)))
+            r = await asyncio.wait_for(asyncio.shield(fut), timeout=wait)
             return run_brief(r)
         except TimeoutError:
-            st = LIVE.get(experiment) or {}
-            return {"run": st.get("run"), "status": "running", "step": st.get("step"), "message": st.get("message")}
+            st = live.get(experiment) or {}
+            return {"run": st.get("run"), "status": "running", "step": st.get("step"), "message": st.get("message"),
+                    "trial": live is TRIALS}
 
     @mcp.tool()
     def run_stop(experiment: Annotated[str | None, Field(description="The experiment whose run to stop (default: "
                                                                      "whatever runs).")] = None) -> dict[str, Any]:
         """Stop the calculation that runs now (an endless loop, or too slow): its process is ended and a fresh one
         started; the run is recorded as stopped."""
-        if experiment and experiment not in LIVE:
+        if experiment and experiment not in LIVE and experiment not in TRIALS:
             return {"stopped": False, "note": "That experiment isn't running."}
-        return {"stopped": pool.stop("you")}
+        if pool.stop("you", experiment):
+            return {"stopped": True}
+        return {"stopped": False, "note": "That experiment's run is waiting for another calculation to finish: it "
+                                          "starts after it."} if experiment else {"stopped": False}
 
     @mcp.tool()
     def run_get(run: Annotated[str | None, Field(description="Run id.")] = None,
@@ -1250,6 +1382,15 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             store.set_method_settings("gc-activity-assay", reference=e["id"])
         changed("experiment", experiment=e["id"])
         return experiment_summary(e)
+
+    # ------------------------------------------------------------------ the flow, inside a run, code help
+    from . import code_tools, flow_tools, inside_tools
+
+    api = SimpleNamespace(runner=runner, changed=changed, parsed=parsed, pick_run=pick_run, method_of=method_of,
+                          who=_who, is_user=_is_user, store=store)
+    flow_tools.register(mcp, store, api)
+    inside_tools.register(mcp, store, api)
+    code_tools.register(mcp, store, api)
 
     return store
 

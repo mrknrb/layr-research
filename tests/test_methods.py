@@ -139,7 +139,7 @@ def test_checker_warns_in_plain_words(code, expect):
 @pytest.mark.parametrize("code, expect", [
     ("def f(:\n    pass\n", "can't read line 1"),
     ("import no_such_module_here\n\ndef r(a):\n    '''R.'''\n    return {}\n", "no module called"),
-    ("from toolbox import fit_lines\n\ndef r(a):\n    '''R.'''\n    return {}\n", "The toolbox has no `fit_lines`"),
+    ("from toolbox import fit_curves\n\ndef r(a):\n    '''R.'''\n    return {}\n", "The toolbox has no `fit_curves`"),
     ("X = 1\n", "has no functions"),
     ("RECIPE = 'gone'\n\ndef r(a):\n    '''R.'''\n    return {}\n", "no function of that name"),
 ])
@@ -281,3 +281,13 @@ def test_old_json_methods_are_listed_not_run(tmp_path: Path):
         store.get_method("plant-growth")
     saved = store.save_method("gc-activity-assay", GC.read_text("utf-8"), "you", "test")
     assert saved["version"] == 3  # after the old JSON version 2, never the same number twice
+
+
+def test_toolbox_signatures_are_shown_as_written():
+    import toolbox
+    from lab import codeintel, explain
+
+    assert explain.toolbox_view("fit_line")["signature"] == "fit_line(x, y) -> Line"
+    peak = explain.toolbox_view("PeakSettings")["signature"]
+    assert "'" not in peak and "ForwardRef" not in peak and "smoothing_points: int = 11" in peak
+    assert "ForwardRef" not in codeintel._signature_text("Line", toolbox.Line)

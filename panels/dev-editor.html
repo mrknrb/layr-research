@@ -1,0 +1,275 @@
+<!doctype html>
+<!-- A page to try editor.js by itself, with made-up completion, hover and values (plugins/dev/research-editor.test.mjs
+     drives it). Not one of the plugin's panels: layr.json doesn't list it. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research editor (development page)</title>
+    <link rel="stylesheet" href="/_layr/layr.css" />
+    <link rel="stylesheet" href="./editor.css" />
+    <style>
+      body {
+        padding: 10px;
+        font: 13px/1.4 var(--font);
+        overflow: auto;
+      }
+      .bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .pane {
+        height: 380px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .merge {
+        height: 300px;
+        margin-top: 12px;
+      }
+      h3 {
+        margin: 14px 0 6px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--fg-dim);
+      }
+      table.tv {
+        border-collapse: collapse;
+        font: 11px var(--font-mono);
+      }
+      table.tv th,
+      table.tv td {
+        border: 1px solid var(--border);
+        padding: 1px 6px;
+        text-align: right;
+      }
+      table.tv th {
+        background: var(--bg-3);
+      }
+      #log {
+        color: var(--fg-dim);
+        font-size: 12px;
+      }
+      @media (max-width: 520px) {
+        .pane {
+          height: 300px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <b>editor.js</b>
+      <button class="layr-button" id="theme">Light / dark</button>
+      <button class="layr-button" id="folds">Fold / unfold the checks</button>
+      <span id="log"></span>
+    </div>
+    <div class="pane" id="ed"></div>
+    <h3>Reviewing a draft</h3>
+    <div class="merge" id="merge"></div>
+    <h3>A snippet</h3>
+    <div id="snippet"></div>
+    <script type="module">
+      import { createEditor, createMerge, highlight } from "./editor.js";
+
+      const SOURCE = `"""GC activity assay: from the integrated peaks to the activities (a sample for the editor)."""
+from toolbox import fit_line, pick_rows, read_table
+
+
+def ratio_to_standard(peaks, standard="dodecane"):
+    """Divide each peak's area by the internal standard's area in the same injection."""
+    if standard not in set(peaks["compound"]):
+        raise ValueError(f"no peak of the internal standard {standard} in the table")
+    std = peaks[peaks["compound"] == standard][["injection", "area"]].rename(columns={"area": "std_area"})
+    out = peaks.merge(std, on="injection")
+    out["ratio"] = out["area"] / out["std_area"]
+    return out
+
+
+def calibrate(ratios, levels, compound_column="compound", concentration_column="std_conc_mM", keep_outliers=False):
+    """Fit one straight line per compound through the standards' ratios against their known concentrations."""
+    lines = {}
+    for name, rows in ratios.groupby("compound"):
+        line = fit_line(rows["std_conc_mM"], rows["ratio"])
+        lines[name] = line
+    return lines
+
+
+def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
+    """The method: read, ratio, calibrate."""
+    peaks = read_table(raw_file)
+    ratios = ratio_to_standard(peaks, standard)
+    lines = calibrate(ratios, levels)
+    return {"lines": lines, "ratios": ratios}
+`;
+      const AFTER = SOURCE.replace(
+        'out["ratio"] = out["area"] / out["std_area"]',
+        'out["ratio"] = out["area"] / out["std_area"]\n    out = out[out["ratio"] > 0]',
+      )
+        .replace('for name, rows in ratios.groupby("compound"):', "for name, rows in ratios.groupby(compound_column):")
+        .replace(
+          '"""The method: read, ratio, calibrate."""',
+          '"""The method: read the peaks, ratio them, calibrate."""',
+        );
+
+      const log = (s) => (document.getElementById("log").textContent = s);
+      const table = (cols, rows) => {
+        const t = document.createElement("table");
+        t.className = "tv";
+        t.innerHTML =
+          "<tr>" +
+          cols.map((c) => `<th>${c}</th>`).join("") +
+          "</tr>" +
+          rows.map((r) => "<tr>" + r.map((x) => `<td>${x}</td>`).join("") + "</tr>").join("");
+        return t;
+      };
+      const NAMES = [
+        { label: "peaks", kind: "statement", detail: "table · 54 × 6" },
+        { label: "pick_rows", kind: "function", detail: "toolbox", doc: "Keep only the rows where a condition holds." },
+        { label: "print", kind: "function", detail: "builtin" },
+        { label: "ratio_to_standard", kind: "function", detail: "this method" },
+        { label: "read_table", kind: "function", detail: "toolbox" },
+      ];
+      const COLUMNS = ["area", "compound", "injection", "retention_time_min"].map((c) => ({
+        label: c,
+        kind: "column",
+        detail: "column",
+        boost: 5,
+      }));
+      const calls = { complete: 0, hover: 0, signature: 0 };
+      window.T = { calls };
+
+      const ed = createEditor(document.getElementById("ed"), {
+        doc: SOURCE,
+        onChange: () => (window.T.changes = (window.T.changes || 0) + 1),
+        onSave: () => (window.T.saved = (window.T.saved || 0) + 1),
+        onCursor: (c) => (window.T.cursorAt = c),
+        onDefinition: (at) => (window.T.definition = at),
+        onRename: (at) => (window.T.rename = at),
+        complete: async ({ source, line, column }) => {
+          calls.complete++;
+          const text = source.split("\n")[line - 1].slice(0, column);
+          if (/\.\w*$/.test(text) || /\["\w*$/.test(text)) return COLUMNS;
+          const word = /\w*$/.exec(text)[0];
+          return NAMES.filter((n) => n.label.startsWith(word));
+        },
+        hover: async ({ source, line, column }) => {
+          calls.hover++;
+          const text = source.split("\n")[line - 1];
+          const word = /\w*$/.exec(text.slice(0, column))[0] + /^\w*/.exec(text.slice(column))[0];
+          if (word !== "fit_line") return null;
+          const box = document.createElement("div");
+          box.className = "hover-test";
+          box.append(highlight("def fit_line(x, y, name=None)"), "Fit a straight line y = slope · x + intercept.");
+          return box;
+        },
+        signature: async ({ source, line, column }) => {
+          calls.signature++;
+          const text = source.split("\n")[line - 1].slice(0, column);
+          const m = /fit_line\(([^()]*)$/.exec(text);
+          if (!m) return null;
+          return {
+            label: "fit_line(x, y, name=None)",
+            active: m[1].split(",").length - 1,
+            doc: "Fit a straight line.",
+          };
+        },
+      });
+      window.T.ed = ed;
+
+      // Values, folds, a block and diagnostics, as the plugin would set them after a run.
+      window.T.decorate = () => {
+        ed.setValues({
+          9: [
+            {
+              name: "std",
+              text: "27 × 2",
+              type: "table",
+              title: "the internal standard's areas",
+              card: async () =>
+                table(
+                  ["injection", "std_area"],
+                  [
+                    [1, 18234.5],
+                    [2, 18101.2],
+                    [3, 17998.0],
+                  ],
+                ),
+            },
+          ],
+          11: [
+            {
+              name: "out",
+              text: "54 × 8",
+              type: "table",
+              card: () =>
+                table(
+                  ["compound", "area", "ratio"],
+                  [
+                    ["ethanol", 5021.3, 0.2754],
+                    ["acetate", 3011.9, 0.1652],
+                  ],
+                ),
+              onClick: () => (window.T.clicked = (window.T.clicked || 0) + 1),
+            },
+          ],
+          19: [
+            {
+              name: "line",
+              text: "slope 0.0412",
+              type: "data",
+              card: () => "slope 0.0412, intercept 0.0031, R² 0.9994",
+            },
+            { name: "name", text: '"ethanol"', type: "none" },
+          ],
+          26: [{ name: "peaks", text: "54 × 6", type: "table", card: () => "54 rows" }],
+          28: [{ name: "lines", text: "3 entries", type: "data", card: () => "ethanol, acetate, butanol" }],
+          29: [{ name: "return", text: "2 results", type: "flags", card: () => "lines, ratios" }],
+        });
+        ed.setFolds([{ from: 7, to: 8, label: 'stops with a message if standard not in set(peaks["compound"])' }]);
+        ed.setDiagnostics([
+          { line: 15, level: "warning", message: "This line is longer than 120 characters." },
+          { line: 19, level: "error", message: "`fit_line` takes the x values first." },
+        ]);
+        const below = document.createElement("div");
+        below.className = "below-test";
+        below.append(
+          table(
+            ["compound", "slope", "R²"],
+            [
+              ["ethanol", 0.0412, 0.9994],
+              ["acetate", 0.0388, 0.9989],
+            ],
+          ),
+        );
+        ed.setBelow({ 28: below });
+      };
+      window.T.decorate();
+
+      const merge = createMerge(document.getElementById("merge"), {
+        before: SOURCE,
+        after: AFTER,
+        onChange: (c) => (window.T.mergeCounts = c),
+      });
+      window.T.merge = merge;
+      window.T.createMerge = createMerge;
+      window.T.highlight = highlight;
+      window.T.AFTER = AFTER;
+      document
+        .getElementById("snippet")
+        .append(highlight(SOURCE.split("\n").slice(4, 12).join("\n"), { lineNumbers: true, firstLine: 5 }));
+
+      document.getElementById("theme").onclick = () => {
+        const root = document.documentElement;
+        root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+      };
+      document.getElementById("folds").onclick = () => log(ed.toggleFolds() ? "checks unfolded" : "checks folded");
+      window.T.ready = true;
+    </script>
+  </body>
+</html>

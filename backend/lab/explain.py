@@ -18,7 +18,7 @@ from typing import Any
 
 from . import latex, methodfile
 from .errors import LabError
-from .store import Store, jsonable
+from .store import Store, jsonable, step_output
 
 SAMPLE = 5  # calls shown per function
 SKIP_VALUES = {0.0, 1.0, 100.0, 1000.0}
@@ -197,6 +197,39 @@ def function_view(method: methodfile.Method, name: str, calls: dict[str, Any] | 
     return view
 
 
+def plain_signature(name: str, obj: Any) -> str:
+    """`name(a, b: Line = 1) -> Table` as written in the code: annotations without the quotes Python keeps for
+    them (`-> 'Line'`) when the module uses `from __future__ import annotations`."""
+    import inspect
+
+    try:
+        sig = inspect.signature(obj)
+    except (TypeError, ValueError):
+        return name
+
+    def plain(a: Any) -> Any:
+        return inspect.Parameter.empty if a is inspect.Parameter.empty else _Plain(a)
+
+    params = [p.replace(annotation=plain(p.annotation)) for p in sig.parameters.values()]
+    return f"{name}{sig.replace(parameters=params, return_annotation=plain(sig.return_annotation))}"
+
+
+class _Plain:
+    """An annotation shown as its text (inspect writes a string annotation with quotes)."""
+
+    def __init__(self, a: Any):
+        self.text = a if isinstance(a, str) else getattr(a, "__forward_arg__", None) or inspect_name(a)
+
+    def __repr__(self) -> str:
+        return self.text
+
+
+def inspect_name(a: Any) -> str:
+    import inspect
+
+    return inspect.formatannotation(a)
+
+
 def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, Any]:
     """A toolbox function's sentence, formula block, code and recorded calls."""
     import importlib
@@ -214,7 +247,7 @@ def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, An
         source = ""
     module = getattr(obj, "__module__", "toolbox")
     view = {"name": name, "kind": "toolbox", "module": module, "sentence": doc.sentence, "text": doc.text,
-            "code": source, "signature": f"{name}{inspect.signature(obj)}" if callable(obj) else name,
+            "code": source, "signature": plain_signature(name, obj) if callable(obj) else name,
             "formulas": [{"latex": f["latex"], "from": "docstring", "code": f["code"]}
                          for f in latex.draw_formula_lines(doc.formula)],
             "is_function": inspect.isfunction(obj)}
@@ -440,7 +473,7 @@ def table_maker(store: Store, run: dict[str, Any], table: str) -> str | None:
         return table[5:]
     out = (run.get("outputs") or {}).get(table) or {}
     for s in reversed(run.get("steps") or []):
-        o = s.get("output") or {}
+        o = step_output(s)
         if o.get("kind") == "table" and o.get("rows") == out.get("rows") and o.get("columns") == out.get("columns"):
             return s["function"]
     return None
@@ -449,8 +482,8 @@ def table_maker(store: Store, run: dict[str, Any], table: str) -> str | None:
 def column_creator(run: dict[str, Any], column: str) -> dict[str, Any] | None:
     """The step that first gave a table with this column (where the column was made)."""
     for s in run.get("steps") or []:
-        outputs = [s.get("output") or {}]
-        outputs += [o for o in (s.get("output") or {}).get("items") or [] if isinstance(o, dict)]
+        outputs = [step_output(s)]
+        outputs += [o for o in step_output(s).get("items") or [] if isinstance(o, dict)]
         if any(o.get("kind") == "table" and column in (o.get("columns") or []) for o in outputs):
             return s
     return None

@@ -2,11 +2,15 @@
 
 Explainable data analysis for a researcher who is learning Python. Two panels:
 
-- **Experiments** (`panels/lab.*`): methods (their Python code, explained from itself), experiments, GC peak review,
-  results, checks, corrections, the results database, a guide to the Python the methods use.
+- **Experiments** (`panels/lab.*`, `panels/flow.*`): an experiment's main screen is its method drawn as a **flow**
+  (boxes for steps, wires for the tables between them, each with this run's values); from a box open its code with
+  its values, its tables, the checks, peak review, corrections; methods are edited in a code editor (CodeMirror 6,
+  `panels/editor.*`) or in the flow; the results database; a guide to the Python the methods use.
 - **Quick analysis** (`panels/main.*`): load a CSV, describe it, chart it, t-test and ANOVA (the 0.1 plugin).
 
-The step design of 0.2 (JSON lists of step types) is described, as history, in `docs/proposals/analysis-workflows.md`.
+What 0.4 is and why: `docs/proposals/research-flow.md`; how its parts fit: `docs/proposals/research-flow/
+build-contract.md` (its "Tools as built" has every new tool with a real result). The step design of 0.2 (JSON lists
+of step types) is described, as history, in `docs/proposals/analysis-workflows.md`.
 
 ## Words
 
@@ -21,7 +25,13 @@ The step design of 0.2 (JSON lists of step types) is described, as history, in `
   peak boundaries), each with a written reason. Raw files are copied into the store by checksum and never changed.
 - **Run**: one calculation of an experiment, in a separate process. It records the raw files' SHA-256, the settings,
   the approved corrections, the library versions, a copy of the exact source it ran, every step's tables, every
-  returned table and figure, and every call of the method's functions (`calls.json`).
+  returned table and figure, every call of the method's functions (`calls.json`) and the values inside them
+  (`inside.json`, see below). A **trial run** (while she edits, or the comparison after a change) is kept apart: it
+  isn't the experiment's latest run and doesn't go to the results database.
+- **Flow**: the recipe drawn as boxes and wires, computed from the file every time (nothing of it is stored). Every
+  change made in the flow is a small edit of the code.
+- **Block**: a ready-made step from the toolbox (pick rows, add a column from a formula, summarize by group, join,
+  fit a line per group, sort, pick columns, charts), offered in the flow with a small form.
 - **Reference experiment**: one experiment per method that is rerun after every change of the code, to list which
   numbers moved.
 - **Draft**: a change an AI agent wrote. It doesn't count until the user accepts it in the panel, where she sees the
@@ -111,18 +121,42 @@ formula that does more than arithmetic, a step longer than about 25 lines, a fun
 given, a recipe that does more than call steps, imports other than the toolbox, pandas, numpy, scipy and the maths
 modules, file or network access outside the toolbox, a result named like a function).
 
-## How it runs and explains
+## The flow
+
+`backend/lab/flow.py` reads the recipe into a graph: one box per recipe line. `name = step(...)` is a step box whose
+inputs are the step's parameters, each fed by a wire (a name an earlier box made), a setting, a raw file input or a
+value written in place; any other line (an `if`, a loop, arithmetic) is a code box showing its lines. A comment line
+`# --- Title` starts a group of boxes. The boxes whose results reach only the `flags` result are the quality lane.
+For each table input the flow knows which columns the step reads (from its code) and marks a wire whose recorded
+table lacks one. With a run, each box has its status (done, cached, failed, not run), its time and the value on every
+wire. Layout is automatic, left to right; no positions are stored.
+
+`flow.edit(source, op)` makes a flow change as an exact edit of the recipe: add or remove a step, connect or
+disconnect an input, rename a wire, add or remove a setting, an input or a result, set a default, group boxes, add a
+code box, start a new function. Only the lines it must touch change; comments stay byte for byte; lines are wrapped
+at 120 columns as the file is. A change that would break the method is refused in plain words.
+
+## How it runs, records and explains
 
 - `methodfile.py` reads a method without running it (outline, settings form, inputs); the backend never executes a
   method itself.
 - `runner.py` sends a run to the calculation process (`worker.py`), started ahead of time and kept warm; Stop, the
-  time limit (15 min, or `time_limit_s`) or a crash end that process, and a fresh one is started. Reading GAML and
-  integrating peaks are remembered on disk by their inputs' fingerprints (`toolbox/cache.py`), so a rerun after a
-  correction takes about a second.
+  time limit (15 min, or `time_limit_s`) or a crash end that process, and a fresh one is started.
+- **Remembered steps**: a step whose code (and the code of the method's functions it uses), the toolbox, the
+  libraries and the content of its inputs are the same as in an earlier run isn't calculated again: its result and
+  its whole record come back from `LAYR_DATA_DIR/lab/cache/steps` and it is marked `cached`. After a changed setting
+  only the steps that depend on it run. "Run everything again" (`run` with `fresh`) and the reference comparison
+  calculate every step. Reading GAML and integrating peaks are also remembered by `toolbox/cache.py`.
 - `recorder.py` wraps the method's top-level functions (and the toolbox functions it imports) while it runs and
   records every call: inputs, result, time, error. Calls made by the recipe are the steps (their tables are saved);
   deeper calls are the formulas and helpers. A function called many times keeps its first 1000 calls and a count;
   a formula used on a whole column keeps the column's index and values.
+- **Inside the functions**: with Python 3.12's `sys.monitoring`, on the method file's own code only (pandas and the
+  toolbox run at full speed), every statement that gives a name a value keeps that value: in a loop the first 3 and
+  last 3 rounds and a failed one, with all rounds counted. Every table is stored once by its content
+  (`values.py`: `runs/<id>/values/<fingerprint>.csv.gz`), with a size budget per run past which tables are kept as
+  their first rows (and it says so). The values inside steps of old runs are cleared after a while to save space;
+  their results stay.
 - `explain.py` draws a formula's body as LaTeX (`latex.py`), shows a step's tables and the formulas used inside it
   with this run's numbers, and answers "where does this number come from": the recorded call that returned exactly
   that value (first among the calls inside the step that made the column; for a column-wise formula also by row),
@@ -137,6 +171,32 @@ modules, file or network access outside the toolbox, a result named like a funct
 - Reports (`export.py`, HTML / Excel / Word): what went in, how every number was calculated (each step's sentence,
   formulas drawn from the code, this run's numbers), results, flags, corrections with reasons, and the source code
   as an appendix.
+
+## Blocks and code help
+
+- `toolbox/blocks.py`: the ready-made steps, plain functions a beginner can read ("a table in, a table out", with a
+  docstring in the method style). `blocks()` builds the flow's palette from their signatures and docstrings: each
+  one's title, sentence, what it takes and gives, and the fields of its form (column, columns, text, number, choice,
+  formula, table...). A block added in the flow is an ordinary call in the recipe plus its name in the
+  `from toolbox import` line.
+- `lab/codeintel.py`: help in the editor from the plugin's own Python with Jedi: completion (columns of the tables
+  the last run saw come first after `peaks.` and inside `peaks["`), hover, the signature being typed, go to
+  definition, rename everywhere; Ruff lays a method out at 120 columns, only when asked. Jedi is warmed up in the
+  background when the server starts.
+
+## Tools
+
+Methods: `methods`, `method_get`, `method_check`, `method_versions`, `method_diff`, `method_create`, `method_write`,
+`method_revert`, `method_reference`, `method_delete`, `draft_get`, `draft_decide` (the user's; `source` accepts a
+merged text), `toolbox_docs`, `toolbox_copy`. The flow: `flow_get`, `flow_edit` (saves nothing), `flow_new`, `blocks`.
+Experiments and runs: `experiments`, `experiment_get`, `experiment_create`, `experiment_update`, `experiment_delete`,
+`lab_sample`, `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
+`settings`), `run_stop`, `run_get`, `runs`, `compare_runs`. Results and explanations: `result_table`, `figure`,
+`provenance`, `explain`, `explain_function`, `function_inside` (a function's code with the values of every line),
+`value_get` (the rows of any stored table), `chromatogram`, the corrections, `database_tables`, `database_query`,
+`export`, `method_export`, `notebook`. The editor: `code_complete`, `code_hover`, `code_signature`,
+`code_definition`, `code_rename`, `code_format`. For the panel's AI buttons: `ai_prompt` (explain, a Methods
+paragraph, or write a step from her sentence).
 
 ## The GC-FID activity assay
 
@@ -155,11 +215,16 @@ The server's instructions say the rules and the style; in short: numbers only fr
 `database_query` (with the run id); a method changes only through `method_write` (the whole file or one function),
 which is a draft the user accepts and comes back with the checker's warnings to fix; `draft_get` shows the changed
 lines and the numbers that moved; `draft_decide` is the user's. Corrections need a reason and stay proposed until the
-user approves them. The panel's Explain button and the Methods paragraph ask Claude through the claude plugin's `ask`
-tool (an optional connection; the buttons hide without it) and mark the answer as written by AI.
+user approves them. An agent reads the flow with `flow_get`, makes flow changes with `flow_edit` and saves the
+result with `method_write` (a draft like any change), looks inside a run with `function_inside` / `value_get`, and
+tries an unsaved change with `run` and `source` (a trial run that saves nothing). The panel's Explain button, the
+Methods paragraph and "describe a step" ask Claude through the claude plugin's `ask` tool (an optional connection;
+the buttons hide without it) and mark the answer as written by AI; a step Claude writes is a draft she reviews.
 
 ## Tests
 
 From `plugins/research`: `uv run pytest tests -q` (add `GCASSAY_PROJECT=<folder>` for the real-data comparison).
+`tests/test_flow_server.py` drives 0.4 end to end through the server as layr starts it (the sample run, its flow
+with a value on every wire, the inside of a step, a changed setting with remembered steps, a block added and tried).
 The panel: start `layr serve` with this plugin linked and its own home, then
 `node plugins/dev/research.test.mjs --port <port> --home <that home>`.

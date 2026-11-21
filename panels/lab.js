@@ -1,5 +1,8 @@
-// Experiments: methods as Python code explained from itself, GC peak review, results, checks, corrections, the PhD
-// database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI agents use.
+// Experiments: methods as Python code drawn as a flow and explained from itself, GC peak review, results, checks,
+// corrections, the PhD database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI
+// agents use. The flow (flow.js) is the main screen of an experiment and sits above the code of a method.
+import { createEditor, createMerge, highlight } from "./editor.js";
+import { mountFlow } from "./flow.js";
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -10,10 +13,10 @@ const dialog = document.getElementById("dialog");
 const S = {
   view: "home",
   exp: null,
-  tab: "method",
+  tab: "flow",
+  run: null, // an earlier run of the experiment picked in the flow (null: the latest)
+  setting: null, // a setting to show when the Settings tab opens
   method: null,
-  step: null,
-  general: false,
   fn: null,
   line: null,
   numbersExp: null,
@@ -22,6 +25,8 @@ const S = {
   injFilter: "all",
   table: null,
   dbTable: null,
+  flowFrac: 0.42, // the method screen: how much of the height the flow takes
+  autoRecalc: true, // the method screen: a trial run by itself after a change
 };
 let live = null; // {exp, timer} while a run is in progress
 let token = 0; // render generation: a slower, older render must not overwrite a newer one
@@ -111,7 +116,11 @@ function go(patch) {
     });
     return;
   }
-  if (leaving) ME = null;
+  if (leaving) closeMethod();
+  if ((patch.view && patch.view !== "experiment") || (patch.exp && patch.exp !== S.exp)) {
+    closeExpFlow();
+    if (!("run" in patch)) patch = { ...patch, run: null };
+  }
   Object.assign(S, patch);
   save();
   render();
@@ -130,8 +139,9 @@ function flagBadges(counts) {
   return out;
 }
 
-function openDialog({ title, body, buttons }) {
+function openDialog({ title, body, buttons, wide = false }) {
   return new Promise((resolve) => {
+    dialog.classList.toggle("wide", !!wide);
     put(
       dialog,
       h("h3", {}, title),
@@ -157,6 +167,15 @@ function openDialog({ title, body, buttons }) {
       ),
     );
     dialog.onclose = () => resolve(null);
+    // Enter in a field confirms (the primary button), as in any form; Escape closes (the dialog does that itself)
+    dialog.onkeydown = (e) => {
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing || !e.target.matches?.("input:not([type=checkbox])"))
+        return;
+      const primary = dialog.querySelector(".dialog-buttons .layr-button.primary");
+      if (!primary) return;
+      e.preventDefault();
+      primary.click();
+    };
     dialog.showModal();
   });
 }
@@ -369,7 +388,7 @@ async function renderHome(t) {
       "div",
       {
         class: "layr-card exp-card click",
-        onclick: () => go({ view: "experiment", exp: e.experiment, tab: "method", step: null }),
+        onclick: () => go({ view: "experiment", exp: e.experiment, tab: "flow" }),
       },
       h("div", { class: "exp-title" }, e.title),
       h("div", { class: "layr-muted" }, e.method_name, " · ", Object.values(e.files || {}).join(", ") || "no file yet"),
@@ -419,7 +438,13 @@ async function renderHome(t) {
       h(
         "section",
         {},
-        h("div", { class: "section-head" }, h("h2", {}, "Methods"), h("span", { class: "layr-spacer" })),
+        h(
+          "div",
+          { class: "section-head" },
+          h("h2", {}, "Methods"),
+          h("span", { class: "layr-spacer" }),
+          h("button", { class: "layr-button", onclick: newMethod }, "New method"),
+        ),
         h(
           "p",
           { class: "layr-muted" },
@@ -459,17 +484,73 @@ async function renderHome(t) {
   );
 }
 
+/** A method from nothing: a name and a sentence give an empty recipe; the flow then says what to add first. */
+async function newMethod() {
+  const name = h("input", { class: "layr-input", placeholder: "e.g. Growth on plates" });
+  const sentence = h("textarea", {
+    class: "layr-textarea",
+    rows: 2,
+    placeholder: "e.g. Growth rates of cultures read on a plate reader.",
+  });
+  const err = h("div", { class: "layr-error", hidden: true }, "Give it a name.");
+  setTimeout(() => name.focus(), 30);
+  const ok = await openDialog({
+    title: "New method",
+    body: [
+      h("label", { class: "layr-label" }, "Its name"),
+      name,
+      h("label", { class: "layr-label" }, "What it measures, in a sentence"),
+      sentence,
+      err,
+    ],
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      {
+        label: "Make it",
+        kind: "primary",
+        value: () => (name.value.trim() ? true : ((err.hidden = false), undefined)),
+      },
+    ],
+  });
+  if (!ok) return;
+  try {
+    const title = name.value.trim();
+    const fresh = await call("flow_new", { name: title, description: sentence.value.trim() || undefined });
+    const methods = await call("methods");
+    const base =
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "method";
+    let id = base;
+    for (let i = 2; methods.some((m) => m.id === id); i++) id = `${base}-${i}`;
+    const r = await call("method_create", {
+      method: id,
+      name: title,
+      description: sentence.value.trim(),
+      source: fresh.source,
+    });
+    if (r.saved === false)
+      return layr.ui.notify((r.messages || []).map((m) => m.message).join("; ") || r.note, "error");
+    go({ view: "method", method: id, fn: null, numbersExp: null });
+  } catch (e) {
+    fail(e);
+  }
+}
+
 async function makeExample() {
+  let e;
   try {
     setStatus("Making the example…");
-    const e = await call("lab_sample");
-    go({ view: "experiment", exp: e.experiment, tab: "method", step: null });
-    startRun(e.experiment);
+    e = await call("lab_sample");
   } catch (err) {
     fail(err);
   } finally {
     setStatus("");
   }
+  if (!e) return;
+  go({ view: "experiment", exp: e.experiment, tab: "flow" });
+  startRun(e.experiment); // after the status above is cleared: the status now follows the run
 }
 
 // ------------------------------------------------------------------------------------------------ new experiment
@@ -485,8 +566,11 @@ async function renderNew(t, preset) {
   const methodSel = h(
     "select",
     { class: "layr-select" },
-    methods.map((m) => h("option", { value: m.id }, m.name)),
+    methods
+      .filter((m) => !m.legacy)
+      .map((m) => h("option", { value: m.id, selected: m.id === S.newMethod }, m.name)),
   );
+  S.newMethod = null;
   const filesBox = h("div", {});
   const gcBox = h("div", { class: "layr-muted" });
   const drawFiles = () => {
@@ -573,7 +657,7 @@ async function renderNew(t, preset) {
         params: st.params,
         corrections: st.corrections,
       });
-      go({ view: "experiment", exp: e.experiment, tab: "settings", step: null });
+      go({ view: "experiment", exp: e.experiment, tab: "settings" });
     } catch (err) {
       fail(err);
     }
@@ -605,13 +689,25 @@ async function renderNew(t, preset) {
 // ------------------------------------------------------------------------------------------------ experiment
 
 const TABS = [
-  ["method", "Method"],
+  ["flow", "Flow"],
   ["peaks", "Peaks"],
   ["results", "Results"],
   ["checks", "Checks"],
   ["corrections", "Corrections"],
   ["settings", "Settings"],
 ];
+
+// The experiment's flow stays mounted while the experiment is shown (its view, selection and inside panel survive a
+// redraw of the screen around it): {exp, host, flow, run, lastRun}.
+let EF = null;
+
+function closeExpFlow() {
+  EF?.flow.destroy();
+  EF = null;
+}
+
+/** The run the experiment's tabs show: an earlier one picked in the flow, else its latest. */
+const runArgs = (exp) => (S.run ? { run: S.run } : { experiment: exp.id });
 
 async function renderExperiment(t) {
   const exp = await call("experiment_get", { experiment: S.exp });
@@ -634,7 +730,17 @@ async function renderExperiment(t) {
           },
           "Stop",
         )
-      : null,
+      : exp.last_run
+        ? h(
+            "button",
+            {
+              class: "layr-button ghost run-all",
+              title: "Calculate every step again, reusing nothing from before",
+              onclick: () => startRun(exp.id, { fresh: true }),
+            },
+            "Run all again",
+          )
+        : null,
     h(
       "button",
       { class: "layr-button primary", disabled: running, onclick: () => startRun(exp.id) },
@@ -645,13 +751,15 @@ async function renderExperiment(t) {
   const corr = exp.corrections || [];
   const proposed = corr.filter((c) => c.status === "proposed").length;
   const flags = exp.last_run?.summary?.flags || {};
+  if (S.tab === "method" || !TABS.some(([id]) => id === S.tab)) S.tab = "flow";
+  const tab = S.tab === "peaks" && !isGc ? "flow" : S.tab;
   const tabs = h(
     "div",
     { class: "tabs" },
     TABS.filter(([id]) => id !== "peaks" || isGc).map(([id, label]) =>
       h(
         "button",
-        { class: `tab ${S.tab === id ? "active" : ""}`, onclick: () => go({ tab: id }) },
+        { class: `tab ${tab === id ? "active" : ""} tab-${id}`, onclick: () => go({ tab: id }) },
         label,
         id === "checks" && (flags.error || flags.warning)
           ? h("span", { class: "count" }, (flags.error || 0) + (flags.warning || 0))
@@ -660,51 +768,212 @@ async function renderExperiment(t) {
       ),
     ),
   );
-  const body = h("div", { class: "tab-body" });
-  const last = exp.last_run;
-  const at = last?.error_at;
-  const banner = exp.method_problem
-    ? h("div", { class: "banner danger" }, exp.method_problem)
-    : last && last.status !== "done"
-      ? h(
-          "div",
-          { class: "banner danger" },
-          `The last run ${last.status === "stopped" ? "was stopped" : "failed"}: `,
-          last.error || "",
-          at?.line
-            ? [
-                " ",
-                h(
-                  "a",
-                  {
-                    href: "#",
-                    onclick: (e) => {
-                      e.preventDefault();
-                      go({ view: "method", method: exp.method, fn: at.function, line: at.line });
-                    },
-                  },
-                  `line ${at.line} in ${at.function}`,
-                ),
-              ]
-            : null,
-        )
-      : !last
-        ? h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run.")
-        : exp.changed && exp.changed > (last.started || last.finished)
-          ? h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate.")
-          : null;
-  put(view, h("div", { class: "exp" }, tabs, banner, body));
-  const tab = S.tab === "peaks" && !isGc ? "method" : S.tab;
+  const body = h("div", { class: `tab-body${tab === "flow" ? " flow-tab" : ""}` });
+  put(view, h("div", { class: "exp" }, tabs, h("div", { class: "exp-banners" }, expBanners(exp, tab)), body));
   const fn =
     {
-      method: tabMethod,
+      flow: tabFlow,
       peaks: tabPeaks,
       results: tabResults,
       checks: tabChecks,
       corrections: tabCorrections,
       settings: tabSettings,
-    }[tab] || tabMethod;
+    }[tab] || tabFlow;
   await fn(body, exp, t);
+}
+
+/** What the experiment's screen says above its tab: a problem, a failed or missing run, an earlier run shown. */
+function expBanners(exp, tab) {
+  const last = exp.last_run;
+  const at = last?.error_at;
+  const out = [];
+  if (exp.method_problem) out.push(h("div", { class: "banner danger" }, exp.method_problem));
+  else if (last && last.status !== "done" && !S.run)
+    out.push(
+      h(
+        "div",
+        { class: "banner danger" },
+        `The last run ${last.status === "stopped" ? "was stopped" : "failed"}: `,
+        last.error || "",
+        at?.line
+          ? [
+              " ",
+              h(
+                "a",
+                {
+                  href: "#",
+                  onclick: (e) => {
+                    e.preventDefault();
+                    go({ view: "method", method: exp.method, fn: at.function, line: at.line, numbersExp: exp.id });
+                  },
+                },
+                `line ${at.line} in ${at.function}`,
+              ),
+            ]
+          : null,
+      ),
+    );
+  else if (!last) out.push(h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run."));
+  else if (exp.changed && exp.changed > (last.started || last.finished) && !S.run)
+    out.push(h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate."));
+  if (S.run) {
+    const follows = tab === "results" || tab === "checks" || tab === "flow";
+    out.push(
+      h(
+        "div",
+        { class: "banner earlier" },
+        h("b", {}, "You are looking at an earlier run. "),
+        follows
+          ? "The flow, Results and Checks show it."
+          : "This tab shows the experiment as it is now (Results and Checks show the earlier run).",
+        " ",
+        h(
+          "a",
+          {
+            href: "#",
+            onclick: (e) => {
+              e.preventDefault();
+              go({ run: null });
+            },
+          },
+          "Back to the latest run",
+        ),
+      ),
+    );
+  }
+  return out;
+}
+
+// ---------- Flow tab: the method as boxes with this experiment's data; a box opens what belongs to it
+
+async function tabFlow(body, exp) {
+  const lastRun = exp.last_run?.id || null;
+  if (!EF || EF.exp !== exp.id) {
+    closeExpFlow();
+    const host = h("div", { class: "flow-host" });
+    body.append(host);
+    EF = { exp: exp.id, host, run: S.run || null, lastRun, flow: null };
+    EF.flow = mountFlow(host, {
+      call,
+      tex,
+      method: exp.method,
+      version: exp.method_version ?? null,
+      experiment: exp.id,
+      run: S.run || null,
+      editable: false,
+      inside: "panel",
+      claude: false,
+      runNote: false, // the screen's own banner says when the last run failed, with a link to the line
+      figure: figureOf,
+      onSetting: (id, value) => settingChanged(exp, id, value),
+      onPick: (p) => pickedInFlow(exp, p),
+      onOpen: (o) => openFromFlow(exp, o),
+      boxActions: (n) => expBoxActions(exp, n),
+    });
+  } else {
+    body.append(EF.host);
+    if (EF.run !== (S.run || null) || EF.lastRun !== lastRun) {
+      EF.run = S.run || null;
+      EF.lastRun = lastRun;
+      EF.flow.update({ run: EF.run });
+    }
+  }
+  EF.flow.setRunning(live && live.exp === exp.id && live.step ? { step: live.step } : null);
+}
+
+/** A figure a run returned, as an image's src (the flow shows it in the result's card and inside its box). */
+async function figureOf({ run, output }) {
+  const res = await layr.tools.call("figure", { run, output });
+  const img = res.content?.find((c) => c.type === "image");
+  return img ? `data:${img.mimeType};base64,${img.data}` : null;
+}
+
+/** The links a box gets on the experiment's screen: the peaks to review, the checks, the corrections. */
+function expBoxActions(exp, n) {
+  const isGc = (exp.method_inputs || []).some((i) => (i.types || []).includes(".gaml"));
+  if (n.folded && n.quality)
+    return [{ label: "See the checks", title: "Every check with what it found", run: () => go({ tab: "checks" }) }];
+  if (n.input?.kind === "corrections")
+    return [{ label: "Open the corrections", run: () => go({ tab: "corrections" }) }];
+  if (n.input)
+    return [{ label: n.input.value ? "Use another file" : "Choose the file", title: "In the experiment's settings",
+      run: () => go({ tab: "settings" }) }];
+  if (isGc && (n.fn === "integrate_peaks" || (n.outs || []).includes("peaks")))
+    return [
+      {
+        label: "Review the peaks",
+        title: "Each injection's trace with the integrated peaks; drag a boundary to correct it",
+        run: () => go({ tab: "peaks" }),
+      },
+    ];
+  return [];
+}
+
+function openFromFlow(exp, o) {
+  if (o.what === "results") go({ tab: "results", table: o.table || null });
+  else if (o.what === "settings") go({ tab: "settings", setting: o.setting || null });
+  else if (o.what === "corrections") go({ tab: "corrections" });
+  else if (o.what === "checks") go({ tab: "checks" });
+  else if (o.what === "peaks") go({ tab: "peaks" });
+  else if (o.what === "function")
+    go({
+      view: "method",
+      method: exp.method,
+      fn: o.fn || null,
+      line: o.fn ? null : o.line || null,
+      numbersExp: exp.id,
+    });
+  else if (o.what === "new-experiment") go({ view: "new", newMethod: o.method || exp.method });
+}
+
+function pickedInFlow(exp, { experiment, run }) {
+  if (experiment && experiment !== exp.id) {
+    go({ view: "experiment", exp: experiment, run: null });
+    return;
+  }
+  if (!experiment) return;
+  // The flow already shows the run: keep the record so the other tabs follow, and redraw the banner.
+  S.run = run || null;
+  if (EF) EF.run = S.run;
+  save();
+  render();
+}
+
+/** A setting changed in a box: it is the experiment's now, and the experiment is calculated again by itself. */
+async function settingChanged(exp, id, value) {
+  try {
+    await call("experiment_update", { experiment: exp.id, params: { [id]: value } });
+    S.run = null;
+    startRun(exp.id);
+  } catch (err) {
+    fail(err);
+    render();
+  }
+}
+
+/** The Methods paragraph for a paper, drafted by Claude from the method and settings and kept with the experiment. */
+async function methodsParagraph(exp) {
+  const ai = await checkAi();
+  const kept = exp.methods_text || "";
+  const choice = await openDialog({
+    title: "Methods paragraph",
+    body: kept
+      ? [h("p", { class: "pre-line" }, kept), h("div", { class: "ai-label" }, "Drafted by Claude, kept by you.")]
+      : h(
+          "p",
+          { class: "layr-muted" },
+          ai
+            ? "Claude can draft the Methods paragraph for a paper from this method's code and settings."
+            : "Install the Claude Code plugin to have the Methods paragraph drafted from the code.",
+        ),
+    buttons: [
+      { label: "Close", id: null, kind: "ghost" },
+      kept ? { label: "Copy", id: "copy" } : null,
+      ai ? { label: kept ? "Draft again with Claude…" : "Draft with Claude…", id: "draft", kind: "primary" } : null,
+    ].filter(Boolean),
+  });
+  if (choice === "copy") navigator.clipboard.writeText(kept).then(() => layr.ui.notify("Copied", "success"), fail);
+  if (choice === "draft") draftMethods(exp);
 }
 
 function exportMenu(ev, exp) {
@@ -728,6 +997,7 @@ function exportMenu(ev, exp) {
       { label: "Report (web page, prints to PDF)", icon: "description", run: () => doExport("html", ".html") },
       { label: "Word document", icon: "article", run: () => doExport("docx", ".docx") },
       { label: "Excel workbook (every table)", icon: "table_chart", run: () => doExport("xlsx", ".xlsx") },
+      { label: "Methods paragraph for a paper…", icon: "edit_note", run: () => methodsParagraph(exp) },
       "-",
       {
         label: "Folder that runs without layr (zip)",
@@ -777,34 +1047,67 @@ async function openNotebook(exp) {
   }
 }
 
-function startRun(expId) {
-  call("run", { experiment: expId, wait_s: 0 }).catch(fail);
-  live = { exp: expId, step: null };
+/**
+ * Calculates the experiment (`fresh`: every step again, nothing reused). The flow lights up the step being
+ * calculated; when it is done the screen shows the new numbers and how many steps were reused.
+ */
+function startRun(expId, { fresh = false } = {}) {
+  const mine = (live = { exp: expId, step: null });
+  S.run = null;
   setStatus("Calculating…");
+  // The run answers when it is done (a remembered run in well under a second); its steps light up from its events.
+  // A long one answers "running" after the wait: then it is asked again every half second.
+  call("run", { experiment: expId, wait_s: 30, ...(fresh ? { fresh: true } : {}) }).then(
+    (r) => live === mine && (r.status === "running" || r.status === "waiting" ? poll() : done(r)),
+    (err) => {
+      if (live !== mine) return;
+      live = null;
+      if (EF?.exp === expId) EF.flow.setRunning(null);
+      setStatus("");
+      fail(err);
+    },
+  );
+  const done = (r) => {
+    live = null;
+    if (EF?.exp === expId) {
+      EF.flow.setRunning(null);
+      // the new numbers go into the flow at once; the screen around it (banners, buttons) is drawn as well
+      if (r.run && !S.run && r.status !== "stopped") {
+        EF.lastRun = r.run;
+        EF.run = null;
+        EF.flow.update({ run: null, refresh: true });
+      }
+    }
+    const hits = r.cache?.hits || 0;
+    setStatus(r.status === "done" ? "" : r.status === "stopped" ? "The run was stopped" : "The run failed");
+    if (r.status === "done")
+      layr.ui.notify(hits ? `Calculated · ${hits} step${hits === 1 ? "" : "s"} reused from before` : "Calculated",
+        "success");
+    render();
+  };
   const poll = async () => {
-    if (!live || live.exp !== expId) return;
+    if (live !== mine) return;
     try {
       const r = await call("run_get", { experiment: expId });
       if (r.status === "running") {
-        setStatus(`Calculating: ${r.message || r.step || "…"}`);
-        live.timer = setTimeout(poll, 600);
+        setStatus(`Calculating: ${human(r.step) || r.message || "…"}`);
+        if (r.step && r.step !== live.step) {
+          live.step = r.step;
+          if (EF?.exp === expId) EF.flow.setRunning({ step: r.step });
+        }
+        live.timer = setTimeout(poll, 500);
         return;
       }
-      live = null;
-      setStatus(r.status === "done" ? "" : r.status === "stopped" ? "The run was stopped" : "The run failed");
-      if (r.status === "done") layr.ui.notify("Calculated", "success");
-      render();
+      done(r);
     } catch (err) {
       live = null;
+      if (EF?.exp === expId) EF.flow.setRunning(null);
       setStatus("");
       fail(err);
     }
   };
-  live.timer = setTimeout(poll, 400);
   render();
 }
-
-// ---------- Method tab: the run explained step by step, from the code
 
 function human(name) {
   const s = String(name || "").replace(/_/g, " ");
@@ -813,12 +1116,6 @@ function human(name) {
 
 function kindBadge(kind) {
   return h("span", { class: `kind ${kind || ""}` }, kind || "");
-}
-
-function stepStatus(s) {
-  if (s.status === "failed") return badge("failed", "danger");
-  if (s.status && s.status !== "done") return badge(s.status, "");
-  return h("span", { class: "layr-muted small" }, s.ms != null ? `${Math.round(s.ms)} ms` : "");
 }
 
 // The step that made a saved table, from its file name (steps/03_integrate_peaks.csv).
@@ -864,197 +1161,9 @@ function tableChips(inputs, output, fnName, exp) {
 }
 
 function codeBlock(code) {
-  const pre = h("pre", { class: "code-block cm-s-default" });
-  if (window.CodeMirror?.runMode) window.CodeMirror.runMode(code || "", "python", pre);
-  else pre.textContent = code || "";
+  const pre = highlight(code || "");
+  pre.classList.add("code-block");
   return pre;
-}
-
-function usedBlock(used) {
-  if (!used?.length) return [];
-  return [
-    h("h4", {}, "Uses"),
-    used.map((u) =>
-      h(
-        "div",
-        { class: "used" },
-        h(
-          "div",
-          {},
-          h("b", {}, human(u.function)),
-          " ",
-          kindBadge(u.kind),
-          " ",
-          h("code", { class: "small" }, u.function),
-        ),
-        u.sentence ? h("div", { class: "layr-muted small" }, u.sentence) : null,
-        (u.formulas || []).map((f) => h("div", { class: "formula" }, tex(f.latex, true))),
-        (u.example?.latex || []).length
-          ? h(
-              "div",
-              { class: "example" },
-              h("div", { class: "flabel" }, `In this run${u.count > 1 ? ` (one of ${u.count} calculations)` : ""}`),
-              u.example.latex.map((l) => tex(l, true)),
-            )
-          : null,
-      ),
-    ),
-  ];
-}
-
-function renderStep(s, exp, ex) {
-  const parts = [
-    h("h3", {}, human(s.function), " ", kindBadge(s.kind)),
-    h("div", { class: "layr-muted small" }, h("code", {}, s.function), s.line ? ` · line ${s.line}` : ""),
-    h("p", { class: "sentence" }, s.sentence || ""),
-  ];
-  if (s.text) parts.push(h("p", { class: "layr-muted" }, s.text));
-  if (s.status === "failed") parts.push(h("div", { class: "banner danger" }, s.error || "failed"));
-  if (s.formulas?.length) {
-    parts.push(h("h4", {}, "Formula"));
-    for (const f of s.formulas) parts.push(h("div", { class: "formula" }, tex(f.latex, true)));
-  }
-  parts.push(...tableChips(s.inputs, s.output, s.function, ex.run ? exp : null));
-  parts.push(...usedBlock(s.used));
-  if (s.code)
-    parts.push(
-      h("details", { class: "code-details" }, h("summary", {}, "The code"), codeBlock(s.code)),
-      s.kind !== "toolbox"
-        ? h(
-            "p",
-            {},
-            h(
-              "a",
-              {
-                href: "#",
-                onclick: (e) => {
-                  e.preventDefault();
-                  go({ view: "method", method: exp.method, fn: s.function, line: null });
-                },
-              },
-              "Open it in the method's code",
-            ),
-          )
-        : null,
-    );
-  return h("div", { class: "sheet" }, parts);
-}
-
-async function tabMethod(body, exp, t) {
-  const hasRun = exp.last_run?.status === "done";
-  const general = S.general || !hasRun;
-  const ex = await call("explain", general ? { method: exp.method } : { experiment: exp.id });
-  if (t !== token) return;
-  const steps = ex.steps || [];
-  const sel = steps.find((s) => s.function === S.step) || steps[0];
-  const list = h(
-    "ol",
-    { class: "steps" },
-    steps.map((s, i) =>
-      h(
-        "li",
-        {
-          class: `step ${s === sel ? "active" : ""}`,
-          onclick: () => {
-            S.step = s.function;
-            save();
-            tabMethod(body, exp, token);
-          },
-        },
-        h(
-          "div",
-          { class: "step-head" },
-          h("span", { class: "stepnum" }, i + 1),
-          h("b", {}, human(s.function)),
-          h("span", { class: "layr-spacer" }),
-          s.status ? stepStatus(s) : kindBadge(s.kind),
-        ),
-        h("div", { class: "step-sentence" }, s.sentence || ""),
-      ),
-    ),
-  );
-  const ai = await checkAi();
-  const kept = exp.methods_text || "";
-  const methodsCard = h(
-    "div",
-    { class: "layr-card methods-text" },
-    h(
-      "div",
-      { class: "section-head" },
-      h("b", {}, "Methods paragraph"),
-      h("span", { class: "layr-spacer" }),
-      ai
-        ? h(
-            "button",
-            { class: "layr-button small ghost", onclick: () => draftMethods(exp) },
-            kept ? "Draft again with Claude…" : "Draft with Claude…",
-          )
-        : null,
-      kept
-        ? h(
-            "button",
-            {
-              class: "layr-button small ghost",
-              onclick: () => navigator.clipboard.writeText(kept).then(() => layr.ui.notify("Copied", "success"), fail),
-            },
-            "Copy",
-          )
-        : null,
-    ),
-    kept
-      ? [h("p", { class: "clamp" }, kept), h("div", { class: "ai-label" }, "Drafted by Claude, kept by you.")]
-      : h(
-          "p",
-          { class: "layr-muted small" },
-          ai
-            ? "Claude can draft the Methods paragraph for a paper from this method's code and settings."
-            : "Install the Claude Code plugin to have the Methods paragraph drafted from the code.",
-        ),
-  );
-  const toggle = h(
-    "div",
-    { class: "seg" },
-    h(
-      "button",
-      { class: !general ? "active" : "", disabled: !hasRun, onclick: () => go({ general: false }) },
-      "With this run's numbers",
-    ),
-    h("button", { class: general ? "active" : "", onclick: () => go({ general: true }) }, "General"),
-  );
-  put(
-    body,
-    h(
-      "div",
-      { class: "method-grid" },
-      h(
-        "div",
-        { class: "steps-col" },
-        h(
-          "div",
-          { class: "method-head" },
-          h("b", {}, ex.name || exp.method),
-          h("span", { class: "layr-muted" }, ` version ${(ex.method || {}).version ?? ""}`),
-          h(
-            "a",
-            {
-              href: "#",
-              class: "small",
-              onclick: (e) => {
-                e.preventDefault();
-                go({ view: "method", method: exp.method, fn: null });
-              },
-            },
-            " · the code",
-          ),
-          h("span", { class: "layr-spacer" }),
-          toggle,
-        ),
-        methodsCard,
-        list,
-      ),
-      h("div", { class: "sheet-col" }, sel ? renderStep(sel, exp, ex) : null),
-    ),
-  );
 }
 
 async function draftMethods(exp) {
@@ -1089,6 +1198,7 @@ async function draftMethods(exp) {
 const STATUS_CLASS = { ok: "ok", "<LOQ": "loq", "n.d.": "nd", manual: "manual", excluded: "excl" };
 
 async function tabPeaks(body, exp, t) {
+  // The peaks are reviewed (and corrected) on the latest run; an earlier run picked in the flow doesn't change that.
   if (!exp.last_run || exp.last_run.status !== "done") {
     put(body, h("div", { class: "layr-empty" }, "Run the experiment first: the peaks come from a run."));
     return;
@@ -1619,7 +1729,7 @@ async function tabResults(body, exp, t) {
     put(body, h("div", { class: "layr-empty" }, "No results yet: run the experiment."));
     return;
   }
-  const run = await call("run_get", { experiment: exp.id });
+  const run = await call("run_get", runArgs(exp));
   if (t !== token) return;
   if (run.legacy) {
     put(
@@ -1639,15 +1749,14 @@ async function tabResults(body, exp, t) {
   if (!S.table || !(tableNames.includes(S.table) || stepTables.includes(S.table))) S.table = tableNames[0];
   const figBox = h("div", { class: "figs" });
   for (const f of figs) {
-    layr.tools
-      .call("figure", { experiment: exp.id, output: f })
-      .then((res) => {
-        const img = res.content?.find((c) => c.type === "image");
-        if (img)
-          figBox.append(
-            h("img", { src: `data:${img.mimeType};base64,${img.data}`, class: "fig", alt: outs[f].label || f }),
-          );
-      })
+    // a figure is read like every other value (value_get and its file); the figure tool only for an old run's
+    const src = outs[f].file
+      ? call("value_get", { run: run.run, file: outs[f].file }).then((r) =>
+          r.data ? `data:image/png;base64,${r.data}` : null,
+        )
+      : figureOf({ run: run.run, output: f });
+    src
+      .then((s) => s && figBox.append(h("img", { src: s, class: "fig", alt: outs[f].label || f })))
       .catch(() => {});
   }
   const sel = h(
@@ -1684,7 +1793,7 @@ async function tabResults(body, exp, t) {
     put(tbox, h("div", { class: "layr-empty" }, "This run returned no tables."));
     return;
   }
-  const data = await call("result_table", { experiment: exp.id, table: S.table, limit: 2000 });
+  const data = await call("result_table", { ...runArgs(exp), table: S.table, limit: 2000 });
   if (t !== token) return;
   const filterCols = data.columns.filter((c) =>
     ["compound", "substrate", "substrate_fed", "strain", "role", "status", "level", "category"].includes(c),
@@ -1740,7 +1849,7 @@ async function showProvenance(exp, tableName, row, column) {
   if (!keys.length) keys = Object.keys(row).filter((k) => typeof row[k] === "string");
   const where = Object.fromEntries(keys.map((k) => [k, row[k]]));
   try {
-    const p = await call("provenance", { experiment: exp.id, table: tableName, where, column });
+    const p = await call("provenance", { ...runArgs(exp), table: tableName, where, column });
     const chain = p.chain || [];
     const body = chain.length
       ? chain.map((c, i) =>
@@ -1794,7 +1903,7 @@ async function tabChecks(body, exp, t) {
     put(body, h("div", { class: "layr-empty" }, "No checks yet: run the experiment."));
     return;
   }
-  const fl = await call("result_table", { experiment: exp.id, table: "flags", limit: 2000 }).catch(() => null);
+  const fl = await call("result_table", { ...runArgs(exp), table: "flags", limit: 2000 }).catch(() => null);
   if (t !== token) return;
   if (!fl) {
     put(body, h("div", { class: "layr-empty" }, "This method has no quality checks."));
@@ -1970,7 +2079,7 @@ async function tabSettings(body, exp) {
       ps.map((p) =>
         h(
           "div",
-          { class: "field" },
+          { class: `field${p.id === S.setting ? " focus" : ""}`, id: `set-${p.id}` },
           h("label", { class: "layr-label", title: p.help || "" }, p.label, p.unit ? ` (${p.unit})` : ""),
           editor(p, params),
           p.help ? h("div", { class: "layr-muted small" }, p.help) : null,
@@ -2077,6 +2186,10 @@ async function tabSettings(body, exp) {
       ),
     ),
   );
+  if (S.setting) {
+    document.getElementById(`set-${S.setting}`)?.scrollIntoView({ block: "center" });
+    S.setting = null;
+  }
 }
 
 function editor(p, params) {
@@ -2247,9 +2360,14 @@ function rowsEditor(rows, cols, onChange) {
 
 // ------------------------------------------------------------------------------------------------ method (code)
 
-// The method editor: the outline on the left, the code in the middle (CodeMirror, Python), and on the right the
-// function at the cursor explained (its sentence, its formula drawn from the code, the last run's numbers) and the
-// style checker's messages. Saving makes a new version; a change Claude proposed waits in a banner.
+// The method editor: the outline on the left, the code in the middle (CodeMirror 6 through editor.js), and on the right
+// the function at the cursor explained (its sentence, its formula drawn from the code, the last run's numbers) and the
+// style checker's messages. Help while typing comes from the backend (Jedi), the shown run's values sit at the ends of
+// the lines of the function at the cursor, its checks are folded. Saving makes a new version; a change Claude proposed
+// waits in a banner and is reviewed chunk by chunk.
+//
+// The parts (banners, outline, editor with its status line, inspector, draft review) are drawn by their own functions
+// into `ME.els`, so another layout (the flow above the editor) can place them again.
 let ME = null;
 let toolboxCache = null;
 
@@ -2262,39 +2380,45 @@ async function toolboxList() {
   return toolboxCache;
 }
 
-function diffBlock(lines) {
-  return h(
-    "pre",
-    { class: "diff" },
-    (lines || []).map((l) =>
-      h(
-        "div",
-        {
-          class:
-            l.startsWith("+++") || l.startsWith("---")
-              ? "meta"
-              : l.startsWith("+")
-                ? "add"
-                : l.startsWith("-")
-                  ? "del"
-                  : l.startsWith("@@")
-                    ? "hunk"
-                    : "",
-        },
-        l || " ",
-      ),
-    ),
-  );
+/** Ends the method screen: the flow, the editor, its hover card and a draft review are taken off the page. */
+function closeMethod() {
+  if (!ME) return;
+  ME.review?.merge?.destroy();
+  ME.flow?.destroy();
+  ME.ed?.destroy();
+  clearTimeout(ME.checkTimer);
+  clearTimeout(ME.cursorTimer);
+  clearTimeout(ME.metaTimer);
+  ME.tickets.trial++;
+  ME = null;
 }
 
-function comparisonBlock(c) {
+// For the end-to-end test and for poking at it in the developer tools.
+window.__lab = {
+  editor: () => ME?.ed || null,
+  merge: () => ME?.review?.merge || null,
+  flow: () => (S.view === "method" ? ME?.flow : EF?.flow) || null,
+  format: () => formatCode(),
+  claudeStep: (o) => claudeStep(o),
+  state: () =>
+    ME && {
+      dirty: ME.dirty,
+      trialRun: ME.trialRun,
+      trialNote: ME.trialNote?.text || "",
+      busy: !!ME.busy || ME.inspecting > 0,
+      numbersExp: ME.numbersExp,
+      fn: ME.fn,
+    },
+};
+
+function comparisonBlock(c, lead = null) {
   if (!c) return null;
   if (c.status === "running")
     return h(
       "div",
       { class: "layr-muted small" },
       h("span", { class: "layr-spinner" }),
-      " Rerunning the reference experiment…",
+      lead ? ` ${lead}calculating it again…` : " Rerunning the reference experiment…",
     );
   if (c.status === "failed") return h("div", { class: "layr-error small" }, `The comparison failed: ${c.error || ""}`);
   const moved = (c.tables || []).filter((t) => t.moved);
@@ -2304,10 +2428,13 @@ function comparisonBlock(c) {
     h(
       "div",
       {},
+      lead ? h("span", { class: "layr-muted" }, lead) : null,
       h("b", {}, c.summary || ""),
       c.experiment_title ? h("span", { class: "layr-muted" }, ` on ${c.experiment_title}`) : null,
     ),
-    moved.map((t) =>
+    // folded to one line until she asks: the method screen keeps its room for the flow and the code
+    moved.length
+      ? h("details", { class: "cmp-tables" }, h("summary", {}, "Which numbers"), moved.map((t) =>
       h(
         "details",
         {},
@@ -2342,7 +2469,8 @@ function comparisonBlock(c) {
           ),
         ),
       ),
-    ),
+    ))
+      : null,
   );
 }
 
@@ -2357,7 +2485,9 @@ async function renderMethod(t) {
   layr.panel.setTitle(m.name).catch(() => {});
   setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: `${m.name} (method)` }]);
   const mine = exps.filter((e) => e.method === m.id);
-  const keep = ME && ME.method === m.id && ME.dirty ? ME.cm.getValue() : null;
+  const keep = ME && ME.method === m.id && ME.dirty ? ME.ed.getValue() : null;
+  const keepAi = ME && ME.method === m.id ? ME.aiStep : null;
+  closeMethod();
   const numbersExp = mine.some((e) => e.experiment === S.numbersExp)
     ? S.numbersExp
     : m.reference || mine.find((e) => e.last_run?.status === "done")?.experiment || null;
@@ -2372,89 +2502,960 @@ async function renderMethod(t) {
     toolbox: docs,
     exps: mine,
     numbersExp,
+    pickedRun: null, // an earlier run picked in the flow
+    trialRun: null, // the newest trial run of the code as it is in the editor
+    trialRunSource: null, // the code that trial run calculated
+    inspecting: 0, // explanations being fetched
+    trialSource: m.source, // the code the shown numbers belong to (a trial run is made when it differs)
+    trialNote: null,
+    flowSource: keep ?? m.source, // the code the flow was last drawn from
+    flowSel: null,
+    aiStep: keepAi, // {fn}: a step Claude wrote, not saved yet
     ai: null,
+    inside: new Map(), // "run or experiment|function" → {promise, value} of function_inside
+    tickets: { hover: 0, values: 0, check: 0, trial: 0 },
+    review: null,
+    busy: false,
   };
-  const els = {
-    banners: h("div", { class: "mv-banners" }),
-    outline: h("div", { class: "mv-outline" }),
-    editor: h("div", { class: "mv-editor" }),
-    status: h("div", { class: "mv-status small" }),
-    inspector: h("div", { class: "mv-inspector" }),
-  };
+  const els = methodParts();
   ME.els = els;
-  put(
-    view,
-    h(
-      "div",
-      { class: "mv" },
-      els.banners,
-      h(
-        "div",
-        { class: "mv-grid" },
-        els.outline,
-        h("div", { class: "mv-middle" }, els.editor, els.status),
-        els.inspector,
-      ),
-    ),
-  );
-  const cm = window.CodeMirror(els.editor, {
-    value: keep ?? m.source,
-    mode: "python",
-    lineNumbers: true,
-    indentUnit: 4,
-    tabSize: 4,
-    indentWithTabs: false,
-    matchBrackets: true,
-    styleActiveLine: true,
-    lineWrapping: false,
-    gutters: ["mv-lint", "CodeMirror-linenumbers"],
-    extraKeys: {
-      "Ctrl-S": () => saveMethod(),
-      "Cmd-S": () => saveMethod(),
-      "Ctrl-/": "toggleComment",
-      Tab: (c) => (c.somethingSelected() ? c.indentSelection("add") : c.replaceSelection("    ", "end")),
-      "Shift-Tab": (c) => c.indentSelection("subtract"),
-    },
-  });
-  ME.cm = cm;
-  setTimeout(() => cm.refresh(), 0);
-  let checkTimer = null;
-  cm.on("changes", () => {
-    ME.dirty = cm.getValue() !== ME.saved;
-    methodActions();
-    drawStatus();
-    clearTimeout(checkTimer);
-    checkTimer = setTimeout(recheck, 500);
-  });
-  let cursorTimer = null;
-  cm.on("cursorActivity", () => {
-    clearTimeout(cursorTimer);
-    cursorTimer = setTimeout(() => {
-      const line = cm.getCursor().line + 1;
-      const f = (ME.summary?.outline || []).find((x) => x.line <= line && line <= x.end_line);
-      if (f && f.name !== ME.fn) {
-        ME.fn = f.name;
-        S.fn = f.name;
-        save();
-        drawOutline();
-        drawInspector();
-      }
-    }, 250);
-  });
+  put(view, h("div", { class: "mv" }, els.banners, els.main));
+  layoutMethod();
+  ME.ed = mountMethodEditor(els.editor, keep ?? m.source);
+  ME.flow = mountMethodFlow(els.flow, keep ?? m.source);
   methodActions();
   drawBanners();
   drawOutline();
   drawLint();
   drawStatus();
-  if (keep) recheck();
+  if (keep) onMethodEdit();
   const target = S.line || (ME.summary?.outline || []).find((x) => x.name === ME.fn)?.line;
-  if (target) {
-    cm.setCursor(target - 1, 0);
-    setTimeout(() => cm.scrollIntoView({ line: target - 1, ch: 0 }, 120), 30);
-  }
+  if (target) setTimeout(() => ME?.ed.reveal(target), 30);
   S.line = null;
   drawInspector();
+  drawValues();
+  lateCheck(m);
 }
+
+/**
+ * A comparison on the reference experiment is running: its "comparison" event says when it is done. One late look
+ * stays as a safety net (an event can be missed while the panel reconnects); it is not a poll.
+ */
+function lateCheck(m) {
+  clearTimeout(ME.metaTimer);
+  const latest = (m.versions || [])[m.versions.length - 1];
+  if (m.draft?.comparison?.status === "running" || latest?.comparison?.status === "running")
+    ME.metaTimer = setTimeout(() => refreshMethodMeta({ late: true }), 45000);
+}
+
+/** The method screen's parts, empty: each is filled by its own draw function. */
+function methodParts() {
+  const els = {
+    banners: h("div", { class: "mv-banners" }),
+    main: h("div", { class: "mv-main" }),
+    flow: h("div", { class: "mv-flow" }),
+    divider: h("div", { class: "mv-divider", title: "Drag to give the flow or the code more room" }),
+    outline: h("div", { class: "mv-outline" }),
+    editor: h("div", { class: "mv-editor" }),
+    status: h("div", { class: "mv-status small" }),
+    inspector: h("div", { class: "mv-inspector" }),
+  };
+  els.middle = h("div", { class: "mv-middle" }, els.editor, els.status);
+  els.grid = h("div", { class: "mv-grid" }, els.outline, els.middle, els.inspector);
+  return els;
+}
+
+/** The flow on top, a divider she can drag (remembered), the outline, the code and the explanation under it. */
+function layoutMethod() {
+  const els = ME.els;
+  const split = h("div", { class: "mv-split" }, els.flow, els.divider, els.grid);
+  put(els.main, split);
+  const apply = () => {
+    const f = Math.min(0.8, Math.max(0.15, Number(S.flowFrac) || 0.42));
+    split.style.gridTemplateRows = `minmax(120px, ${(f * 100).toFixed(1)}%) 7px minmax(160px, 1fr)`;
+  };
+  apply();
+  els.divider.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    els.divider.setPointerCapture(e.pointerId);
+    els.divider.classList.add("dragging");
+    const box = split.getBoundingClientRect();
+    const move = (ev) => {
+      S.flowFrac = (ev.clientY - box.top) / Math.max(1, box.height);
+      apply();
+    };
+    const up = () => {
+      els.divider.removeEventListener("pointermove", move);
+      els.divider.removeEventListener("pointerup", up);
+      els.divider.classList.remove("dragging");
+      apply();
+      save();
+    };
+    els.divider.addEventListener("pointermove", move);
+    els.divider.addEventListener("pointerup", up);
+  });
+  els.divider.addEventListener("dblclick", () => {
+    S.flowFrac = 0.42;
+    apply();
+    save();
+  });
+}
+
+// ---------- the flow above the code
+
+/**
+ * Where the values shown come from: a trial run of the code in the editor, an earlier run, or the latest run; and the
+ * code they belong to (`source`), so that numbers of other code are not passed off as this code's.
+ */
+function dataRef() {
+  if (!ME?.numbersExp) return null;
+  if (ME.trialRun) return { key: ME.trialRun, args: { run: ME.trialRun }, source: ME.trialRunSource };
+  if (ME.pickedRun) return { key: ME.pickedRun, args: { run: ME.pickedRun }, source: null };
+  return { key: ME.numbersExp, args: { experiment: ME.numbersExp }, source: ME.saved };
+}
+
+/** The code in the editor is being calculated (or will be after the pause): the numbers shown are of other code. */
+function numbersComing() {
+  const ref = dataRef();
+  return !!ref && S.autoRecalc !== false && (ME.busy || ME.trialGoing) && ref.source !== ME.ed.getValue() &&
+    !ME.pickedRun;
+}
+
+function mountMethodFlow(host, source) {
+  // Once the flow has drawn for the first time, the box of the function at the cursor is selected.
+  // The latest run is of an older version of the code: it is calculated as it is now (a trial run, steps reused), so
+  // every box has its numbers without her pressing anything.
+  const sync = (tries = 0) => {
+    if (!ME || (ME.flow && ME.flow !== flow)) return;
+    if (flow.graph && ME.ed) {
+      cursorIn(ME.ed.cursor().line);
+      if (flow.graph.stale && S.autoRecalc !== false && ME.numbersExp && !ME.trialRun && !ME.pickedRun && !ME.busy)
+        recalc(ME.ed.getValue());
+    } else if (tries < 80) setTimeout(() => sync(tries + 1), 250);
+  };
+  setTimeout(sync, 250);
+  const flow = mountFlow(host, {
+    call,
+    tex,
+    method: ME.method,
+    source,
+    experiment: ME.numbersExp,
+    run: null,
+    editable: true,
+    inside: "host",
+    claude: AI.claude,
+    figure: figureOf,
+    onSource: (src, info) => flowEdited(src, info),
+    onSetting: (id, value) => flowSetting(id, value),
+    onPick: (p) => flowPicked(p),
+    onSelect: (s) => flowSelected(s),
+    onOpen: (o) => flowOpened(o),
+  });
+  return flow;
+}
+
+/** A change made in the flow: one step of the editor's undo, then checked and calculated like typing. */
+function flowEdited(source, info) {
+  if (!ME) return;
+  ME.flowSource = source;
+  replaceCode(source, { now: true });
+  if (info?.added?.length) ME.flowSel = info.added[info.added.length - 1];
+}
+
+/** A setting changed in a box of the method's flow: the picked experiment keeps it, and it is calculated again. */
+async function flowSetting(id, value) {
+  if (!ME?.numbersExp) return layr.ui.notify("Pick an experiment in the flow first: settings belong to it.", "info");
+  try {
+    await call("experiment_update", { experiment: ME.numbersExp, params: { [id]: value } });
+    recalc(ME.ed.getValue());
+  } catch (err) {
+    fail(err);
+  }
+}
+
+function flowPicked({ experiment, run }) {
+  if (!ME) return;
+  ME.numbersExp = experiment || null;
+  S.numbersExp = ME.numbersExp;
+  ME.pickedRun = run || null;
+  ME.trialRun = null;
+  ME.trialSource = ME.dirty ? null : ME.saved;
+  ME.trialNote = null;
+  save();
+  valuesChanged();
+  drawInspector();
+  if (ME.dirty && S.autoRecalc !== false && experiment) settle();
+}
+
+/** A box was selected: its function (or its recipe line) is shown in the editor. */
+function flowSelected({ node, fn, line }) {
+  if (!ME) return;
+  if (ME.selFromEditor === node) return; // the editor's cursor selected it: nothing to move
+  ME.flowSel = node;
+  const own = fn && (ME.summary?.outline || []).find((f) => f.name === fn && f.kind !== "recipe");
+  const toolbox = !own && fn && (ME.toolbox || []).some((t) => t.name === fn);
+  if (own) jumpTo(own.line, own.name, { focus: false });
+  else if (toolbox) {
+    // a ready-made step: its line in the recipe is shown, and the step itself is explained (with its calls)
+    if (line) ME.ed.reveal(line, { select: false });
+    ME.fn = fn;
+    S.fn = fn;
+    save();
+    drawOutline();
+    drawInspector();
+    drawValues();
+  } else if (line) {
+    ME.ed.reveal(line);
+    cursorIn(line, { fromFlow: true });
+  } else if (fn && (ME.toolbox || []).some((t) => t.name === fn)) {
+    ME.fn = fn;
+    S.fn = fn;
+    save();
+    drawOutline();
+    drawInspector();
+    drawValues();
+  }
+}
+
+function flowOpened(o) {
+  if (!ME) return;
+  if (o.what === "function") {
+    if (o.created && o.fn) return cursorInFunction(o.fn);
+    const own = o.fn && (ME.summary?.outline || []).find((f) => f.name === o.fn);
+    const line = own?.line || (o.fn ? defLine(o.fn) : null) || o.line;
+    if (line) jumpTo(line, own?.name || o.fn || null);
+    return;
+  }
+  if (o.what === "claude") return claudeStep(o);
+  if (o.what === "new-experiment") return newExperimentHere();
+  const exp = ME.numbersExp;
+  if (!exp) return layr.ui.notify("Pick an experiment in the flow first.", "info");
+  const tab = { results: "results", settings: "settings", corrections: "corrections", checks: "checks" }[o.what];
+  if (tab) go({ view: "experiment", exp, tab, table: o.table || null, setting: o.setting || null });
+}
+
+/** The line of `def name(` in the editor, or null. */
+function defLine(name) {
+  const lines = ME.ed.getValue().split("\n");
+  const i = lines.findIndex((l) => l.startsWith(`def ${name}(`));
+  return i < 0 ? null : i + 1;
+}
+
+/** A new function was made (a step of her own): the cursor goes to the end of its body, ready to write. */
+function cursorInFunction(name) {
+  const lines = ME.ed.getValue().split("\n");
+  const start = lines.findIndex((l) => l.startsWith(`def ${name}(`));
+  if (start < 0) return;
+  let end = start + 1;
+  while (end < lines.length && (lines[end] === "" || /^\s/.test(lines[end]))) end++;
+  while (end > start + 1 && !lines[end - 1].trim()) end--;
+  ME.ed.reveal(end);
+  const v = ME.ed.view;
+  v.dispatch({ selection: { anchor: v.state.doc.line(end).to } });
+  ME.ed.focus();
+  ME.fn = name;
+  S.fn = name;
+  save();
+  drawOutline();
+  drawInspector();
+}
+
+/**
+ * The flow asked for an experiment for this method (it has a raw file and no experiment yet): she picks each file,
+ * the experiment is made with the method as saved, calculated, and the flow shows its values.
+ */
+async function newExperimentHere() {
+  try {
+    if (ME.dirty) {
+      const ok = await openDialog({
+        title: "Save the method first?",
+        body: "An experiment uses the method as it is saved. Save your changes as a new version, then pick the files.",
+        buttons: [
+          { label: "Cancel", id: false, kind: "ghost" },
+          { label: "Save…", id: true, kind: "primary" },
+        ],
+      });
+      if (!ok || !(await saveMethod())) return;
+    }
+    const inputs = (ME.flow?.graph?.inputs || []).filter((i) => i.kind !== "corrections");
+    if (!inputs.length) return layr.ui.notify("Add a raw file to the method first (+ Raw file in the flow).", "info");
+    const files = {};
+    for (const i of inputs) {
+      layr.ui.notify(`Choose the file for: ${i.label || i.id}`, "info");
+      const f = await pickAndStore(i.types || []);
+      if (!f) return;
+      files[i.id] = f;
+    }
+    const e = await call("experiment_create", { title: `${ME.m.name}: ${Object.values(files)[0].name}`,
+      method: ME.method, files });
+    ME.numbersExp = e.experiment;
+    S.numbersExp = e.experiment;
+    save();
+    setStatus("Calculating…");
+    const r = await call("run", { experiment: e.experiment, wait_s: 55 });
+    setStatus("");
+    if (r.status !== "done") layr.ui.notify(`The calculation stopped: ${cleanError(r.error)}`, "error");
+    if (!ME) return;
+    ME.trialRun = null;
+    ME.pickedRun = null;
+    ME.flow.update({ experiment: e.experiment, run: null, refresh: true });
+    valuesChanged();
+    drawInspector();
+  } catch (err) {
+    setStatus("");
+    fail(err);
+  }
+}
+
+const cleanError = (e) =>
+  String(e?.message || e || "")
+    .replace(/^Error executing tool \w+:\s*/, "")
+    .replace(/^LabError:\s*/, "");
+
+/** A short name for a new function from her sentence ("Divide each mean by…" → divide_each_mean), not yet used. */
+function nameFrom(sentence) {
+  const words = String(sentence || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !["the", "a", "an", "of", "each", "by", "to", "and", "in", "its", "for"].includes(w));
+  let base = words.slice(0, 3).join("_") || "new_step";
+  if (/^\d/.test(base)) base = "step_" + base;
+  const taken = new Set((ME.summary?.outline || []).map((f) => f.name));
+  let name = base;
+  for (let i = 2; taken.has(name) || defLine(name); i++) name = `${base}_${i}`;
+  return name;
+}
+
+/**
+ * "Describe it, Claude writes it": Claude writes the step from her sentence; she reviews it as a change of the code
+ * (the code before, the code with the new function and its step after) and keeps what she accepts. It is in the
+ * editor like any edit (not saved until she saves) and marked as written by AI until then.
+ */
+async function claudeStep({ wire, from, columns, sentence }) {
+  const before = ME.ed.getValue();
+  const name = nameFrom(sentence);
+  const param = /^[A-Za-z_]\w*$/.test(wire) ? wire : "table";
+  try {
+    setStatus("Claude is writing the step…");
+    const skeleton = await call("flow_edit", {
+      source: before,
+      ops: [
+        { op: "new_function", name, params: [param], sentence },
+        { op: "add_step", function: name, args: { [param]: from?.startsWith("in:") ? { input: wire } : { wire } } },
+      ],
+    });
+    const p = await call("ai_prompt", {
+      kind: "step",
+      source: skeleton.source,
+      function: name,
+      inputs: { [param]: columns?.length ? columns : null },
+      request: sentence,
+    });
+    const text = await askClaudePrompt(p);
+    setStatus("");
+    const code = /```(?:python)?\s*\n([\s\S]*?)```/.exec(text)?.[1]?.replace(/\s+$/, "") || "";
+    if (!new RegExp(`^def ${name}\\(`, "m").test(code))
+      throw new Error("Claude's answer has no function to put in: try again with another sentence.");
+    const after = replaceFunction(skeleton.source, name, code);
+    const note = text.replace(/```[\s\S]*?```/g, "").trim();
+    reviewAiStep({ before, after, name, note, sentence });
+  } catch (err) {
+    setStatus("");
+    fail(err);
+  }
+}
+
+async function askClaudePrompt(p) {
+  try {
+    const result = await layr.tools.run("ask", { prompt: p.prompt, system: p.system, model: "sonnet" },
+      { plugin: "claude" });
+    const text = typeof result === "string" ? result : result?.text;
+    if (!text?.trim()) throw new Error("Claude gave an empty answer: try again.");
+    return text;
+  } catch (err) {
+    if (err?.code === layr.errors?.NOT_ALLOWED)
+      throw new Error("Research isn't allowed to ask Claude: allow it in Settings › Tool access (Research).");
+    throw err;
+  }
+}
+
+/** `source` with the top-level function `name` (its def line to the line before the next top-level line) replaced. */
+function replaceFunction(source, name, code) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((l) => l.startsWith(`def ${name}(`));
+  if (start < 0) return source;
+  let end = start + 1;
+  while (end < lines.length && (lines[end] === "" || /^\s/.test(lines[end]))) end++;
+  while (end > start + 1 && !lines[end - 1].trim()) end--;
+  return [...lines.slice(0, start), ...code.split("\n"), ...lines.slice(end)].join("\n");
+}
+
+/** Claude's step as a change to review, in place of the flow and the code until she decides. */
+function reviewAiStep({ before, after, name, note, sentence }) {
+  const box = h("div", { class: "review-merge" });
+  const counts = h("span", { class: "layr-muted small" });
+  ME.review = { merge: null, ai: true };
+  const close = () => {
+    closeReview();
+    put(ME.els.main);
+    layoutMethod();
+    drawBanners();
+  };
+  put(
+    ME.els.main,
+    h(
+      "div",
+      { class: "review" },
+      h(
+        "div",
+        { class: "review-head" },
+        h("div", {}, h("b", {}, `A new step written by Claude: ${name}`), h("div", { class: "layr-muted" }, sentence)),
+        note ? aiAnswer(note) : null,
+        h(
+          "div",
+          { class: "row-gap" },
+          h(
+            "span",
+            { class: "small" },
+            "Left: your code now. Right: with Claude's step. ✓ keeps a change, ✕ drops it.",
+          ),
+          h("span", { class: "layr-spacer" }),
+          counts,
+        ),
+      ),
+      box,
+      h(
+        "div",
+        { class: "row-gap review-buttons" },
+        h("button", { class: "layr-button ghost", onclick: close }, "Don't take it"),
+        h("span", { class: "layr-spacer" }),
+        h(
+          "button",
+          {
+            class: "layr-button primary",
+            onclick: () => {
+              const merged = ME.review.merge.getResult();
+              close();
+              if (merged === before) return;
+              ME.aiStep = { fn: name };
+              replaceCode(merged, { now: true });
+              drawBanners();
+              const line = defLine(name);
+              if (line) jumpTo(line, name);
+            },
+          },
+          "Put it in the code",
+        ),
+      ),
+    ),
+  );
+  drawBanners();
+  ME.review.merge = createMerge(box, {
+    before,
+    after,
+    onChange: (c) => (counts.textContent = `${c.accepted} kept, ${c.rejected} dropped, ${c.left} to decide`),
+  });
+}
+
+// ---------- recalculating while she edits
+
+/**
+ * After a pause in typing (or at once after a change in the flow): the checker; with no errors the flow is drawn
+ * from the code as it is, and (when "Recalculate by itself" is on) a trial run calculates what changed.
+ */
+async function settle() {
+  if (!ME) return;
+  const source = ME.ed.getValue();
+  const fresh = await recheck();
+  if (!ME || !fresh || ME.ed.getValue() !== source) return;
+  const error = ME.messages.find((x) => x.level === "error");
+  ME.flow?.setProblem(error ? { line: error.line, message: error.message } : null);
+  if (error) {
+    setTrialNote("not calculated: fix the error in the code first", "bad");
+    ME.busy = false;
+    return;
+  }
+  const trial = S.autoRecalc !== false && ME.numbersExp && source !== ME.trialSource;
+  // the boxes are drawn from the new code at once when the recipe itself changed (a step added, a wire moved);
+  // a change inside a step is drawn with the trial run's numbers, a moment later, in one go
+  if (source !== ME.flowSource && (!trial || recipeOf(source) !== recipeOf(ME.flowSource))) {
+    ME.flowSource = source;
+    ME.flow?.update({ source });
+  }
+  if (trial) await recalc(source);
+  else if (ME.ed.getValue() === source) ME.busy = false;
+}
+
+/** The recipe function's text in `source` (its def line to the next top-level line), to see whether it changed. */
+function recipeOf(source) {
+  const name = ME.flow?.graph?.method?.recipe;
+  const lines = String(source || "").split("\n");
+  const start = name ? lines.findIndex((l) => l.startsWith(`def ${name}(`)) : -1;
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && (lines[end] === "" || /^\s/.test(lines[end]))) end++;
+  return lines.slice(start, end).join("\n");
+}
+
+/** A trial run of `source` on the picked experiment; only the newest matters. */
+async function recalc(source) {
+  if (!ME?.numbersExp) return;
+  const me = ME;
+  me.trialSource = source;
+  me.busy = true;
+  if (me.trialGoing) {
+    // One trial at a time: the one going is let go (its numbers are for older code) and the newest code is
+    // calculated as soon as it is back, however many pauses she made meanwhile.
+    me.trialNext = source;
+    me.tickets.trial++;
+    setTrialNote("calculating your newest change…", "run");
+    return;
+  }
+  me.trialGoing = true;
+  try {
+    await trialRun(source);
+  } finally {
+    me.trialGoing = false;
+  }
+  const next = me.trialNext;
+  me.trialNext = null;
+  if (ME === me && next != null && next === me.ed.getValue()) await recalc(next);
+}
+
+async function trialRun(source) {
+  const exp = ME.numbersExp;
+  const n = ++ME.tickets.trial;
+  setTrialNote("calculating…", "run");
+  let r;
+  try {
+    r = await call("run", { experiment: exp, source, wait_s: 50 });
+    const going = () => ME && ME.tickets.trial === n && (r.status === "waiting" || r.status === "running");
+    for (let i = 0; going() && i < 200; i++) {
+      if (r.status === "waiting") r = await call("run", { experiment: exp, source, wait_s: 50 });
+      else {
+        await new Promise((res) => setTimeout(res, 700));
+        r = await call("run_get", { run: r.run }).catch(() => r);
+      }
+    }
+  } catch (err) {
+    if (ME && ME.tickets.trial === n) {
+      setTrialNote(`not calculated: ${cleanError(err)}`, "bad");
+      ME.busy = false;
+      if (ME.flowSource !== source) {
+        ME.flowSource = source;
+        ME.flow?.update({ source });
+      }
+    }
+    return;
+  }
+  if (!ME || ME.tickets.trial !== n || r.status === "replaced") return;
+  ME.flow?.setRunning(null);
+  if (r.run) {
+    ME.trialRun = r.run;
+    ME.trialRunSource = source;
+    ME.pickedRun = null;
+    ME.flowSource = source;
+    // the flow, the values in the code and the explanation are fetched at once (not one after the other)
+    ME.inside = new Map();
+    await Promise.all([ME.flow?.update({ source, run: r.run }), drawValues(), drawInspector()]);
+    if (!ME || ME.tickets.trial !== n) return;
+  }
+  const total = (r.cache?.hits || 0) + (r.cache?.misses || 0);
+  if (r.status === "done")
+    setTrialNote(
+      `calculated just now${r.cache?.hits ? ` · ${r.cache.hits} of ${total} reused` : ""}`,
+      "ok",
+    );
+  else {
+    const at = r.summary?.failed_step;
+    setTrialNote(`stopped${at ? ` at ${human(at)}` : ""}: ${cleanError(r.error?.message || r.error || r.status)}`,
+      "bad");
+  }
+  if (ME.ed.getValue() === source) ME.busy = false;
+}
+
+function setTrialNote(text, kind) {
+  if (!ME) return;
+  ME.trialNote = text ? { text, kind } : null;
+  drawStatus();
+}
+
+// ---------- the editor and the help while typing
+
+/** The columns of the tables the function at the cursor held in the shown run, by name (for completion and hover). */
+function knownColumns() {
+  const ref = dataRef();
+  const got = ME?.fn && ref ? ME.inside.get(`${ref.key}|${ME.fn}`)?.value : null;
+  const out = {};
+  if (!got) return out;
+  const add = (name, v) => {
+    if (v && typeof v === "object" && v.kind === "table" && Array.isArray(v.columns) && !out[name])
+      out[name] = v.columns.map(String);
+  };
+  for (const [k, v] of Object.entries(got.call?.args || {})) add(k, v);
+  for (const st of got.statements || [])
+    for (const r of st.rounds || []) for (const [k, v] of Object.entries(r.values || {})) add(k, v);
+  return out;
+}
+
+function hoverCard(r) {
+  if (!r || (!r.signature && !r.sentence)) return null;
+  const where =
+    r.kind === "column"
+      ? `a column of the table ${r.table}`
+      : r.line
+        ? `in this method, line ${r.line}`
+        : r.module && r.module !== "this method"
+          ? `from ${r.module}`
+          : r.function_kind || "";
+  return h(
+    "div",
+    { class: "code-hover" },
+    r.signature ? highlight(r.signature) : null,
+    r.sentence ? h("div", { class: "code-hover-sentence" }, r.sentence) : null,
+    where ? h("div", { class: "layr-muted small" }, where) : null,
+  );
+}
+
+function mountMethodEditor(parent, doc) {
+  const latest = (kind) => ++ME.tickets[kind];
+  const isLatest = (kind, n) => ME && ME.tickets[kind] === n;
+  const ed = createEditor(parent, {
+    doc,
+    onChange: () => onMethodEdit(),
+    onSave: () => saveMethod(),
+    onCursor: ({ line }) => {
+      clearTimeout(ME.cursorTimer);
+      ME.cursorTimer = setTimeout(() => cursorIn(line), 250);
+    },
+    complete: async ({ source, line, column }) => {
+      // An answer that comes after a newer request is dropped by the editor itself (CodeMirror aborts the old one).
+      const r = await call("code_complete", { source, line, column, columns: knownColumns() });
+      if (!ME) return null;
+      const rank = { column: 9, own: 6, toolbox: 5, keyword: 2, builtin: 1, library: 0 };
+      return (r.items || []).map((x) => ({
+        label: x.label,
+        kind: x.kind,
+        detail: x.detail || "",
+        doc: x.info || undefined,
+        boost: rank[x.group] ?? 0,
+        apply: x.insert && x.insert !== x.label ? x.insert : undefined,
+      }));
+    },
+    hover: async ({ source, line, column }) => {
+      const n = latest("hover");
+      const r = await call("code_hover", { source, line, column, columns: knownColumns() });
+      return isLatest("hover", n) ? hoverCard(r) : null;
+    },
+    signature: async ({ source, line, column }) => {
+      const r = await call("code_signature", { source, line, column });
+      const s = (r.signatures || [])[0];
+      return s ? { label: s.label, active: s.index, doc: s.sentence || "" } : null;
+    },
+    onDefinition: (at) => goToDefinition(at),
+    onRename: (at) => renameAt(at),
+  });
+  return ed;
+}
+
+/** The cursor is on `line`: its function is explained, and its box (a recipe line's box, or the step) is selected. */
+function cursorIn(line, { fromFlow = false } = {}) {
+  if (!ME) return;
+  const f = (ME.summary?.outline || []).find((x) => x.line <= line && line <= x.end_line);
+  if (f && f.name !== ME.fn) {
+    ME.fn = f.name;
+    S.fn = f.name;
+    save();
+    drawOutline();
+    drawInspector();
+    drawValues();
+  }
+  const g = ME.flow?.graph;
+  if (fromFlow || !g || !f) return;
+  const recipe = f.kind === "recipe";
+  const target = recipe
+    ? (g.nodes || []).find((n) => n.line <= line && line <= n.end_line)?.id
+    : (g.nodes || []).find((n) => n.fn === f.name)?.id;
+  if (target && target !== ME.flowSel) {
+    ME.flowSel = target;
+    ME.selFromEditor = target;
+    ME.flow.select(target);
+    ME.selFromEditor = null;
+  }
+}
+
+const PAUSE_MS = 450;
+
+function onMethodEdit({ now = false } = {}) {
+  if (!ME) return;
+  const wasDirty = ME.dirty;
+  ME.dirty = ME.ed.getValue() !== ME.saved;
+  if (wasDirty !== ME.dirty) {
+    methodActions();
+    drawBanners();
+  }
+  ME.busy = true;
+  drawStatus();
+  clearTimeout(ME.checkTimer);
+  // the pause that counts as "done typing": short, since a trial run of remembered steps takes well under a second
+  ME.checkTimer = setTimeout(settle, now ? 0 : PAUSE_MS);
+}
+
+/** Puts new text in the editor as one step that Ctrl+Z undoes (Format, rename, a flow edit, a copied function). */
+function replaceCode(source, { now = false } = {}) {
+  ME.ed.setValue(source, { keepHistory: true });
+  onMethodEdit({ now });
+}
+
+async function goToDefinition(at) {
+  try {
+    const r = await call("code_definition", at);
+    if (!ME) return;
+    const d = (r.definitions || [])[0];
+    if (!d) return layr.ui.notify("No definition found for this name.", "info");
+    if (d.in_file && d.line) {
+      ME.ed.reveal(d.line);
+      ME.ed.focus();
+    } else if (d.toolbox) {
+      // A toolbox function: shown read only in the inspector, with "Copy into my method".
+      ME.fn = d.toolbox;
+      S.fn = d.toolbox;
+      save();
+      drawOutline();
+      drawInspector();
+      drawValues();
+    } else layr.ui.notify(`${d.name} comes from ${d.module || "Python"}: it isn't part of this method.`, "info");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function renameAt(at) {
+  const text = at.source.split("\n")[at.line - 1] || "";
+  const left = /[A-Za-z_]\w*$/.exec(text.slice(0, at.column))?.[0] || "";
+  const old = left + (/^\w*/.exec(text.slice(at.column))?.[0] || "");
+  if (!old) return layr.ui.notify("Put the cursor on the name to rename.", "info");
+  const input = h("input", { class: "layr-input", value: old });
+  setTimeout(() => input.select(), 30);
+  const name = await openDialog({
+    title: `Rename ${old}`,
+    body: [h("label", { class: "layr-label" }, "New name (changed everywhere in the method)"), input],
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      { label: "Rename", kind: "primary", value: () => input.value.trim() || undefined },
+    ],
+  });
+  if (!name || name === old) return;
+  try {
+    const r = await call("code_rename", { ...at, new_name: name });
+    if (!ME || ME.ed.getValue() !== at.source) return layr.ui.notify("The code changed meanwhile: try again.", "info");
+    if (r.warning) {
+      const ok = await openDialog({
+        title: "Rename a setting?",
+        body: r.warning,
+        buttons: [
+          { label: "Cancel", id: false, kind: "ghost" },
+          { label: "Rename anyway", id: true, kind: "danger" },
+        ],
+      });
+      if (!ok || ME.ed.getValue() !== at.source) return;
+    }
+    replaceCode(r.source);
+    layr.ui.notify(`Renamed on ${(r.lines || []).length} lines: save to keep it`, "success");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function formatCode() {
+  if (!ME) return;
+  const source = ME.ed.getValue();
+  try {
+    const r = await call("code_format", { source });
+    if (r.error) return layr.ui.notify(r.error, "error");
+    if (!r.changed) return layr.ui.notify("Already tidy: nothing to change.", "info");
+    if (!ME || ME.ed.getValue() !== source) return;
+    replaceCode(r.source);
+    layr.ui.notify("Tidied up (Ctrl+Z undoes it): save to keep it", "success");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// ---------- this run's values in the code
+
+/** One value summary as the short text of a chip, its dot's colour, and its hover card. */
+function valueChip(name, v, runId, extra) {
+  const chip = { name, type: "none", text: "", title: "" };
+  const k = v && typeof v === "object" && !Array.isArray(v) ? v.kind : null;
+  if (v == null) chip.text = "None";
+  else if (typeof v === "number") chip.text = fmt(v);
+  else if (typeof v === "string") chip.text = JSON.stringify(v.length > 40 ? v.slice(0, 40) + "…" : v);
+  else if (typeof v === "boolean") chip.text = v ? "True" : "False";
+  else if (k === "table") {
+    chip.type = "table";
+    chip.text = `table ${v.rows} × ${(v.columns || []).length}`;
+    chip.title = `${name}: ${v.rows} rows`;
+    chip.card = () => tableCard(v, runId);
+  } else if (k === "number") chip.text = v.text ?? fmt(v.value);
+  else if (k === "column") {
+    chip.type = "data";
+    chip.text = `column of ${v.length}`;
+    chip.card = () => listCard((v.values || []).slice(0, 12), v.length);
+  } else if (k === "array") {
+    chip.type = "data";
+    chip.text = `array ${(v.shape || []).join(" × ")}`;
+    chip.card = () => listCard((v.values || []).slice(0, 12), (v.shape || []).reduce((a, b) => a * b, 1));
+  } else if (k === "list" || k === "dict") {
+    chip.type = "data";
+    const word = k === "list" ? ["item", "items"] : ["entry", "entries"];
+    chip.text = `${v.length} ${word[v.length === 1 ? 0 : 1]}`;
+    chip.card = () => jsonCard(v.items);
+  } else if (k === "record") {
+    chip.type = "data";
+    chip.text = v.type || "record";
+    chip.card = () => jsonCard(v.fields);
+  } else if (k === "figure") {
+    chip.type = "figure";
+    chip.text = "figure";
+    if (v.file) chip.card = () => figureCard(v, runId);
+  } else if (k === "function") chip.text = `function ${v.name || ""}`;
+  else chip.text = v.text || k || "…";
+  if (extra) chip.text += extra;
+  return chip;
+}
+
+function rowsOf(r) {
+  // value_get gives rows as records or as lists matching `columns`.
+  const cols = r.columns || [];
+  return (r.rows || []).map((row) => (Array.isArray(row) ? Object.fromEntries(cols.map((c, i) => [c, row[i]])) : row));
+}
+
+async function tableCard(v, runId) {
+  if (!v.file || !runId) return h("div", { class: "small" }, `Columns: ${(v.columns || []).join(", ")}`);
+  const r = await call("value_get", { run: runId, file: v.file, limit: 8 });
+  return h(
+    "div",
+    { class: "value-card" },
+    table(rowsOf(r), r.columns, { limit: 8 }),
+    h(
+      "div",
+      { class: "layr-muted small" },
+      `First ${Math.min(8, r.total ?? v.rows)} of ${r.total ?? v.rows} rows` +
+        (r.stored === "sampled" ? " (this run kept only part of this table)" : ""),
+    ),
+  );
+}
+
+function listCard(values, total) {
+  return h(
+    "div",
+    { class: "value-card small" },
+    h("div", { class: "mono" }, values.map((x) => fmt(x)).join(", ") + (total > values.length ? ", …" : "")),
+    h("div", { class: "layr-muted" }, `${total} values`),
+  );
+}
+
+function jsonCard(x) {
+  const text = JSON.stringify(x ?? null, null, 1) || "";
+  return h("pre", { class: "value-card json" }, text.length > 1500 ? text.slice(0, 1500) + "\n…" : text);
+}
+
+async function figureCard(v, runId) {
+  const r = await call("value_get", { run: runId, file: v.file });
+  const data = r.png || r.data || r.image;
+  return data ? h("img", { class: "value-fig", src: `data:image/png;base64,${data}` }) : "A figure";
+}
+
+/** function_inside for the run whose values are shown (see dataRef), fetched once per function and run. */
+function insideOf(ref, fn) {
+  const key = `${ref.key}|${fn}`;
+  let got = ME.inside.get(key);
+  if (!got) {
+    got = { promise: null, value: null };
+    got.promise = call("function_inside", { ...ref.args, function: fn }).then(
+      (r) => (got.value = r),
+      () => null,
+    );
+    ME.inside.set(key, got);
+  }
+  return got.promise;
+}
+
+/** Forgets the values (another experiment was picked, or it ran again) and draws them anew. */
+function valuesChanged() {
+  if (!ME) return;
+  ME.inside = new Map();
+  drawValues();
+}
+
+/**
+ * The function at the cursor gets the shown run's values at the ends of its lines, and its checks (an `if` that only
+ * stops with a message) folded. Lines are matched by their text, so values stay right after an edit above them.
+ */
+async function drawValues() {
+  if (!ME) return;
+  const n = ++ME.tickets.values;
+  const fn = ME.fn;
+  const f = (ME.summary?.outline || []).find((x) => x.name === fn);
+  const ref = dataRef();
+  if (!ref || !f) {
+    ME.ed.setValues({});
+    ME.ed.setFolds([]);
+    ME.folds = 0;
+    drawStatus();
+    return;
+  }
+  const got = await insideOf(ref, fn);
+  if (!ME || ME.tickets.values !== n) return;
+  const doc = ME.ed.getValue().split("\n");
+  const ranLines = (got?.code || "").split("\n");
+  // The function's place in the editor now (from the checker's outline) against its place in the run's copy.
+  const now = (ME.summary?.outline || []).find((x) => x.name === fn) || f;
+  const delta = now.line - (got?.line ?? now.line);
+  const ranText = (line) => ranLines[line - (got?.line ?? 0)];
+  const place = (line) => {
+    const want = ranText(line);
+    if (want == null) return null;
+    if (doc[line + delta - 1] === want) return line + delta;
+    for (let i = now.line; i <= now.end_line; i++) if (doc[i - 1] === want) return i;
+    return null;
+  };
+  const values = {};
+  for (const st of got?.statements || []) {
+    const at = place(st.line);
+    if (!at) continue;
+    const first = (st.rounds || []).find((r) => !r.failed) || (st.rounds || [])[0];
+    if (!first) continue;
+    const extra = st.loop || st.n > 1 ? ` · round 1 of ${st.n}` : "";
+    values[at] = st.names
+      .filter((name) => name in (first.values || {}))
+      .map((name, i) => valueChip(name, first.values[name], got.run, i === 0 ? extra : ""));
+    if (!values[at].length) delete values[at];
+  }
+  if (got && "returned" in got) {
+    for (let i = now.end_line; i >= now.line; i--)
+      if (/^\s*return\b/.test(doc[i - 1] || "")) {
+        (values[i] ||= []).push({ ...valueChip("return", got.returned, got.run), name: "return" });
+        break;
+      }
+  }
+  ME.ed.setValues(values);
+  const folds = [];
+  for (const g of got?.guards || []) {
+    const a = place(g.line);
+    if (!a) continue;
+    folds.push({ from: a, to: a + (g.end_line - g.line), label: `stops with a message if ${g.condition}` });
+  }
+  ME.ed.setFolds(folds);
+  ME.folds = folds.length;
+  ME.valuesNote = got ? got.note || got.values_note || "" : "";
+  drawStatus();
+}
+
+// ---------- the toolbar, the status line, the checker's marks
 
 function methodActions() {
   if (!ME) return;
@@ -2468,6 +3469,8 @@ function methodActions() {
         onclick: (e) =>
           layr.ui.contextMenu(
             [
+              { label: "Format the code (tidy layout)", icon: "format_align_left", run: formatCode },
+              "-",
               {
                 label: "Folder that runs without layr (zip)",
                 icon: "folder_zip",
@@ -2485,6 +3488,7 @@ function methodActions() {
 }
 
 function drawStatus() {
+  if (!ME) return;
   const errors = ME.messages.filter((x) => x.level === "error").length;
   const warnings = ME.messages.length - errors;
   put(
@@ -2498,56 +3502,81 @@ function drawStatus() {
           ? "Proposed by Claude: save to accept it"
           : `Saved · version ${ME.m.version}`,
     ),
+    ME.folds
+      ? h(
+          "button",
+          {
+            class: "linklike folds-toggle",
+            title: "Checks that only stop with a message are folded to one line: click to show or hide them",
+            onclick: () => ME.ed.toggleFolds(),
+          },
+          `${ME.folds} check${ME.folds > 1 ? "s" : ""} folded`,
+        )
+      : null,
+    ME.valuesNote ? h("span", { class: "layr-muted", title: ME.valuesNote }, "no values inside") : null,
     h("span", { class: "layr-spacer" }),
+    ME.trialNote
+      ? h("span", { class: `trial-note ${ME.trialNote.kind || ""}`, title: ME.trialNote.text }, ME.trialNote.text)
+      : null,
+    h(
+      "label",
+      { class: "recalc-toggle", title: "After a change, calculate what it changed on the picked experiment" },
+      h("input", {
+        type: "checkbox",
+        checked: S.autoRecalc !== false,
+        onchange: (e) => {
+          S.autoRecalc = e.target.checked;
+          save();
+          if (S.autoRecalc && ME.dirty) settle();
+        },
+      }),
+      " Recalculate by itself",
+    ),
     errors ? h("span", { class: "lint-count error" }, `${errors} error${errors > 1 ? "s" : ""}`) : null,
     warnings ? h("span", { class: "lint-count warning" }, `${warnings} style note${warnings > 1 ? "s" : ""}`) : null,
-    !errors && !warnings ? h("span", { class: "lint-count ok" }, "Style checker: all good") : null,
+    !errors && !warnings
+      ? h("span", { class: "lint-count ok" }, "Style checker: all good")
+      : null,
   );
 }
 
 function drawLint() {
-  const cm = ME.cm;
-  cm.clearGutter("mv-lint");
-  for (const ln of ME.errLines || []) cm.removeLineClass(ln, "background", "lint-error-line");
-  ME.errLines = [];
-  for (const msg of ME.messages) {
-    if (!msg.line) continue;
-    const symbol = msg.level === "error" ? "●" : "▲";
-    const mark = h("span", { class: `lint-mark ${msg.level}`, title: msg.message }, symbol);
-    cm.setGutterMarker(msg.line - 1, "mv-lint", mark);
-    if (msg.level === "error") {
-      const handle = cm.addLineClass(msg.line - 1, "background", "lint-error-line");
-      ME.errLines.push(handle);
-    }
-  }
+  ME.ed.setDiagnostics(
+    ME.messages.filter((x) => x.line).map((x) => ({ line: x.line, level: x.level, message: x.message })),
+  );
 }
 
+/** The style checker on the code as it is; true when its answer is for the code still in the editor. */
 async function recheck() {
-  if (!ME) return;
-  const source = ME.cm.getValue();
+  if (!ME) return false;
+  const source = ME.ed.getValue();
+  const n = ++ME.tickets.check;
   try {
     const r = await call("method_check", { source });
-    if (!ME || ME.cm.getValue() !== source) return;
+    if (!ME || ME.tickets.check !== n || ME.ed.getValue() !== source) return false;
     ME.messages = r.messages;
     if (r.summary) ME.summary = r.summary;
     drawLint();
     drawStatus();
     drawOutline();
     drawInspector();
+    drawValues();
+    return true;
   } catch (err) {
     console.warn(err);
+    return false;
   }
 }
 
-function jumpTo(line, fnName) {
-  if (fnName) {
+function jumpTo(line, fnName, { focus = true } = {}) {
+  if (fnName && fnName !== ME.fn) {
     ME.fn = fnName;
     S.fn = fnName;
     save();
+    drawValues();
   }
-  ME.cm.focus();
-  ME.cm.setCursor(Math.max(0, line - 1), 0);
-  ME.cm.scrollIntoView({ line: Math.max(0, line - 1), ch: 0 }, 120);
+  ME.ed.reveal(line);
+  if (focus) ME.ed.focus();
   drawOutline();
   drawInspector();
 }
@@ -2602,6 +3631,7 @@ function drawOutline() {
               save();
               drawOutline();
               drawInspector();
+              drawValues();
             },
           },
           h("span", { class: "ol-name" }, t.name),
@@ -2611,11 +3641,13 @@ function drawOutline() {
   );
 }
 
+// ---------- drafts, saving, versions
+
 function drawBanners() {
   const m = ME.m;
   const out = [];
   const d = m.draft;
-  if (d && !m.draft_only) {
+  if (d && !m.draft_only && !ME.review) {
     out.push(
       h(
         "div",
@@ -2632,9 +3664,38 @@ function drawBanners() {
         h(
           "div",
           { class: "row-gap" },
-          h("button", { class: "layr-button small", onclick: showDraft }, "Show the changed lines"),
-          h("button", { class: "layr-button small primary", onclick: () => decideDraft("accept") }, "Accept"),
+          h("button", { class: "layr-button small primary", onclick: showDraft }, "Review the changes"),
+          h("button", { class: "layr-button small", onclick: () => decideDraft("accept") }, "Accept all"),
           h("button", { class: "layr-button small ghost", onclick: () => decideDraft("reject") }, "Reject"),
+        ),
+      ),
+    );
+  }
+  if (ME.aiStep && ME.dirty && !ME.review) {
+    out.push(
+      h(
+        "div",
+        { class: "banner draft ai-step" },
+        h(
+          "div",
+          {},
+          h("b", {}, "Written by AI (Claude): "),
+          `the step ${ME.aiStep.fn} is in the code, not saved yet. Read it and check its numbers before you save.`,
+        ),
+        h(
+          "div",
+          { class: "row-gap" },
+          h(
+            "button",
+            {
+              class: "layr-button small",
+              onclick: () => {
+                const line = defLine(ME.aiStep.fn);
+                if (line) jumpTo(line, ME.aiStep.fn);
+              },
+            },
+            "Show it",
+          ),
         ),
       ),
     );
@@ -2656,35 +3717,58 @@ function drawBanners() {
     );
   }
   const latest = (m.versions || [])[m.versions.length - 1];
-  if (latest?.comparison && latest.version === m.version) {
+  const seen = `${m.id}:${latest?.version}`;
+  if (latest?.comparison && latest.version === m.version && !ME.review && S.seenComparison !== seen) {
     out.push(
       h(
         "div",
-        { class: "banner" },
-        h("div", {}, `Version ${latest.version} on the reference experiment: `),
-        comparisonBlock(latest.comparison),
+        { class: "banner closable" },
+        h(
+          "button",
+          {
+            class: "layr-button small ghost icon banner-close",
+            title: "Close (the versions keep it)",
+            onclick: () => {
+              S.seenComparison = seen;
+              save();
+              drawBanners();
+            },
+          },
+          "✕",
+        ),
+        comparisonBlock(latest.comparison, `Version ${latest.version} on the reference experiment: `),
       ),
     );
   }
   put(ME.els.banners, out);
 }
 
-async function decideDraft(decision) {
+async function confirmReplace() {
+  if (!ME.dirty) return true;
+  return openDialog({
+    title: "Accept Claude's change?",
+    body: "Your unsaved changes in the editor are replaced by the accepted version.",
+    buttons: [
+      { label: "Cancel", id: false, kind: "ghost" },
+      { label: "Accept", id: true, kind: "primary" },
+    ],
+  });
+}
+
+async function decideDraft(decision, source) {
   try {
-    if (ME.dirty && decision === "accept") {
-      const ok = await openDialog({
-        title: "Accept Claude's change?",
-        body: "Your unsaved changes in the editor are replaced by the accepted version.",
-        buttons: [
-          { label: "Cancel", id: false, kind: "ghost" },
-          { label: "Accept", id: true, kind: "primary" },
-        ],
-      });
-      if (!ok) return;
-    }
-    await call("draft_decide", { method: ME.method, decision });
+    if (decision === "accept" && !(await confirmReplace())) return;
+    await call("draft_decide", { method: ME.method, decision, ...(source != null ? { source } : {}) });
     ME.dirty = false;
-    layr.ui.notify(decision === "accept" ? "Accepted: it is the method's newest version now" : "Rejected", "success");
+    layr.ui.notify(
+      decision === "accept"
+        ? source != null
+          ? "Saved what you kept: it is the method's newest version now"
+          : "Accepted: it is the method's newest version now"
+        : "Rejected",
+      "success",
+    );
+    closeReview();
     if (decision === "reject" && ME.m.draft_only) go({ view: "home", method: null });
     else render();
   } catch (err) {
@@ -2692,38 +3776,95 @@ async function decideDraft(decision) {
   }
 }
 
+/**
+ * Reviewing Claude's draft: the changed chunks of the code side by side (or one above the other on a narrow panel),
+ * each accepted or rejected, then "Accept" saves what stands. Takes the place of the outline, editor and inspector
+ * until it is closed; the editor keeps its text meanwhile.
+ */
 async function showDraft() {
   try {
     const d = (await call("draft_get", { method: ME.method })).draft;
     if (!d) return render();
-    await openDialog({
-      title: "Claude's proposed change",
-      body: [
-        h("div", { class: "layr-muted small" }, `${d.by || ""} · ${when(d.at)} · ${d.change || ""}`),
-        comparisonBlock(d.comparison),
-        (d.messages || []).length
-          ? h(
-              "ul",
-              { class: "small" },
-              d.messages.map((x) => h("li", { class: x.level }, `line ${x.line}: ${x.message}`)),
-            )
-          : null,
-        diffBlock(d.diff),
-      ],
-      buttons: [{ label: "Close", id: null }],
-    });
+    const before = ME.saved;
+    const box = h("div", { class: "review-merge" });
+    const counts = h("span", { class: "layr-muted small" });
+    const done = h("button", { class: "layr-button primary" }, "Accept");
+    ME.review = { draft: d, merge: null };
+    const drawCounts = (c) => {
+      const all = c.accepted + c.rejected + c.left;
+      counts.textContent =
+        `${all} change${all === 1 ? "" : "s"}: ${c.accepted} accepted, ${c.rejected} rejected` +
+        (c.left ? `, ${c.left} not decided (count as accepted)` : "");
+      done.textContent = c.rejected ? "Save what stands" : "Accept";
+    };
+    done.onclick = () => {
+      const merged = ME.review.merge.getResult();
+      decideDraft("accept", merged === d.source ? null : merged);
+    };
+    put(
+      ME.els.main,
+      h(
+        "div",
+        { class: "review" },
+        h(
+          "div",
+          { class: "review-head" },
+          h(
+            "div",
+            {},
+            h("b", {}, "Claude's proposed change"),
+            h("span", { class: "layr-muted" }, ` · ${d.by || "an AI agent"} · ${when(d.at)}`),
+            h("div", {}, d.change || ""),
+          ),
+          comparisonBlock(d.comparison),
+          (d.messages || []).length
+            ? h(
+                "ul",
+                { class: "lint-list small" },
+                d.messages.map((x) => h("li", { class: x.level }, `line ${x.line}: ${x.message}`)),
+              )
+            : null,
+          h(
+            "div",
+            { class: "row-gap" },
+            h("span", { class: "small" }, "Left: your version now. Right: Claude's. ✓ keeps a change, ✕ drops it."),
+            h("span", { class: "layr-spacer" }),
+            counts,
+          ),
+        ),
+        box,
+        h(
+          "div",
+          { class: "row-gap review-buttons" },
+          h("button", { class: "layr-button ghost", onclick: () => (closeReview(), render()) }, "Back to the code"),
+          h("span", { class: "layr-spacer" }),
+          h("button", { class: "layr-button ghost", onclick: () => decideDraft("reject") }, "Reject it all"),
+          done,
+        ),
+      ),
+    );
+    drawBanners();
+    ME.review.merge = createMerge(box, { before, after: d.source, onChange: drawCounts });
+    drawCounts(ME.review.merge.counts());
   } catch (err) {
     fail(err);
   }
 }
 
+function closeReview() {
+  if (!ME?.review) return;
+  ME.review.merge?.destroy();
+  ME.review = null;
+}
+
+/** Saves the code as a new version (she says what changed); true when it was saved. */
 async function saveMethod() {
-  if (!ME || !ME.dirty) return;
-  const source = ME.cm.getValue();
+  if (!ME || !ME.dirty) return false;
+  const source = ME.ed.getValue();
   const note = h("input", {
     class: "layr-input",
     placeholder: "e.g. Rates from 0-20 min instead of 0-30",
-    value: ME.fn ? `Changed ${ME.fn}` : "",
+    value: ME.aiStep ? `Added ${ME.aiStep.fn} (written by Claude, checked by me)` : ME.fn ? `Changed ${ME.fn}` : "",
   });
   setTimeout(() => note.select(), 30);
   const change = await openDialog({
@@ -2734,42 +3875,46 @@ async function saveMethod() {
       { label: "Save", kind: "primary", value: () => note.value.trim() || "Changed in the editor" },
     ],
   });
-  if (!change) return;
+  if (!change) return false;
   try {
     const r = await call("method_write", { method: ME.method, source, change });
     if (!r.saved) {
       ME.messages = r.messages || ME.messages;
       drawLint();
       drawStatus();
-      layr.ui.notify(r.note || "Not saved: fix the errors (marked ● next to the lines) first.", "error");
-      return;
+      layr.ui.notify(r.note || "Not saved: fix the errors (marked in red next to the lines) first.", "error");
+      return false;
     }
     ME.saved = source;
-    ME.dirty = false;
+    ME.dirty = ME.ed.getValue() !== source;
+    ME.aiStep = null;
     layr.ui.notify(`Saved as version ${r.version}`, "success");
     await refreshMethodMeta();
+    return true;
   } catch (err) {
     fail(err);
+    return false;
   }
 }
 
 // After a save or an event: new versions, drafts and comparisons, without touching the code being edited.
-async function refreshMethodMeta() {
+async function refreshMethodMeta({ late = false } = {}) {
   if (!ME) return;
   try {
     const m = await call("method_get", { method: ME.method });
     if (!ME) return;
     ME.m = m;
-    if (!ME.dirty && m.source !== ME.cm.getValue()) {
-      const cur = ME.cm.getCursor();
-      ME.cm.setValue(m.source);
-      ME.cm.setCursor(cur);
+    if (!ME.dirty && m.source !== ME.ed.getValue()) {
+      ME.ed.setValue(m.source, { keepHistory: true });
       ME.dirty = false;
+      drawLint();
+      drawValues();
     }
     ME.saved = ME.dirty ? ME.saved : m.source;
     methodActions();
     drawBanners();
     drawStatus();
+    if (!late) lateCheck(m);
   } catch (err) {
     console.warn(err);
   }
@@ -2779,6 +3924,21 @@ async function showVersions() {
   try {
     const versions = (await call("method_versions", { method: ME.method })).slice().reverse();
     const box = h("div", {});
+    let merge = null;
+    const compare = async (from, to) => {
+      try {
+        const [a, b] = await Promise.all([
+          call("method_get", { method: ME.method, version: from }),
+          call("method_get", { method: ME.method, version: to }),
+        ]);
+        merge?.destroy();
+        const holder = h("div", { class: "versions-merge" });
+        put(box, h("b", {}, `Changes in version ${to} (left: version ${from})`), holder);
+        merge = createMerge(holder, { before: a.source, after: b.source, readOnly: true });
+      } catch (err) {
+        fail(err);
+      }
+    };
     const list = h(
       "ul",
       { class: "layr-list lined versions" },
@@ -2799,14 +3959,7 @@ async function showVersions() {
                   "button",
                   {
                     class: "layr-button small ghost",
-                    onclick: async () => {
-                      const lines = await call("method_diff", {
-                        method: ME.method,
-                        from_version: versions.find((x) => x.version < v.version)?.version ?? 1,
-                        to_version: v.version,
-                      }).catch(fail);
-                      put(box, h("b", {}, `Changes in version ${v.version}`), diffBlock(lines));
-                    },
+                    onclick: () => compare(versions.find((x) => x.version < v.version)?.version ?? 1, v.version),
                   },
                   "Changed lines",
                 )
@@ -2836,7 +3989,8 @@ async function showVersions() {
         ),
       ),
     );
-    await openDialog({ title: "Versions", body: [list, box], buttons: [{ label: "Close", id: null }] });
+    await openDialog({ title: "Versions", body: [list, box], buttons: [{ label: "Close", id: null }], wide: true });
+    merge?.destroy();
   } catch (err) {
     fail(err);
   }
@@ -2864,24 +4018,17 @@ async function drawInspector() {
         ),
       ]
     : [];
-  const picker = ME.exps.length
+  const shownExp = ME.exps.find((e) => e.experiment === ME.numbersExp);
+  const picker = ME.numbersExp
     ? h(
         "div",
         { class: "numbers-from small" },
         "Numbers from ",
+        h("b", {}, shownExp?.title || "the picked experiment"),
         h(
-          "select",
-          {
-            class: "layr-select small",
-            onchange: (e) => {
-              ME.numbersExp = e.target.value || null;
-              S.numbersExp = ME.numbersExp;
-              save();
-              drawInspector();
-            },
-          },
-          h("option", { value: "" }, "no experiment"),
-          ME.exps.map((e) => h("option", { value: e.experiment, selected: e.experiment === ME.numbersExp }, e.title)),
+          "span",
+          { class: "layr-muted" },
+          ME.trialRun ? " (your change, calculated)" : ME.pickedRun ? " (an earlier run)" : " (its latest run)",
         ),
         ME.numbersExp
           ? h(
@@ -2906,8 +4053,15 @@ async function drawInspector() {
             )
           : null,
       )
-    : h("div", { class: "layr-muted small" }, "No experiment uses this method yet: its numbers show here after a run.");
+    : h(
+        "div",
+        { class: "layr-muted small" },
+        ME.exps.length
+          ? "Pick an experiment in the flow above: its numbers show here and in the code."
+          : "No experiment uses this method yet: its numbers show here after a run.",
+      );
   if (!name) {
+    ME.inspectorFn = null;
     const s = ME.summary || {};
     put(
       box,
@@ -2922,37 +4076,45 @@ async function drawInspector() {
           `${(s.outline || []).length} functions · ${(s.settings || []).length} settings · inputs: ` +
             ((s.inputs || []).map((i) => i.id).join(", ") || "none"),
         ),
-        h("p", { class: "layr-muted" }, "Put the cursor in a function, or pick one on the left: it is explained here."),
+        h(
+          "p",
+          { class: "layr-muted" },
+          "Select a box in the flow, put the cursor in a function, or pick one on the left: it is explained here.",
+        ),
         picker,
         allMessages,
       ),
     );
     return;
   }
-  put(box, h("div", { class: "sheet" }, h("h3", {}, name), h("span", { class: "layr-spinner" })));
+  if (ME.inspectorFn !== name)
+    put(box, h("div", { class: "sheet" }, h("h3", {}, name), h("span", { class: "layr-spinner" })));
+  const n = (ME.inspectorTicket = (ME.inspectorTicket || 0) + 1);
+  const me = ME;
   let v;
+  const coming = numbersComing();
   try {
-    v = await call("explain_function", {
-      function: name,
-      source: ME.cm.getValue(),
-      experiment: ME.numbersExp || undefined,
-    });
+    const ref = dataRef();
+    me.inspecting++;
+    v = await call("explain_function", { function: name, source: ME.ed.getValue(), ...(ref ? ref.args : {}) });
   } catch (err) {
-    if (ME?.fn === name)
+    if (ME?.fn === name && ME.inspectorTicket === n)
       put(
         box,
         h(
           "div",
           { class: "sheet" },
           h("h3", {}, name),
-          h("div", { class: "layr-error" }, err.message),
+          h("div", { class: "layr-error" }, String(err.message || err).replace(/^Error executing tool \w+: /, "")),
           picker,
           allMessages,
         ),
       );
     return;
+  } finally {
+    me.inspecting--;
   }
-  if (!ME || ME.fn !== name) return;
+  if (!ME || ME.fn !== name || ME.inspectorTicket !== n) return;
   const mine = msgs.filter((x) => x.function === name);
   const parts = [
     h("h3", {}, human(name), " ", kindBadge(v.kind)),
@@ -2979,7 +4141,13 @@ async function drawInspector() {
         ME.exps.find((e) => e.experiment === ME.numbersExp) ? { id: ME.numbersExp } : null,
       ),
     );
-  if (v.count != null) {
+  if (coming) {
+    // the numbers at hand are of other code (the saved version, or the change before): no "0 calls" for a step that
+    // is new in her change; the trial run's numbers come in a moment
+    parts.push(
+      h("div", { class: "layr-muted small" }, h("span", { class: "layr-spinner" }), " Calculating your change…"),
+    );
+  } else if (v.count != null) {
     parts.push(
       h(
         "h4",
@@ -3070,15 +4238,13 @@ async function drawInspector() {
               class: "layr-button small",
               onclick: async () => {
                 try {
-                  const r = await call("toolbox_copy", { name, source: ME.cm.getValue() });
-                  ME.cm.setValue(r.source);
+                  const r = await call("toolbox_copy", { name, source: ME.ed.getValue() });
+                  replaceCode(r.source);
                   layr.ui.notify(`${name} is copied into your method: change it there, then save`, "success");
-                  const f = (r.messages && ME.summary?.outline) || [];
                   recheck().then(() => {
-                    const line = (ME.summary?.outline || []).find((x) => x.name === name)?.line;
+                    const line = (ME?.summary?.outline || []).find((x) => x.name === name)?.line;
                     if (line) jumpTo(line, name);
                   });
-                  void f;
                 } catch (err) {
                   fail(err);
                 }
@@ -3092,7 +4258,7 @@ async function drawInspector() {
   if (AI.claude) {
     const aiBox = h("div", {});
     const ask = async () => {
-      const selection = ME.cm.getSelection();
+      const selection = ME.ed.selection();
       put(
         aiBox,
         h("div", { class: "layr-muted small" }, h("span", { class: "layr-spinner" }), " Claude is reading the code…"),
@@ -3101,10 +4267,10 @@ async function drawInspector() {
         const text = await askClaude(
           "explain",
           selection.trim()
-            ? { source: ME.cm.getValue(), code: selection }
+            ? { source: ME.ed.getValue(), code: selection }
             : v.kind === "toolbox"
-              ? { source: ME.cm.getValue(), code: v.code }
-              : { source: ME.cm.getValue(), function: name },
+              ? { source: ME.ed.getValue(), code: v.code }
+              : { source: ME.ed.getValue(), function: name },
         );
         ME.ai = { fn: name, text };
         put(aiBox, aiAnswer(text));
@@ -3128,6 +4294,7 @@ async function drawInspector() {
   }
   parts.push(...allMessages);
   put(box, h("div", { class: "sheet" }, parts));
+  ME.inspectorFn = name;
 }
 
 async function duplicate(method) {
@@ -3150,7 +4317,7 @@ async function duplicate(method) {
   try {
     const r = await call("method_create", { method: id.value.trim(), name: name.value.trim(), copy_of: method.id });
     if (!r.saved) return layr.ui.notify(r.messages.map((p) => p.message).join("; ") || r.note, "error");
-    ME = null;
+    closeMethod();
     go({ view: "method", method: id.value.trim(), fn: null });
   } catch (err) {
     fail(err);
@@ -3335,13 +4502,14 @@ async function waitForBackend() {
     const el = document.getElementById("startingHint");
     if (el) el.hidden = false;
   }, 4000);
+  // The first start installs Python and its science packages: on a slow line that takes minutes.
   for (let i = 0; ; i++) {
     try {
       await call("methods");
       clearTimeout(hint);
       return;
     } catch (err) {
-      if (i > 120) throw err;
+      if (i > 400) throw err;
       await new Promise((r) => setTimeout(r, 1500));
     }
   }
@@ -3358,7 +4526,8 @@ try {
     h(
       "div",
       { class: "layr-empty" },
-      h("div", { class: "layr-error" }, `The analysis engine didn't start: ${err.message}`),
+      h("div", { class: "layr-error" }, "The analysis engine didn't start. ", cleanError(err)),
+      h("button", { class: "layr-button", onclick: () => location.reload() }, "Try again"),
     ),
   );
   throw err;
@@ -3381,10 +4550,29 @@ try {
   // an older layr: checked once
 }
 layr.events.on("research:lab", (ev) => {
-  if (live && ev.what === "run") return; // the poll redraws when it's done
+  if (ev.what === "run" && ev.trial) {
+    // A trial run (the method screen calculating a change): it lights up its step, and it is not the experiment's
+    // new latest run, so nothing else is redrawn.
+    if (S.view === "method" && ME && ev.experiment === ME.numbersExp)
+      ME.flow?.setRunning(!ev.finished && ev.step ? { step: ev.step } : null);
+    return;
+  }
+  if (ev.what === "run" && !ev.finished && ev.step) {
+    if (live && live.exp === ev.experiment) {
+      live.step = ev.step;
+      setStatus(`Calculating: ${human(ev.step)}`);
+    }
+    if (S.view === "experiment" && EF?.exp === ev.experiment) EF.flow.setRunning({ step: ev.step });
+  }
+  // while the panel's own run is going, the screen is drawn again when it's done
+  if (live && (ev.what === "run" || ev.experiment === live.exp)) return;
   if (ev.what === "run" && !ev.finished) return;
   if (S.view === "method") {
     if ((ev.method && ev.method === S.method) || ev.what === "comparison") refreshMethodMeta();
+    if (ev.what === "run" && ME && ev.experiment === ME.numbersExp && !ME.trialRun && !ME.pickedRun) {
+      ME.flow?.update({});
+      valuesChanged();
+    }
     return;
   }
   if (S.view === "home" || (S.view === "experiment" && (!ev.experiment || ev.experiment === S.exp))) render();

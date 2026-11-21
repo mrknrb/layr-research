@@ -1,0 +1,1247 @@
+/* The Research plugin's flow (flow.js): boxes, wires, the bar, the side panel, the Python strip, cards and forms.
+ * Colours come from layr's theme variables (/_layr/layr.css) and the editor's type colours (editor.css), so the flow
+ * follows the app's light or dark theme. The flow fills its container: give the container a height. */
+
+.fl {
+  --t-table: var(--cmx-t-table, var(--accent));
+  --t-flags: var(--cmx-t-flags, #e0a73a);
+  --t-data: var(--cmx-t-data, #b78fd6);
+  --t-figure: var(--cmx-t-figure, #6fbf73);
+  --t-none: var(--fg-dim);
+  --fl-box: var(--bg-2);
+  --fl-head: var(--bg-3);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  font: 12px/1.35 var(--font);
+  color: var(--fg);
+  background: var(--bg);
+}
+.fl * {
+  box-sizing: border-box;
+}
+.fl-dim {
+  color: var(--fg-dim);
+}
+.fl-mono {
+  font-family: var(--font-mono);
+}
+.fl-wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.fl-warn {
+  color: var(--t-flags);
+}
+.fl-bad {
+  color: var(--danger);
+}
+.fl-wait {
+  color: var(--fg-dim);
+  padding: 4px 0;
+}
+.fl-unit {
+  color: var(--fg-dim);
+  font-size: 0.86em;
+  margin-left: 2px;
+}
+
+/* ---------- the bar ---------- */
+.fl-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-wrap: wrap;
+  min-height: 38px;
+}
+.fl-sp {
+  flex: 1;
+}
+.fl-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.fl-title {
+  font-size: 13px;
+}
+.fl-lab {
+  font-size: 11px;
+}
+.fl .fl-sel {
+  width: auto;
+  max-width: 280px;
+  height: 26px;
+  padding: 0 24px 0 6px;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.fl .fl-sel.small {
+  height: 22px;
+  max-width: 120px;
+}
+.fl-note {
+  display: none;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-3);
+  font-size: 12px;
+}
+.fl-note.open {
+  display: block;
+}
+.fl-msgs {
+  text-decoration: underline dotted;
+  cursor: default;
+}
+
+/* ---------- the canvas ---------- */
+.fl-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+.fl-canvas {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  overflow: clip;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  background-image: radial-gradient(color-mix(in srgb, var(--border) 85%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+  min-width: 0;
+}
+.fl-canvas.drag {
+  cursor: grabbing;
+}
+.fl.loading .fl-world {
+  opacity: 0.75;
+  transition: opacity 0.2s;
+}
+.fl.busy {
+  cursor: progress;
+}
+.fl-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.fl-wires {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.fl-seg {
+  fill: none;
+  stroke-width: 1.8;
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+.fl-seg.hot {
+  stroke-width: 3.2;
+  opacity: 1;
+}
+.fl-seg.misfit {
+  stroke-dasharray: 5 4;
+}
+.fl-seg.temp {
+  stroke-width: 2.4;
+  opacity: 1;
+  stroke-dasharray: 6 4;
+}
+.fl-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.s-table {
+  stroke: var(--t-table);
+}
+.s-flags {
+  stroke: var(--t-flags);
+}
+.s-data {
+  stroke: var(--t-data);
+}
+.s-figure {
+  stroke: var(--t-figure);
+}
+.s-none {
+  stroke: var(--t-none);
+}
+.fade .fl-node:not(.keep),
+.fade .fl-seg:not(.keep) {
+  opacity: 0.15;
+}
+.fade .fl-group {
+  opacity: 0.4;
+}
+
+/* ---------- boxes ---------- */
+.fl-node {
+  position: absolute;
+  width: 232px;
+  background: var(--fl-box);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+  cursor: default;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+.fl-node.code {
+  width: 260px;
+}
+.fl-node.src {
+  width: 176px;
+  border-radius: 14px;
+}
+.fl-node.src .fl-nh {
+  border-radius: 14px 14px 0 0;
+}
+.fl-node.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.fl-node.multi {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.fl-node.hot {
+  border-color: var(--accent);
+}
+.fl-node.q {
+  border-style: dashed;
+  border-color: var(--t-flags);
+}
+.fl-node.folded {
+  border-width: 1.5px;
+  box-shadow: 3px 3px 0 -1px var(--fl-box), 3px 3px 0 0 var(--border);
+}
+.fl-node.folded.q {
+  box-shadow: 3px 3px 0 -1px var(--fl-box), 3px 3px 0 0 var(--t-flags);
+}
+.fl-node.st-failed {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+.fl-node.st-not_run {
+  opacity: 0.7;
+}
+.fl-node.st-not_run .fl-nh {
+  background: transparent;
+}
+.fl-node.running {
+  border-color: var(--accent);
+  animation: fl-pulse 1.1s ease-in-out infinite;
+}
+@keyframes fl-pulse {
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+.fl-nh {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 4px 4px 8px;
+  min-height: 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--fl-head);
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+}
+.fl-nt {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-node.code .fl-nt {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+}
+.fl-ms {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.fl-badge {
+  font-size: 10.5px;
+  line-height: 16px;
+  border-radius: 9px;
+  padding: 0 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.fl-badge.warn {
+  color: var(--t-flags);
+  border-color: var(--t-flags);
+}
+.fl-badge.bad {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.fl-badge.dim {
+  opacity: 0.85;
+}
+.fl-badge.run {
+  display: none;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.fl-node.running .fl-badge.run {
+  display: inline;
+}
+.fl-node.running .fl-ms {
+  display: none;
+}
+.fl-more {
+  border: 0;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+}
+.fl-node:hover .fl-more,
+.fl-node:focus-within .fl-more,
+.fl-node.sel .fl-more,
+.fl.narrow .fl-more {
+  opacity: 1;
+}
+.fl-more:hover {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.fl-unfold {
+  color: var(--accent);
+  font-size: 11px;
+  padding-right: 4px;
+}
+.fl-code {
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.fl-code .cmx-highlight {
+  margin: 0;
+  padding: 4px 6px;
+  font-size: 10.5px;
+  max-height: 110px;
+  overflow: auto;
+}
+.fl-port {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 0;
+  min-height: 22px;
+  position: relative;
+}
+.fl-port .fl-dot {
+  margin-left: -5px;
+  border: 1px solid var(--fl-box);
+}
+.fl-port.set {
+  padding-left: 8px;
+}
+.fl-port.misfit .fl-pn {
+  color: var(--t-flags);
+}
+.fl-port.needs .fl-sl {
+  color: var(--danger);
+}
+.fl-port.def {
+  opacity: 0.75;
+}
+.fl-port.live .fl-sl,
+.fl-port.def .fl-sl {
+  cursor: pointer;
+}
+.fl-port.live .fl-sl:hover,
+.fl-port.def .fl-sl:hover {
+  color: var(--accent);
+}
+.fl-port.def:hover {
+  opacity: 1;
+}
+.fl-defs .fl-sl {
+  font-style: italic;
+}
+.fl-defs.live {
+  cursor: pointer;
+}
+.fl-defs.live:hover .fl-sl {
+  color: var(--accent);
+}
+.fl-port.folded-def {
+  display: none;
+}
+.fl.connecting .fl-port.folded-def {
+  display: flex;
+}
+.fl.connecting .fl-node:has(.folded-def) {
+  z-index: 3;
+}
+.fl.connecting .fl-port.drop-ok {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  cursor: copy;
+}
+.fl.connecting .fl-port.drop-misfit {
+  background: color-mix(in srgb, var(--t-flags) 10%, transparent);
+  cursor: copy;
+}
+.fl.connecting .fl-port.hover {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+.fl.connecting .fl-port.drop-misfit.hover {
+  outline-color: var(--t-flags);
+}
+.fl-pn {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.fl-sl {
+  color: var(--fg-dim);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-file {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+.fl-sv {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 17px;
+}
+.fl-sv:hover {
+  border-color: var(--accent);
+}
+.fl-sv.dim {
+  color: var(--fg-dim);
+}
+.fl-sv.edited {
+  border-color: var(--t-flags);
+  color: var(--t-flags);
+}
+.fl-field,
+.fl-sv .fl-field {
+  font: 11px var(--font-mono);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 104px;
+  height: 19px;
+  padding: 0 4px;
+  min-width: 0;
+}
+.fl-sv .fl-field {
+  border: 0;
+  height: 16px;
+  width: 92px;
+  padding: 0;
+  outline: none;
+}
+.fl-field:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+select.fl-field {
+  padding: 0 2px;
+}
+.fl-fn {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.fl-needs {
+  color: var(--danger);
+  font-size: 11px;
+}
+.fl-miss {
+  margin: 0 8px 3px 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--t-flags);
+  background: color-mix(in srgb, var(--t-flags) 12%, transparent);
+}
+.fl-out {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 4px 8px;
+  min-height: 24px;
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+  position: relative;
+  cursor: pointer;
+}
+.fl-out .fl-dot {
+  margin-right: -5px;
+  border: 1px solid var(--fl-box);
+}
+.fl-on {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.fl-os {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.fl-add {
+  position: absolute;
+  right: -28px;
+  top: 50%;
+  margin-top: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg);
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.fl-node:hover .fl-add,
+.fl-node:focus-within .fl-add,
+.fl.narrow .fl-add {
+  opacity: 1;
+}
+.fl-add:focus-visible,
+.fl-nh:focus-visible,
+.fl-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.fl-add:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+.fl-out [data-drag] {
+  cursor: crosshair;
+}
+.fl-res {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  padding: 3px 8px;
+  border-top: 1px dashed var(--border);
+  color: var(--t-figure);
+  cursor: pointer;
+  font-weight: 600;
+}
+.fl-res:hover {
+  text-decoration: underline;
+}
+/* the host's actions at a box's foot ("Review the peaks", "See the checks") */
+.fl-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 6px 5px;
+  border-top: 1px solid var(--border);
+}
+.fl-act {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.fl-act:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.fl-err {
+  margin: 0;
+  padding: 5px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: 11.5px;
+  border-radius: 0 0 8px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: auto;
+}
+.fl-side .fl-err {
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  margin: 6px 0;
+}
+.fl-qbody {
+  padding: 5px 8px;
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  align-items: center;
+  border-top: 1px solid var(--border);
+}
+.fl-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--t-none);
+  flex: none;
+}
+.fl-dot.t-table {
+  background: var(--t-table);
+}
+.fl-dot.t-flags {
+  background: var(--t-flags);
+}
+.fl-dot.t-data {
+  background: var(--t-data);
+}
+.fl-dot.t-figure {
+  background: var(--t-figure);
+}
+
+/* groups */
+.fl-group {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--fg-dim) 60%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-3) 35%, transparent);
+  pointer-events: none;
+}
+.fl-gh {
+  position: absolute;
+  left: 8px;
+  top: 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  pointer-events: auto;
+}
+.fl-gt {
+  font-weight: 700;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10.5px;
+}
+.fl-gb {
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--accent);
+  font: inherit;
+  font-size: 10.5px;
+  border-radius: 9px;
+  padding: 0 7px;
+  cursor: pointer;
+}
+
+/* corners of the canvas */
+.fl-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  opacity: 0.92;
+  font-size: 11px;
+  pointer-events: none;
+}
+.fl-legend {
+  display: flex;
+  gap: 10px;
+}
+.fl-legend.col {
+  flex-direction: column;
+  gap: 3px;
+}
+.fl-legend-bar {
+  display: none;
+  gap: 3px;
+  padding: 0 4px;
+  cursor: help;
+}
+.fl.tight .fl-legend-bar {
+  display: inline-flex;
+  align-items: center;
+}
+.fl.tight .fl-hint {
+  display: none;
+}
+.fl-legend .fl-dot {
+  width: 8px;
+  height: 8px;
+}
+.fl-zoom {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  gap: 3px;
+}
+.fl-zoom .layr-button {
+  background: var(--bg-2);
+}
+.fl-mini {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  opacity: 0.94;
+  cursor: pointer;
+}
+.fl-mini rect.box {
+  fill: var(--fg-dim);
+  opacity: 0.55;
+}
+.fl-mini rect.sel {
+  fill: var(--accent);
+}
+.fl-mini rect.bad {
+  fill: var(--danger);
+}
+.fl-mini rect.view {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+.fl-empty {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.fl-empty.open {
+  display: flex;
+}
+.fl-empty-in {
+  pointer-events: auto;
+  max-width: 340px;
+  text-align: center;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  cursor: default;
+}
+.fl-empty-in b {
+  font-size: 14px;
+}
+.fl-empty-in p {
+  color: var(--fg-dim);
+  margin: 6px 0 12px;
+}
+
+/* ---------- the side panel ---------- */
+.fl-side {
+  width: 470px;
+  max-width: 55%;
+  border-left: 1px solid var(--border);
+  background: var(--bg-2);
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+}
+.fl-side.open {
+  display: flex;
+}
+.fl.narrow .fl-side {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  max-width: none;
+  z-index: 15;
+  border-left: 0;
+}
+.fl-sh {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 6px 5px 10px;
+  border-bottom: 1px solid var(--border);
+  min-height: 38px;
+  flex-wrap: wrap;
+}
+.fl-st {
+  font-size: 13px;
+  font-weight: 700;
+  flex: 1;
+  /* room for a step's whole name: its buttons go to a second row rather than cut the name */
+  min-width: min(100%, 11em);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-sb {
+  overflow: auto;
+  padding: 10px;
+  user-select: text;
+  flex: 1;
+  min-height: 0;
+}
+.fl-sb p {
+  margin: 4px 0;
+}
+.fl-h4 {
+  margin: 14px 0 6px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.fl-h4 .fl-link {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+.fl-crumbs {
+  margin-bottom: 6px;
+}
+.fl-link {
+  color: var(--accent);
+  cursor: pointer;
+}
+.fl-link:hover {
+  text-decoration: underline;
+}
+.fl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.fl-chip {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fl-chip .fl-dot {
+  width: 7px;
+  height: 7px;
+}
+.fl-chip.v,
+a.fl-chip {
+  cursor: pointer;
+}
+.fl-chip.v:hover,
+a.fl-chip:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+}
+.fl-editor {
+  height: 340px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.fl-editor .cm-editor {
+  height: 100%;
+}
+.fl-snippet .cmx-highlight {
+  max-height: 300px;
+  overflow: auto;
+}
+.fl-rounds {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+.fl-rounds .layr-button {
+  height: 20px;
+  width: 20px;
+}
+.fl-fm {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  margin: 4px 0;
+  background: var(--bg);
+  overflow-x: auto;
+}
+.fl-fm .katex-display {
+  margin: 4px 0;
+}
+.fl-num {
+  color: var(--t-figure);
+}
+.fl-pager {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 10px 0 6px;
+}
+.fl-scroll {
+  overflow: auto;
+  max-width: 100%;
+}
+.fl-scroll.big {
+  max-height: 60vh;
+}
+table.fl-tv {
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  margin-top: 4px;
+}
+table.fl-tv th,
+table.fl-tv td {
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  text-align: right;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.fl-tv th {
+  background: var(--bg-3);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+table.fl-tv td.s {
+  text-align: left;
+}
+img.fl-fig {
+  max-width: 100%;
+  max-height: min(340px, 45vh);
+  object-fit: contain;
+  background: #fff;
+  border-radius: 4px;
+  margin-top: 5px;
+}
+
+/* ---------- the Python strip ---------- */
+.fl-py {
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  display: none;
+  flex-direction: column;
+  height: 170px;
+  flex: none;
+}
+.fl-py.open {
+  display: flex;
+}
+.fl-ph {
+  padding: 3px 10px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.fl-pb {
+  overflow: auto;
+  flex: 1;
+  user-select: text;
+  position: relative;
+}
+.fl-pb .cmx-highlight.fl-pre {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  padding: 2px 0;
+  font-size: 11.5px;
+  min-height: 100%;
+  overflow: visible;
+}
+.fl-pl {
+  cursor: pointer;
+}
+.fl-pl:hover {
+  background: var(--bg-3);
+}
+.fl-pl.sel {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* ---------- the card, menus, forms ---------- */
+.fl-card {
+  position: fixed;
+  z-index: 1000;
+  display: none;
+  max-width: min(540px, calc(100vw - 12px));
+  max-height: min(440px, calc(100vh - 12px));
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 8px 10px;
+  pointer-events: none;
+  font-size: 12px;
+}
+.fl-card.open {
+  display: block;
+}
+.fl-card p {
+  margin: 3px 0;
+}
+.fl-ct {
+  font-weight: 700;
+  font-size: 12.5px;
+  margin-bottom: 2px;
+}
+.fl-menu,
+.fl-form {
+  position: absolute;
+  z-index: 30;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 4px;
+  width: 260px;
+  max-height: calc(100% - 12px);
+  overflow: auto;
+}
+.fl-menu.wide {
+  width: 300px;
+}
+.fl-mh {
+  padding: 4px 8px 2px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.fl-mi {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fl-mi:hover,
+.fl-mi:focus-visible {
+  background: var(--bg-3);
+  outline: none;
+}
+.fl-mi.danger {
+  color: var(--danger);
+}
+.fl-mi small {
+  display: block;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-msep {
+  border-top: 1px solid var(--border);
+  margin: 4px 2px;
+}
+.fl-form {
+  width: 320px;
+  padding: 10px 12px;
+}
+.fl-ft {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+.fl-form > p {
+  margin: 2px 0 8px;
+}
+.fl-fl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 8px 0;
+}
+.fl-fl > span {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.fl-fl.inline {
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+.fl-fl small {
+  font-size: 11px;
+}
+.fl-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  max-height: 120px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  background: var(--bg);
+}
+.fl-colpick {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.fl-more-fields summary {
+  cursor: pointer;
+  color: var(--accent);
+  margin: 6px 0;
+}
+.fl-fmsg:empty {
+  display: none;
+}
+.fl-fmsg {
+  margin: 6px 0;
+  font-size: 12px;
+}
+.fl-fb {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.fl-bubble {
+  position: absolute;
+  z-index: 40;
+  max-width: 360px;
+  background: var(--bg-2);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.fl-draglabel {
+  position: absolute;
+  z-index: 40;
+  pointer-events: none;
+  background: var(--bg-2);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.fl-draglabel.misfit {
+  border-color: var(--t-flags);
+  color: var(--t-flags);
+}
+
+/* ---------- narrow panels and phones ---------- */
+.fl.narrow .fl-legend span:nth-child(n + 3) {
+  display: none;
+}
+.fl.narrow .fl-mini {
+  width: 120px;
+  height: 44px;
+}
+.fl.narrow .fl-bar .layr-button {
+  padding: 0 6px;
+}
+@media (max-width: 520px) {
+  .fl-hint {
+    display: none;
+  }
+  .fl .fl-sel {
+    max-width: 170px;
+  }
+  .fl-editor {
+    height: 280px;
+  }
+}
+
+:root[data-theme="light"] .fl-seg {
+  opacity: 0.95;
+}
+:root[data-theme="light"] .fl-node {
+  box-shadow: 0 1px 3px rgb(20 24 33 / 0.12);
+}
+/* a low flow (above the code on the method screen): the overview map would cover the boxes */
+.fl.short .fl-mini {
+  display: none;
+}
