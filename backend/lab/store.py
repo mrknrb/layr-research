@@ -74,6 +74,12 @@ def records(df: pd.DataFrame) -> list[dict[str, Any]]:
     return [jsonable(r) for r in df.to_dict(orient="records")]
 
 
+def step_output(step: dict[str, Any]) -> dict[str, Any]:
+    """A run step's result summary as a dict ({} for a step that gave a plain number or text, or nothing)."""
+    out = step.get("output")
+    return out if isinstance(out, dict) else {}
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -397,7 +403,7 @@ class Store:
     def table_names(run: dict[str, Any]) -> list[str]:
         names = [n for n, o in (run.get("outputs") or {}).items() if o.get("kind") == "table"]
         for s in run.get("steps") or []:
-            if (s.get("output") or {}).get("file") and s.get("function"):
+            if step_output(s).get("file") and s.get("function"):
                 names.append(f"step:{s['function']}")
         return names
 
@@ -409,7 +415,7 @@ class Store:
             return outs[ref]
         name = ref[5:] if ref.startswith("step:") else ref
         for s in run.get("steps") or []:
-            if s.get("function") == name and (s.get("output") or {}).get("file"):
+            if s.get("function") == name and step_output(s).get("file"):
                 return {"kind": "table", **s["output"]}
         return None
 

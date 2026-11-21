@@ -21,10 +21,12 @@ SAMPLE = PLUGIN / "sample" / "plant_growth.csv"
 
 
 @contextlib.asynccontextmanager
-async def server(data_dir: Path):
-    """The backend as layr starts it: its own data folder, MCP on stdin/stdout, no hub."""
+async def server(data_dir: Path, hub: str | None = None):
+    """The backend as layr starts it: its own data folder, MCP on stdin/stdout, no hub (or the hub at `hub`)."""
     env = {**os.environ, "LAYR_DATA_DIR": str(data_dir), "LAYR_PLUGIN_ID": "research"}
     env.pop("LAYR_HUB_URL", None)
+    if hub:
+        env.update(LAYR_HUB_URL=hub, LAYR_HUB_TOKEN="test")
     params = StdioServerParameters(command=sys.executable, args=[str(PLUGIN / "backend" / "server.py")], env=env,
                                    cwd=str(PLUGIN))
     async with stdio_client(params) as (read, write), ClientSession(read, write) as s:

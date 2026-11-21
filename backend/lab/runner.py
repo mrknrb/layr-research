@@ -3,13 +3,26 @@ a run (run.json, tables, figures, the record of every call), and the results dat
 
 The calculation process is started ahead of time and kept warm, so a run doesn't wait for pandas and SciPy to load.
 One run at a time; `stop()` ends it (the process is killed and a fresh one started), and so does the time limit.
+
+A step whose code and inputs are the same as in an earlier run isn't calculated again (`<store>/cache/steps/`, see
+lab/recorder.py's StepCache): it is marked "cached" in the run's steps. `fresh=True` calculates every step (the
+reference comparison and anything that proves numbers use it). A trial run (`trial=True`, also of an unsaved
+source) doesn't become the experiment's latest run or go to the results database.
+
+Runs pile up: `prune_runs` (every few runs) keeps the newest `TRIAL_KEEP` trial runs of each experiment and lets
+only the newest `INSIDE_KEEP` runs of each experiment (and its latest run) keep the values inside their steps
+(inside.json, values/); older runs keep everything else: their settings, steps' tables, outputs and calls.
 """
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import json
 import os
 import queue
+import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -27,6 +40,9 @@ from .store import Store, jsonable, new_id, now
 WORKER = Path(__file__).resolve().parent / "worker.py"
 BACKEND = WORKER.parent.parent
 TIME_LIMIT_S = 900
+TRIAL_KEEP = 20  # trial runs kept per experiment (the newest)
+INSIDE_KEEP = 5  # runs per experiment that keep the values inside their steps (the newest; the latest run always)
+PRUNE_EVERY = 10  # runs between two tidy-ups
 
 
 class Stopped(Exception):
@@ -80,6 +96,7 @@ class Pool:
         self._lock = threading.Lock()  # one job at a time
         self._guard = threading.Lock()
         self.current: Worker | None = None
+        self.current_job: dict[str, Any] | None = None
         self.stop_reason: str | None = None
 
     def warm(self) -> None:
@@ -101,7 +118,7 @@ class Pool:
             time_limit_s: float | None = None) -> dict[str, Any]:
         with self._lock:
             w = self._take()
-            self.current = w
+            self.current, self.current_job = w, job
             self.stop_reason = None
             limit = time_limit_s or TIME_LIMIT_S
             try:
@@ -141,7 +158,7 @@ class Pool:
                     if "done" in msg:
                         return msg["done"]
             finally:
-                self.current = None
+                self.current = self.current_job = None
                 if w.alive() and not self.stop_reason:
                     with self._guard:
                         if self._warm is None:
@@ -152,9 +169,11 @@ class Pool:
                     w.kill()
                     threading.Thread(target=self.warm, daemon=True).start()
 
-    def stop(self, reason: str = "you") -> bool:
+    def stop(self, reason: str = "you", experiment: str | None = None) -> bool:
+        """Stop the job running now; with `experiment`, only when it is that experiment's (another one's run may be
+        calculating while this one waits)."""
         w = self.current
-        if w is None:
+        if w is None or (experiment and (self.current_job or {}).get("experiment") != experiment):
             return False
         self.stop_reason = reason
         w.kill()
@@ -184,10 +203,16 @@ def experiment_inputs(exp: dict[str, Any], file_params: list[str]) -> dict[str, 
     return out
 
 
+@functools.lru_cache(maxsize=8)
+def _parse(source: str) -> methodfile.Method:
+    """The method read once per source (a recalculation after every change reads the same one again)."""
+    return methodfile.parse(source)
+
+
 def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     """What the recipe gets from this experiment: {recipe, kinds, args, params (shown), inputs, notes}."""
     try:
-        parsed = methodfile.parse(source)
+        parsed = _parse(source)
     except SyntaxError as e:
         raise LabError(f"The method can't be read (line {e.lineno}): {e.msg}. Fix it in the method's editor.") from e
     fn = parsed.recipe_function
@@ -239,19 +264,25 @@ def versions_here() -> dict[str, str]:
 
 
 class Runner:
-    def __init__(self, store: Store, pool: Pool | None = None):
+    def __init__(self, store: Store, pool: Pool | None = None, remember_steps: bool = True, record_inside: bool = True):
         self.store = store
         self.pool = pool or Pool()
+        self.remember_steps = remember_steps
+        self.record_inside = record_inside
+        self._since_prune = PRUNE_EVERY - 1  # the first run tidies up
 
     def run(self, exp: dict[str, Any], method: dict[str, Any], *, trial: bool = False,
             on_change: Callable[[dict], None] | None = None, time_limit_s: float | None = None,
-            reason: str | None = None) -> dict[str, Any]:
-        """Run `method` (a stored version, or a draft) on an experiment. A trial run (a comparison after a change)
-        is kept apart: it doesn't become the experiment's latest run or go to the results database."""
+            reason: str | None = None, fresh: bool = False) -> dict[str, Any]:
+        """Run `method` (a stored version, a draft, or any {"id", "source"} such as an unsaved source in the editor)
+        on an experiment. A trial run (a comparison after a change, a recalculation while editing) is kept apart: it
+        doesn't become the experiment's latest run or go to the results database. `fresh` calculates every step
+        instead of reusing remembered ones (it still remembers them for the next run)."""
         store = self.store
         info = resolve(store, exp, method["source"])
         run = {"id": new_id("r"), "experiment": exp["id"], "title": exp.get("title"), "status": "running",
-               "trial": trial, "reason": reason, "started": now(), "finished": None,
+               "trial": trial, "reason": reason, "started": now(), "finished": None, "fresh": fresh,
+               "inside": self.record_inside,
                "method": {"id": method["id"], "version": method.get("version"), "name": method.get("name"),
                           "draft": bool(method.get("draft"))},
                "params": info["params"], "notes": info["notes"],
@@ -263,7 +294,9 @@ class Runner:
         (rdir / "method.py").write_text(method["source"], "utf-8", newline="\n")
         store.save_run(run)
         job = {"job": "run", "source": str(rdir / "method.py"), "run_dir": str(rdir), "recipe": info["recipe"],
-               "kinds": info["kinds"], "args": info["args"], "cache_dir": str(store.root / "cache")}
+               "kinds": info["kinds"], "args": info["args"], "cache_dir": str(store.root / "cache"),
+               "step_cache": str(store.root / "cache" / "steps") if self.remember_steps else None,
+               "fresh": fresh, "inside": self.record_inside, "experiment": exp["id"]}
 
         def progress(msg: dict) -> None:
             run["step"] = msg.get("step")
@@ -279,6 +312,8 @@ class Runner:
             run["ms"] = reply.get("ms")
             if reply.get("versions"):
                 run["versions"] = reply["versions"]
+            if reply.get("cache"):
+                run["cache"] = reply["cache"]
             if reply.get("error"):
                 run["error"] = reply["error"]
         except Stopped as e:
@@ -293,9 +328,13 @@ class Runner:
         run.pop("step", None)
         run["finished"] = now()
         run["summary"] = self._summary(run, rdir)
-        store.save_run(run)
         if run["status"] == "done" and not trial:
-            self._database(exp, run, rdir, info["database"])
+            try:
+                self._database(exp, run, rdir, info["database"])
+            finally:
+                store.save_run(run)
+        else:
+            store.save_run(run)
         if not trial:
             e = store.get_experiment(exp["id"])
             e["last_run"] = {"id": run["id"], "status": run["status"], "started": run["started"],
@@ -304,6 +343,13 @@ class Runner:
                              "error_at": {k: (run.get("error") or {}).get(k) for k in ("line", "function")},
                              "method_version": run["method"]["version"]}
             store.save_experiment(e)
+        self._since_prune += 1
+        if self._since_prune >= PRUNE_EVERY:
+            self._since_prune = 0
+            try:
+                prune_runs(store)
+            except Exception as ex:  # tidying up must never break a run
+                print(f"couldn't tidy up old runs: {ex}", file=sys.stderr)
         return run
 
     @staticmethod
@@ -320,11 +366,85 @@ class Runner:
         return summary
 
     def _database(self, exp: dict[str, Any], run: dict[str, Any], rdir: Path, database: list[str] | None) -> None:
+        """The run's result tables into the results database. A table whose file is the same as the one the
+        experiment's latest run put there (a rerun from remembered steps) only gets the new run's id and time."""
+        previous = {}
+        last = (self.store.get_experiment(exp["id"]).get("last_run") or {}) if exp.get("id") else {}
+        if last.get("id") and last.get("status") == "done":
+            try:
+                previous = self.store.get_run(last["id"]).get("database") or {}
+            except (LabError, OSError, ValueError):
+                previous = {}
+        written = {}
         for name, o in run["outputs"].items():
             if o.get("kind") != "table" or (database is not None and name not in database):
+                continue
+            try:
+                digest = hashlib.sha256((rdir / o["file"]).read_bytes()).hexdigest()
+            except OSError:
+                continue
+            written[name] = digest
+            if previous.get(name) == digest and self._same_rows(name, exp, run):
                 continue
             try:
                 df = pd.read_csv(rdir / o["file"])
             except pd.errors.EmptyDataError:
                 continue
             self.store.db_write(name, exp, run, df)
+        run["database"] = written
+
+    def _same_rows(self, table: str, exp: dict[str, Any], run: dict[str, Any]) -> bool:
+        """Give the experiment's rows of a results table the new run's id and time; False when it has none there."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,60}", table) or not self.store.db_path.exists():
+            return False
+        try:
+            with sqlite3.connect(self.store.db_path) as con:
+                cur = con.execute(f'update "{table}" set run = ?, run_finished = ? where experiment = ?',
+                                  (run["id"], run.get("finished") or now(), exp["id"]))
+                return cur.rowcount > 0
+        except sqlite3.Error:
+            return False
+
+
+def prune_runs(store: Store, trial_keep: int = TRIAL_KEEP, inside_keep: int = INSIDE_KEEP) -> dict[str, int]:
+    """Delete old trial runs and the values inside the steps of old runs (see the module's docstring)."""
+    import shutil
+
+    def started(r: dict[str, Any]) -> tuple:  # runs started in the same second: by when run.json was written
+        try:
+            written = (store.run_dir(r["id"]) / "run.json").stat().st_mtime_ns
+        except OSError:
+            written = 0
+        return r.get("started") or "", written
+
+    by_exp: dict[str, list[dict[str, Any]]] = {}
+    for r in sorted(store.list_runs(None, trials=True), key=started, reverse=True):  # newest first
+        by_exp.setdefault(r.get("experiment") or "", []).append(r)
+    latest = {}
+    for e in store.list_experiments():
+        if e.get("last_run"):
+            latest[e["id"]] = e["last_run"].get("id")
+    deleted = cleared = 0
+    for exp_id, runs in by_exp.items():
+        trials = [r for r in runs if r.get("trial") and r.get("status") != "running"]
+        for r in trials[trial_keep:]:
+            shutil.rmtree(store.run_dir(r["id"]), ignore_errors=True)
+            deleted += 1
+        gone = {r["id"] for r in trials[trial_keep:]}
+        left = [r for r in runs if r["id"] not in gone]
+        for r in left[inside_keep:]:
+            if r["id"] == latest.get(exp_id) or r.get("status") == "running":
+                continue
+            rdir = store.run_dir(r["id"])
+            if not (rdir / "inside.json").exists() and not (rdir / "values").exists():
+                continue
+            (rdir / "inside.json").unlink(missing_ok=True)
+            shutil.rmtree(rdir / "values", ignore_errors=True)
+            try:
+                full = store.get_run(r["id"])
+                full["inside"] = "cleared"
+                store.save_run(full)
+            except (LabError, OSError, ValueError):
+                pass
+            cleared += 1
+    return {"deleted_trials": deleted, "cleared_inside": cleared}

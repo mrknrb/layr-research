@@ -22,6 +22,7 @@ import math
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,6 +85,18 @@ mcp = FastMCP(
         "the recipe, results go out by returning them). Corrections (rename, exclude, manual_integration) always "
         "need a reason and stay proposed until the user approves them; don't call correction_decide yourself unless "
         "the user asks. "
+        "The flow: the user sees a method as a flow of boxes drawn from its recipe (one box per recipe line, wires "
+        "are the names passed between them). Read it with flow_get (method, experiment or run; with a run every "
+        "box has its status: done, cached (remembered from an earlier run with the same code and inputs, not "
+        "calculated again), failed or not_run, and every wire its value). To change the recipe the way the flow "
+        "does (add a step or a ready-made block from `blocks`, connect or disconnect an input, add a setting, an "
+        "input or a result, group steps), call flow_edit: it returns the new source and saves nothing; then save it "
+        "with method_write(source=...), which is a draft for you like any change. To see what happened inside a "
+        "step in a run: function_inside (its code with the values of every line, loops' first and last rounds); "
+        "a value with a `file` is a table: read its rows with value_get. run(source=..., settings=...) is a trial "
+        "run of an unsaved change: it saves nothing and isn't the experiment's latest run; run(fresh=true) "
+        "calculates every step again. Numbers you report still come only from runs (result_table, provenance, "
+        "value_get, function_inside), with the run id. "
         "(2) Quick one-off analyses: load_csv (or load_sample) returns a dataset id; then describe, plot, ttest or "
         "anova it; list_datasets shows what is loaded."
     ),
@@ -308,34 +321,86 @@ def _history(limit: int) -> list[dict[str, Any]]:
     return out
 
 
-_background: set[asyncio.Task] = set()
+def _hub_known() -> bool:
+    return bool(os.environ.get("LAYR_HUB_URL") and os.environ.get("LAYR_HUB_TOKEN"))
 
 
 def _emit_soon(data: dict[str, Any], topic: str = "research:result") -> None:
-    """Tells the plugin's panels (topic research:result) through the hub. Best effort: no hub, no event."""
-    if not (os.environ.get("LAYR_HUB_URL") and os.environ.get("LAYR_HUB_TOKEN")):
-        return
-    try:
-        task = asyncio.get_running_loop().create_task(_emit(data, topic))
-    except RuntimeError:
-        return
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    """Tells the plugin's panels (topic research:result, research:lab) through the hub, from the event loop or from
+    a worker thread (lab/events.py). Best effort: no hub, no event."""
+    EVENTS.emit(data, topic)
 
 
-async def _emit(data: dict[str, Any], topic: str = "research:result") -> None:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+class _Hub:
+    """One connection to the hub, kept open for every event (lab/events.py hands them over one at a time). Opening
+    one costs the event loop a quarter of a second (the TLS settings of its HTTP client, made here once in a thread),
+    so it is opened once, by one task that owns it. A connection that worked and then broke (the hub restarted, or
+    closed it after a quiet hour) is opened again at once and the event sent again; when the hub can't be reached it
+    is tried again only after RETRY_S, and the events in between are dropped (they are a courtesy to the panels)."""
 
-    headers = {"Authorization": f"Bearer {os.environ['LAYR_HUB_TOKEN']}"}
-    try:
-        async with asyncio.timeout(5):
-            async with streamablehttp_client(os.environ["LAYR_HUB_URL"], headers=headers) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    await session.call_tool("layr__events_emit", {"topic": topic, "data": data})
-    except Exception as e:  # the hub is optional for this plugin
-        log.info("couldn't emit %s through the hub: %s", topic, e)
+    RETRY_S = 10
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue | None = None
+        self.task: asyncio.Task | None = None
+        self.tls = None
+        self.retry_at = 0.0
+
+    async def send(self, data: dict[str, Any], topic: str = "research:result") -> None:
+        if self.task is None or self.task.done():
+            self.queue = asyncio.Queue()
+            self.task = asyncio.ensure_future(self._serve())
+        done = asyncio.get_running_loop().create_future()
+        self.queue.put_nowait((data, topic, done))
+        await done  # one at a time: lab/events.py skips progress a newer event follows while the hub is slow
+
+    async def _serve(self) -> None:
+        import ssl
+        from datetime import timedelta
+
+        import httpx
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        def client(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+            return httpx.AsyncClient(headers=headers, timeout=timeout or httpx.Timeout(30, read=300), auth=auth,
+                                     verify=self.tls)
+
+        pending = None  # (data, topic, future) not sent yet
+        while True:
+            if pending is None:
+                pending = await self.queue.get()
+            if time.monotonic() < self.retry_at:
+                _finish(pending[2])
+                pending = None
+                continue
+            sent = False  # whether this connection delivered anything
+            try:
+                if self.tls is None:
+                    self.tls = await asyncio.to_thread(ssl.create_default_context)
+                headers = {"Authorization": f"Bearer {os.environ['LAYR_HUB_TOKEN']}"}
+                async with streamablehttp_client(os.environ["LAYR_HUB_URL"], headers=headers,
+                                                 httpx_client_factory=client) as (read, write, _):
+                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
+                        await session.initialize()
+                        while True:  # the connection stays open while the plugin waits for the next event
+                            data, topic, done = pending
+                            await session.call_tool("layr__events_emit", {"topic": topic, "data": data})
+                            sent = True
+                            _finish(done)
+                            pending = await self.queue.get()
+            except Exception as e:  # the hub is optional for this plugin
+                log.info("couldn't emit an event through the hub: %s", e)
+                if not sent:
+                    self.retry_at = time.monotonic() + self.RETRY_S
+                    _finish(pending[2])
+                    pending = None
+
+
+
+def _finish(done: asyncio.Future) -> None:
+    if not done.done():  # its waiter may be gone (the server is stopping)
+        done.set_result(None)
 
 
 # ---------- charts ----------
@@ -838,10 +903,33 @@ def remove_dataset(dataset: Annotated[str, Field(description="The dataset id to 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lab import tools as lab_tools  # noqa: E402
+from lab.events import Emitter  # noqa: E402
 
+HUB = _Hub()
+EVENTS = Emitter(HUB.send, _hub_known)
 LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
+
+
+def _warm() -> None:
+    """Read the slow parts once in the background (Jedi's pandas, the GC method's flow): the first completion and
+    the first flow otherwise take seconds."""
+    from lab import codeintel, flow
+
+    try:
+        codeintel.warm()
+        flow.graph(LAB.get_method("gc-activity-assay")["source"])
+    except Exception as e:  # only a head start; the tools do the same work when asked
+        log.info("warming up failed: %s", e)
 
 
 if __name__ == "__main__":
     log.info("research backend starting; data in %s", DATA)
-    mcp.run()
+    import threading
+
+    threading.Thread(target=_warm, daemon=True).start()
+
+    async def _serve() -> None:
+        EVENTS.use_loop(asyncio.get_running_loop())  # events sent from worker threads go through this loop
+        await mcp.run_stdio_async()
+
+    asyncio.run(_serve())

@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- A page to try flow.js by itself as a host would use it (plugins/dev/research-flow.test.mjs drives it). Not one of
+     the plugin's panels: layr.json doesn't list it, but the core serves it next to them.
+     ?method=gc-activity-assay&experiment=<id>&editable=1&inside=panel&autorun=1 -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research flow (development page)</title>
+    <link rel="stylesheet" href="/_layr/layr.css" />
+    <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./editor.css" />
+    <link rel="stylesheet" href="./flow.css" />
+    <script src="/_layr/layr.js"></script>
+    <script src="./vendor/katex/katex.min.js"></script>
+    <style>
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #host {
+        flex: 1;
+        min-height: 0;
+      }
+      #log {
+        flex: none;
+        max-height: 60px;
+        overflow: auto;
+        padding: 2px 8px;
+        font: 11px var(--font-mono);
+        color: var(--fg-dim);
+        border-top: 1px solid var(--border);
+      }
+      #log:empty {
+        display: none;
+      }
+      .tex.display {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="host"></div>
+    <div id="log"></div>
+    <script type="module">
+      import { mountFlow } from "./flow.js";
+
+      const q = new URLSearchParams(location.search);
+      const call = (tool, args = {}) => layr.tools.run(tool, args);
+      const tex = (latex, display) => {
+        const el = document.createElement("span");
+        el.className = display ? "tex display" : "tex";
+        try {
+          katex.render(latex || "", el, { throwOnError: false, displayMode: !!display, strict: "ignore" });
+        } catch {
+          el.textContent = latex;
+        }
+        return el;
+      };
+      const logEl = document.getElementById("log");
+      const T = (window.T = { log: [], ready: false, flow: null, source: null, autoRun: q.get("autorun") === "1" });
+      const note = (cb, args) => {
+        T.log.push({ cb, args: JSON.parse(JSON.stringify(args ?? null)) });
+        logEl.textContent = T.log.slice(-3).map((x) => `${x.cb} ${JSON.stringify(x.args).slice(0, 160)}`).join("\n");
+      };
+
+      /** (Re)mounts the flow; `opts` override the page's defaults. */
+      T.mount = (opts = {}) => {
+        T.flow?.destroy();
+        T.log = [];
+        const o = {
+          call,
+          tex,
+          method: q.get("method") || "gc-activity-assay",
+          experiment: q.get("experiment") || null,
+          editable: q.get("editable") === "1",
+          inside: q.get("inside") || "panel",
+          onSource(source, info) {
+            T.source = source;
+            note("onSource", { ops: info.ops, ok: info.ok, added: info.added, diff: info.diff });
+          },
+          async onSetting(id, value) {
+            note("onSetting", { id, value });
+            if (!T.autoRun || !T.experiment) return;
+            await call("experiment_update", { experiment: T.experiment, params: { [id]: value } });
+            T.flow.setRunning({ step: "read_gaml" });
+            await call("run", { experiment: T.experiment, wait_s: 55 });
+            T.flow.setRunning(null);
+            await T.flow.update({});
+          },
+          onPick(p) {
+            T.experiment = p.experiment;
+            note("onPick", p);
+          },
+          onSelect(s) {
+            note("onSelect", s);
+          },
+          onOpen(o) {
+            note("onOpen", o);
+          },
+          ...opts,
+        };
+        T.experiment = o.experiment;
+        T.flow = mountFlow(document.getElementById("host"), o);
+        return T.flow;
+      };
+      layr.ready.then(() => {
+        T.mount();
+        T.ready = true;
+      });
+    </script>
+  </body>
+</html>
