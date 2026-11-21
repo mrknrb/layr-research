@@ -1,13 +1,16 @@
 [project]
 name = "layr-research"
-version = "0.4.0"
-description = "layr research plugin: explainable analysis methods as plain Python (GC-FID assays, tables), quick stats and plots."
+version = "0.5.0"
+description = "layr research plugin: explainable analysis methods as plain Python (any table data, surveys, GC-FID assays), pages made of cards, quick stats and plots."
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=1.12,<2",
   "pandas>=2.2",
   "matplotlib>=3.9",
   "scipy>=1.13",
+  "statsmodels>=0.14",
+  "scikit-learn>=1.5",
+  "pyreadstat>=1.2",
   "pyyaml>=6",
   "openpyxl>=3.1",
   "python-docx>=1.1",

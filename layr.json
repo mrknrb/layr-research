@@ -1,8 +1,8 @@
 {
   "id": "research",
   "name": "Research",
-  "version": "0.4.0",
-  "description": "Explainable data analysis: methods written as plain Python that explain every number from their own code (GC-FID activity assays, tables), peak review, reports, a results database for the whole PhD; plus quick charts and tests.",
+  "version": "0.5.0",
+  "description": "Explainable data analysis for any study: methods written as plain Python that explain every number from their own code (surveys, tables, GC-FID assays...), each experiment's own pages built from cards, corrections with reasons, reports, a results database; plus quick charts and tests.",
   "author": "layr",
   "layr": "^0.1",
   "icon": "science",
@@ -13,7 +13,7 @@
       "why": "Explain a function or selected lines in plain words, and draft a Methods paragraph (one-off questions to Claude)" }
   ],
   "panels": [
-    { "id": "experiments", "title": "Experiments", "page": "panels/lab.html", "icon": "biotech", "opens": [".gaml"] },
+    { "id": "experiments", "title": "Experiments", "page": "panels/lab.html", "icon": "biotech", "opens": [".gaml", ".sav", ".dta"] },
     { "id": "main", "title": "Quick analysis", "page": "panels/main.html", "icon": "science" }
   ],
   "commands": [
@@ -34,7 +34,7 @@
                   "methods", "method_get", "method_check", "method_versions", "method_diff", "draft_get",
                   "toolbox_docs", "toolbox_copy", "explain", "explain_function", "ai_prompt", "experiments",
                   "experiment_get", "runs", "run_get", "result_table", "figure", "provenance", "compare_runs",
-                  "chromatogram", "database_tables", "database_query", "gcassay_settings", "flow_get", "flow_edit",
+                  "chromatogram", "curve", "result_value", "correction_kinds", "database_tables", "database_query", "gcassay_settings", "flow_get", "flow_edit",
                   "flow_new", "value_get", "function_inside", "blocks", "code_complete", "code_hover",
                   "code_signature", "code_definition", "code_rename", "code_format"],
         "defaults": { "plugins": "allow", "agents": "allow" } },
@@ -43,7 +43,7 @@
                   "experiment_create", "lab_sample"],
         "defaults": { "agents": "allow" } },
       { "id": "build", "label": "Write methods (as drafts you approve), change and run experiments, write reports",
-        "tools": ["method_create", "method_write", "method_revert", "method_reference", "experiment_update", "run",
+        "tools": ["method_create", "method_write", "method_declare", "method_revert", "method_reference", "experiment_update", "run",
                   "run_stop", "export", "method_export", "notebook"],
         "defaults": { "agents": "allow" } },
       { "id": "propose", "label": "Propose corrections (they wait for your approval)",

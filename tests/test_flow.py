@@ -20,6 +20,8 @@ from lab.errors import LabError  # noqa: E402
 
 PLUGIN = Path(__file__).resolve().parent.parent
 GC = (PLUGIN / "backend" / "lab" / "methods" / "gc-activity-assay.py").read_text("utf-8")
+# the recipe's line that integrates the peaks (the lines above it change with the method's PAGES and CORRECTIONS)
+P = next(i for i, ln in enumerate(GC.splitlines(), 1) if ln.strip().startswith("peaks = integrate_peaks("))
 PLANTS_CSV = PLUGIN / "sample" / "plant_growth.csv"
 PROTOTYPE = PLUGIN.parent.parent / "docs" / "proposals" / "research-flow" / "build_prototype.py"
 
@@ -219,7 +221,7 @@ def test_gc_graph_nodes_ports_settings_results():
         ("ratios", "wire"), ("cal_min_conc_mM", "setting"), ("cal_max_conc_mM", "setting"), ("cal_series", "setting")]
     assert port(standards, "ratios")["from"] == "ratios"
     peaks = node(g, "peaks")
-    assert peaks["line"] == 744 and peaks["end_line"] == 745 and peaks["code"].startswith("peaks = integrate_peaks(")
+    assert peaks["line"] == P and peaks["end_line"] == P + 1 and peaks["code"].startswith("peaks = integrate_peaks(")
     assert {p["setting"] for p in peaks["ports"] if p["source"] == "setting"} == {"internal_standard",
                                                                                    "rt_drift_correction"}
     assert port(peaks, "settings")["wire"] == "settings" and port(peaks, "corrections")["input"] == "corrections"
@@ -487,7 +489,7 @@ def test_add_and_remove_step_gc():
     op = {"op": "add_step", "function": "time_course", "args": {"concentrations": "concentrations"}, "out": "again"}
     new, g = roundtrip(GC, op, {"op": "remove_step", "node": "again"})
     added = node(g, "again")
-    assert added["line"] == 751 and [n["id"] for n in g["nodes"]].index("again") == 11  # right after its input
+    assert added["line"] == P + 7 and [n["id"] for n in g["nodes"]].index("again") == 11  # right after its input
     assert port(added, "concentrations")["from"] == "concentrations"
     assert "    again = time_course(concentrations)\n" in new
     # a toolbox function not imported yet: the import line gets it, wrapped as the file wraps it
@@ -683,8 +685,8 @@ def test_group_and_ungroup_gc():
     checks = QUALITY[1:-1]
     new, g = roundtrip(GC, {"op": "group", "nodes": checks, "title": "Quality checks"},
                        {"op": "ungroup", "group": "group-quality-checks"})
-    assert g["groups"] == [{"id": "group-quality-checks", "title": "Quality checks", "line": 755, "end_line": 764,
-                            "nodes": checks, "closed_by": 765}]
+    assert g["groups"] == [{"id": "group-quality-checks", "title": "Quality checks", "line": P + 11, "end_line": P + 20,
+                            "nodes": checks, "closed_by": P + 21}]
     assert node(g, "flags")["group"] is None
     with pytest.raises(LabError, match="follow each other"):
         flow.edit(GC, {"op": "group", "nodes": ["samples", "peaks"], "title": "x"})

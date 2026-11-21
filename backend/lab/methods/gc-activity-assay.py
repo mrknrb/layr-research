@@ -14,6 +14,74 @@ from toolbox import (PeakSettings, combine_flags, fit_line, fit_line_through_zer
 # The results kept in the results database, to compare experiments across the PhD.
 DATABASE = ["activities", "time_course", "concentrations", "interval_rates", "mass_balance"]
 
+# The kinds of correction an experiment can record, each with a reason; approved ones reach the recipe's `corrections`.
+CORRECTIONS = {
+    "rename": {
+        "label": "Rename an injection",
+        "help": "Fix a wrong injection name before it is read.",
+        "fields": {"injection": "integer", "new_name": "text"},
+        "key": ["injection"],
+    },
+    "exclude": {
+        "label": "Leave out an injection, or one compound in it",
+        "fields": {"injection": "integer", "compound": "optional text"},
+    },
+    "manual_integration": {
+        "label": "Integrate a peak by hand",
+        "help": "Set a peak's start and end by hand.",
+        "fields": {"injection": "integer", "compound": "text", "start_min": "number", "end_min": "number"},
+    },
+}
+
+# The experiment's own pages, made of cards (the panel's page builder writes this; it can be edited here).
+PAGES = [
+    {
+        "title": "Peaks",
+        "cards": [
+            {
+                "card": "review",
+                "title": "Peaks",
+                "regions": "peaks",
+                "item": "injection",
+                "name": "name",
+                "group": "role",
+                "label": "compound",
+                "start": "start",
+                "end": "end",
+                "status": "status",
+                "ok": ["ok", "n.d."],
+                "status_labels": {
+                    "ok": "found",
+                    "<LOQ": "below LOQ",
+                    "n.d.": "not detected",
+                    "manual": "set by hand",
+                    "excluded": "excluded",
+                },
+                "curve": {"file": "gaml_file"},
+                "expected": "rt_expected",
+                "tolerance": "rt_tolerance",
+                "baseline": ["baseline_start_y", "baseline_end_y"],
+                "info": [
+                    {"column": "area", "label": "Area", "unit": "pA·min"},
+                    {"column": "snr", "label": "S/N"},
+                    {"column": "rt", "label": "Apex", "unit": "min"},
+                    {"column": "vendor_area", "label": "Instrument's area", "unit": "pA·min"},
+                ],
+                "note": "note",
+                "marker": "vendor_rt",
+                "marker_label": "instrument",
+                "window": 0.25,
+                "x_label": "min",
+                "y_label": "pA",
+                "correct": "manual_integration",
+                "start_field": "start_min",
+                "end_field": "end_min",
+                "exclude": "exclude",
+            },
+        ],
+    },
+]
+
 DESIGN_COLUMNS = ["injection", "name", "original_name", "role", "strain", "time_min", "replicate", "substrate",
                   "std_conc_mM", "std_series", "collected"]
 

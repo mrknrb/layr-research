@@ -179,9 +179,15 @@ def export_folder(store: Store, method: dict[str, Any], dest: Path, exp: dict[st
     from .runner import versions_here
 
     v = {**versions_here(), **v}
-    (dest / "requirements.txt").write_text("".join(f"{pkg}=={v[pkg]}\n" for pkg in ("pandas", "numpy", "scipy",
-                                                                                  "matplotlib") if v.get(pkg)),
-                                           "utf-8")
+    try:
+        from .pages import requirements as declared_requirements
+
+        extra = declared_requirements(methodfile.parse(method["source"]).constants)
+    except SyntaxError:
+        extra = []
+    pinned = "".join(f"{pkg}=={v[pkg]}\n" for pkg in ("pandas", "numpy", "scipy", "matplotlib", "statsmodels",
+                                                       "scikit-learn", "pyreadstat") if v.get(pkg))
+    (dest / "requirements.txt").write_text(pinned + "".join(f"{r}\n" for r in extra), "utf-8")
     (dest / "README.txt").write_text(README.format(
         name=method.get("name") or method["id"], version=(run or {}).get("method", {}).get("version")
         or method.get("version"), method_file=method_file,

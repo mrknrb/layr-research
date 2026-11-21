@@ -2599,7 +2599,7 @@ export function mountFlow(container, options = {}) {
         { name: "name", label: "What it holds", value: "", placeholder: "e.g. plate reads", help: "A short name: " +
           "it becomes plate_reads_file in the code." },
         { name: "kind", label: "Kind of file", kind: "select", value: "table", options: [["table",
-          "A table (CSV, TSV or Excel)"], ["gaml", "A GC sequence (GAML from Chromeleon)"]] },
+          "A table (CSV, TSV, Excel, SPSS, Stata)"], ["gaml", "A GC sequence (GAML from Chromeleon)"]] },
       ],
       submit: "Add it",
       run: (v, where) => {
@@ -2613,7 +2613,7 @@ export function mountFlow(container, options = {}) {
         const reader = READERS[v.kind];
         const readerParam = BLOCKS[reader]?.fields.find((f) => f.kind === "file")?.name ||
           (v.kind === "gaml" ? "gaml_file" : "table_file");
-        const types = v.kind === "gaml" ? [".gaml"] : [".csv", ".tsv", ".xlsx"];
+        const types = v.kind === "gaml" ? [".gaml"] : [".csv", ".tsv", ".xlsx", ".sav", ".dta"];
         return tryEdit([{ op: "add_input", name, types, label: v.name.trim() },
           { op: "add_step", function: reader, args: { [readerParam]: { input: name } },
             out: v.kind === "gaml" ? (G.nodes.some((n) => n.outs.includes("injections")) ? undefined : "injections") :

@@ -11,6 +11,8 @@ A method is one Python file:
 - **Steps** are the functions the recipe calls. **Formulas** are functions made only of arithmetic lines
   (`name = ...` and `return ...`). Other functions are **helpers** (they decide or loop for a step).
 - `DATABASE = ["table", ...]`: the returned tables kept in the results database (default: every returned table).
+- `PAGES`, `CORRECTIONS`, `REQUIREMENTS`: the experiment's own pages, the kinds of correction it records and extra
+  Python packages (lab/pages.py).
 
 Docstrings (the explanation comes from them and from the code itself):
 
@@ -431,12 +433,23 @@ def outline(method: Method) -> list[dict[str, Any]]:
              "params": f.params, "calls": f.calls} for f in method.functions]
 
 
+def takes_corrections(method: Method) -> bool:
+    fn = method.recipe_function
+    return bool(fn and "corrections" in fn.params)
+
+
 def summary(method: Method) -> dict[str, Any]:
+    from . import pages
+
     return {"name": method.name, "description": method.description, "recipe": method.recipe,
             "outline": outline(method), "settings": settings(method), "inputs": inputs(method),
             "outputs": (method.recipe_function.doc.returns if method.recipe_function else {}),
             "database": method.database,
-            "steps": sum(1 for f in method.functions if f.kind == "step")}
+            "steps": sum(1 for f in method.functions if f.kind == "step"),
+            "pages": pages.pages(method.constants),
+            "corrections": pages.correction_kinds(method.constants, takes_corrections(method)),
+            "takes_corrections": takes_corrections(method),
+            "requirements": pages.requirements(method.constants)}
 
 
 def unit_of(name: str) -> str | None:

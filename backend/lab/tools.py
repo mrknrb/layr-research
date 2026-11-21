@@ -4,8 +4,10 @@ Rules the tools enforce (also in the server's instructions for agents):
 - Numbers come only from runs: an agent reads results with result_table / provenance and cites the run id.
 - A method is a Python file. The user's own saves in the panel count at once (a new version); a change written by
   an AI agent is a draft until the user accepts it in the panel (draft_decide answers only for the user).
-- Corrections (renames, exclusions, manual peak boundaries) always carry a reason; one made by an agent is only
-  proposed until the user approves it in the panel.
+- Corrections (of the kinds the method declares in CORRECTIONS: renames, exclusions, boundaries set by hand, a
+  respondent left out...) always carry a reason; one made by an agent is only proposed until the user approves it.
+- A method's pages, kinds of correction and extra packages are plain values in its file (lab/pages.py), changed with
+  method_declare like any other change of the method.
 """
 
 from __future__ import annotations
@@ -22,11 +24,13 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
 import numpy as np
+import pandas as pd
 from mcp.server.fastmcp import Context, FastMCP, Image
 from pydantic import Field
 
-from . import checker, compare, methodfile, standalone
+from . import checker, compare, methodfile, packages, standalone
 from . import explain as explainer
+from . import pages as declarations
 from .errors import LabError
 from .gcassay_import import corrections_from, params_from_config, parse_yaml
 from .runner import Pool, Runner, experiment_inputs
@@ -37,6 +41,22 @@ TRIALS: dict[str, dict[str, Any]] = {}  # experiment id -> the trial run in prog
 TRIAL_ASKED: dict[str, int] = {}  # experiment id -> how many trial runs were asked for (only the newest waits)
 TASKS: set[asyncio.Future] = set()
 GAML_LOCK = threading.Lock()
+
+
+def thin(t: np.ndarray, y: np.ndarray, start: float | None, end: float | None, points: int) -> np.ndarray:
+    """The indexes of a curve's points between start and end, at most about `points` of them (each bucket keeps its
+    lowest and highest point, so peaks survive)."""
+    lo = t[0] if start is None else start
+    hi = t[-1] if end is None else end
+    idx = np.flatnonzero((t >= lo) & (t <= hi))
+    if len(idx) > points > 10:
+        keep = []
+        for b in np.array_split(idx, points // 2):
+            if len(b):
+                seg = y[b]
+                keep += sorted({int(b[np.argmin(seg)]), int(b[np.argmax(seg)])})
+        idx = np.array(keep)
+    return idx
 
 
 def _caller(ctx: Context | None) -> dict[str, Any]:
@@ -181,6 +201,7 @@ def analysis(table_file, value_column="value", group_column="group", control="co
 
 def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     store = Store(data_dir / "lab")
+    packages.configure(store.root)
     pool = Pool()
     runner = Runner(store, pool)
     threading.Thread(target=pool.warm, daemon=True).start()
@@ -197,6 +218,14 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     def method_of(e: dict) -> dict:
         return store.get_method(e["method"], e.get("method_version"))
+
+    def kinds_of(e: dict) -> dict[str, dict]:
+        """The kinds of correction the experiment's method declares (lab/pages.py)."""
+        try:
+            m = methodfile.parse(method_of(e)["source"])
+        except (LabError, SyntaxError):
+            return declarations.normalize_kinds(declarations.LEGACY_CORRECTIONS)
+        return declarations.correction_kinds(m.constants, methodfile.takes_corrections(m))
 
     def experiment_summary(e: dict) -> dict:
         try:
@@ -402,8 +431,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             saved = store.save_method(method, new_source, _who(ctx), change.strip() or "Changed in the editor")
             if new_method:
                 store.drop_draft(method)
+            packages.install_later((result.get("summary") or {}).get("requirements") or [])
             reference = None
-            if current["version"]:
+            if current["version"] and not declarations.same_calculation(current["source"], new_source):
                 reference = start_comparison(method, saved, current["version"], "version", saved["version"])
             changed("method", method=method, version=saved["version"])
             return {"saved": True, "version": saved["version"], "messages": result["messages"], "diff": lines,
@@ -412,7 +442,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 "messages": result["messages"]}
         store.save_draft(method, new_source, meta)
         draft_method = {**current, "source": new_source, "draft": True}
-        reference = start_comparison(method, draft_method, current["version"], "draft") if current["version"] else None
+        reference = start_comparison(method, draft_method, current["version"], "draft") \
+            if current["version"] and not declarations.same_calculation(current["source"], new_source) else None
         changed("method", method=method, draft=True)
         return {"saved": False, "draft": True, "messages": result["messages"], "diff": lines, "reference": reference,
                 "note": "Saved as a draft: it counts once the user accepts it in the Research panel."
@@ -426,6 +457,53 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         it is a draft)."""
         old = store.get_method(method, version)
         return method_write(method, f"Back to version {version}", source=old["source"], ctx=ctx)
+
+    @mcp.tool()
+    def method_declare(
+        method: Annotated[str, Field(description="Method id.")],
+        what: Annotated[Literal["pages", "corrections", "requirements"], Field(
+            description="pages: the experiment's own pages made of cards (PAGES) · corrections: the kinds of "
+                        "correction an experiment records (CORRECTIONS) · requirements: extra Python packages "
+                        "(REQUIREMENTS)")],
+        value: Annotated[Any, Field(description="The whole new value: pages [{title, cards: [...]}]; corrections "
+                                                "{kind id: {label, help?, fields: {name: 'text'|'number'|'integer'|"
+                                                "'boolean' (add 'optional')}, key?: [fields]}}; requirements "
+                                                "['pingouin>=0.5']. Empty removes it. Card kinds and their fields: "
+                                                "see lab/pages.py (text, number, table, figure, chart, review).")],
+        change: Annotated[str | None, Field(description="One sentence for the version history.")] = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Set a method's pages, kinds of correction or extra packages: only that one assignment at the top of the
+        file is rewritten. Like method_write: from the user's panel a new version at once, from an AI agent a draft
+        the user accepts. Pages and kinds of correction don't change any number, so the reference experiment isn't
+        compared again for them."""
+        name = what.upper()
+        if what == "pages" and value not in (None, []) and not (
+                isinstance(value, list) and all(isinstance(p, dict) and str(p.get("title") or "").strip()
+                                                for p in value)):
+            raise LabError("Pages are a list of {\"title\": ..., \"cards\": [...]}, each with a title.")
+        if what == "corrections" and value not in (None, {}):
+            if not isinstance(value, dict):
+                raise LabError("Kinds of correction are a dict: {kind id: {\"label\", \"fields\": {...}}}.")
+            for kid in value:
+                if not declarations._ID.match(str(kid)):
+                    raise LabError(f"'{kid}' can't be a kind's id: lowercase letters, digits and _, starting with a "
+                                   "letter (e.g. drop_respondent).")
+        if what == "requirements" and value:
+            try:
+                value = declarations.check_requirements(list(value))
+            except (TypeError, ValueError) as e:
+                raise LabError(str(e)) from None
+        user = _is_user(ctx)
+        draft = store.get_draft(method)
+        base = draft["source"] if (draft and (not user or store.draft_only(method))) else store.get_method(method)[
+            "source"]
+        try:
+            new_source = declarations.write(base, name, value)
+        except (ValueError, SyntaxError) as e:
+            raise LabError(f"Couldn't write {name}: {e}") from None
+        label = {"pages": "the pages", "corrections": "the kinds of correction", "requirements": "the packages"}[what]
+        return method_write(method, (change or "").strip() or f"Changed {label}", source=new_source, ctx=ctx)
 
     @mcp.tool()
     def method_reference(method: Annotated[str, Field(description="Method id.")],
@@ -764,18 +842,29 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         """One experiment in full: method, files (with checksums), settings (with the method's defaults for the
         rest), corrections with reasons and status, last run."""
         e = store.get_experiment(experiment)
+        decl: dict[str, Any] = {}
         try:
             m = method_of(e)
             settings, inputs = form(m)
             problem = None
+            try:
+                s = methodfile.summary(methodfile.parse(m["source"]))
+                decl = {"method_pages": s["pages"], "method_corrections": s["corrections"],
+                        "method_takes_corrections": s["takes_corrections"],
+                        "method_requirements": s["requirements"], "method_outputs": s["outputs"],
+                        "method_version_shown": m.get("version")}
+            except SyntaxError:
+                pass
         except LabError as err:
             settings, inputs, problem = [], [], str(err)
         resolved = {s["id"]: s["default"] for s in settings}
         resolved.update({k: v for k, v in (e.get("params") or {}).items() if k in resolved})
         files = experiment_inputs(e, [i["id"] for i in inputs])
-        return {**e, "inputs": {**(e.get("inputs") or {}), **files}, "resolved_params": resolved,
-                "method_params": settings, "method_inputs": inputs, "running": experiment in LIVE,
-                "method_problem": problem}
+        kinds = decl.get("method_corrections") or {}
+        corrections = [{**c, "what": declarations.describe(kinds, c)} for c in e.get("corrections") or []]
+        return {**e, "corrections": corrections, "inputs": {**(e.get("inputs") or {}), **files},
+                "resolved_params": resolved, "method_params": settings, "method_inputs": inputs,
+                "running": experiment in LIVE, "method_problem": problem, **decl}
 
     def _apply_files(e: dict, inputs: list[dict], files: dict[str, Any] | None) -> None:
         ids = [i["id"] for i in inputs]
@@ -826,10 +915,17 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                     e["corrections"] = corrections_from(parse_yaml(cp.read_text("utf-8"), "corrections file"))
         e["params"].update(params or {})
         user = _is_user(ctx)
+        kinds = kinds_of(e)
         for c in corrections or []:
-            if not str(c.get("reason", "")).strip() or c.get("kind") not in ("rename", "exclude", "manual_integration"):
-                raise LabError(f"Correction {c} needs a kind (rename, exclude, manual_integration) and a reason.")
-            e["corrections"].append({**c, "id": new_id("c"), "status": "approved" if user else "proposed",
+            if not str(c.get("reason", "")).strip():
+                raise LabError(f"Correction {c} needs a reason.")
+            try:
+                fields = declarations.check_correction(kinds, str(c.get("kind")), {
+                    k: v for k, v in c.items() if k not in ("kind", "reason", "by", "at", "id", "status")})
+            except ValueError as err:
+                raise LabError(str(err)) from None
+            e["corrections"].append({"kind": c["kind"], **fields, "reason": str(c["reason"]).strip(),
+                                     "id": new_id("c"), "status": "approved" if user else "proposed",
                                      "by": c.get("by") or _who(ctx), "at": c.get("at") or now()})
         e["changed"] = now()
         await asyncio.to_thread(_apply_files, e, inputs, files)
@@ -927,7 +1023,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         def on_change(ev: dict) -> None:
             state["run"], state["step"], state["message"] = ev["run"], ev.get("step"), ev.get("message") or ""
             loop.call_soon_threadsafe(lambda: changed("run", experiment=exp_id, run=ev["run"], step=ev.get("step"),
-                                                      status="running", **extra))
+                                                      message=ev.get("message"), status="running", **extra))
 
         def work() -> dict:
             return runner.run(e, method, on_change=on_change, time_limit_s=time_limit_s, fresh=fresh,
@@ -1141,7 +1237,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     # ------------------------------------------------------------------ chromatograms and corrections
 
-    def sequence_of(e: dict):
+    def sequence_of(e: dict, input_id: str | None = None):
         import toolbox
 
         try:
@@ -1152,8 +1248,12 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         except (LabError, SyntaxError):
             file_params, channel = [], (e.get("params") or {}).get("channel")
         files = experiment_inputs(e, file_params or list((e.get("inputs") or {}).keys())[:1])
-        gaml = next((f for f in files.values() if str(f.get("name", f.get("path", ""))).lower().endswith(".gaml")),
-                    None) or next(iter(files.values()), None)
+        if input_id and input_id not in files:
+            raise LabError(f"The experiment has no file for the input '{input_id}'.")
+        gaml = files.get(input_id) if input_id else None
+        gaml = gaml or next((f for f in files.values()
+                             if str(f.get("name", f.get("path", ""))).lower().endswith(".gaml")),
+                            None) or next(iter(files.values()), None)
         if not gaml:
             raise LabError("This experiment has no GC sequence file.")
         toolbox.cache.use(store.root / "cache")
@@ -1181,17 +1281,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         if inj is None:
             raise LabError(f"No injection {injection} (1-{len(seq)}).")
         t, y = inj.time_min, inj.signal_pa
-        lo = t[0] if start_min is None else start_min
-        hi = t[-1] if end_min is None else end_min
-        idx = np.flatnonzero((t >= lo) & (t <= hi))
-        if len(idx) > points > 10:
-            buckets = np.array_split(idx, points // 2)
-            keep = []
-            for b in buckets:
-                if len(b):
-                    seg = y[b]
-                    keep += sorted({int(b[np.argmin(seg)]), int(b[np.argmax(seg)])})
-            idx = np.array(keep)
+        idx = thin(t, y, start_min, end_min, points)
         peaks = []
         if e.get("last_run"):
             try:
@@ -1205,18 +1295,88 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 peaks = []
         return {"injection": injection, "name": inj.name, "time": [round(float(v), 5) for v in t[idx]],
                 "signal": [round(float(v), 5) for v in y[idx]], "peaks": peaks,
-                "corrections": [c for c in e.get("corrections") or [] if int(c.get("injection", -1)) == injection]}
+                "corrections": [c for c in e.get("corrections") or [] if str(c.get("injection")) == str(injection)]}
+
+    @mcp.tool()
+    async def curve(
+        experiment: Annotated[str, Field(description="Experiment id.")],
+        item: Annotated[Any, Field(description="Which curve: the item's value (an injection number, a sample "
+                                               "name...).")],
+        table: Annotated[str | None, Field(description="A table of the run with one row per point (an output name "
+                                                       "or 'step:<function>').")] = None,
+        item_column: Annotated[str | None, Field(description="The table's column naming the curve.")] = None,
+        x: Annotated[str | None, Field(description="The table's x column.")] = None,
+        y: Annotated[str | None, Field(description="The table's y column.")] = None,
+        file: Annotated[str | None, Field(description="Or: a raw file input of the experiment (a GAML sequence); "
+                                                      "item is then the injection number.")] = None,
+        start: Annotated[float | None, Field(description="From this x; default the start.")] = None,
+        end: Annotated[float | None, Field(description="To this x; default the end.")] = None,
+        points: Annotated[int, Field(description="At most this many points (min/max kept per bucket).")] = 1200,
+        run: Annotated[str | None, Field(description="A run id (default the experiment's latest).")] = None,
+    ) -> dict[str, Any]:
+        """One curve, for a page's review card: from a table of the run (x and y columns, one curve per item), or
+        from a raw GC sequence file. Thinned to `points`."""
+        e = store.get_experiment(experiment)
+        if file:
+            seq = await asyncio.to_thread(sequence_of, e, file)
+            inj = next((i for i in seq if str(i.number) == str(item)), None)
+            if inj is None:
+                raise LabError(f"No injection {item} (1-{len(seq)}).")
+            xs, ys, name = np.asarray(inj.time_min, float), np.asarray(inj.signal_pa, float), inj.name
+        else:
+            if not (table and item_column and x and y):
+                raise LabError("Give the table with its item, x and y columns (or a raw file).")
+            r = pick_run(run, experiment)
+            df = store.run_table(r["id"], table)
+            missing = [c for c in (item_column, x, y) if c not in df.columns]
+            if missing:
+                raise LabError(f"The table {table} has no column {', '.join(missing)}. Columns: "
+                               f"{', '.join(map(str, df.columns))}.")
+            part = df[explainer.equals(df[item_column], item)][[x, y]].apply(pd.to_numeric, errors="coerce").dropna()
+            part = part.sort_values(x)
+            xs, ys, name = part[x].to_numpy(float), part[y].to_numpy(float), None
+        if not len(xs):
+            return {"item": item, "x": [], "y": [], "name": name}
+        idx = thin(xs, ys, start, end, points)
+        return {"item": item, "name": name, "x": [round(float(v), 6) for v in xs[idx]],
+                "y": [round(float(v), 6) for v in ys[idx]]}
+
+    @mcp.tool()
+    def result_value(
+        output: Annotated[str, Field(description="A returned value or text (not a table or figure).")],
+        run: Annotated[str | None, Field(description="Run id.")] = None,
+        experiment: Annotated[str | None, Field(description="Or an experiment id: its latest run.")] = None,
+    ) -> dict[str, Any]:
+        """A single value or a text the recipe returned (a number, a test's result, a model summary)."""
+        r = pick_run(run, experiment)
+        o = (r.get("outputs") or {}).get(output)
+        if not o or o.get("kind") not in ("value", "text"):
+            raise LabError(f"Run {r['id']} returned no value or text called '{output}'.")
+        if o["kind"] == "text":
+            return {"run": r["id"], "output": output, "kind": "text",
+                    "text": (store.run_dir(r["id"]) / o["file"]).read_text("utf-8")}
+        return {"run": r["id"], "output": output, "kind": "value", "value": o.get("value")}
+
+    @mcp.tool()
+    def correction_kinds(experiment: Annotated[str, Field(description="Experiment id.")]) -> dict[str, Any]:
+        """The kinds of correction the experiment's method declares (CORRECTIONS): each kind's label, help, fields
+        (type, optional) and the fields that make two corrections the same decision."""
+        e = store.get_experiment(experiment)
+        return {"kinds": kinds_of(e)}
 
     @mcp.tool()
     def correction_propose(
         experiment: Annotated[str, Field(description="Experiment id.")],
-        kind: Annotated[Literal["rename", "exclude", "manual_integration"], Field(
-            description="rename: fix a wrong injection name · exclude: leave out an injection (or one compound in "
-                        "it) · manual_integration: set a peak's start and end by hand")],
-        injection: Annotated[int, Field(description="Injection number.")],
+        kind: Annotated[str, Field(description="One of the kinds the method declares (correction_kinds lists them; "
+                                               "the GC assay's: rename, exclude, manual_integration).")],
         reason: Annotated[str, Field(description="Why, in a sentence a reviewer understands. Required.")],
-        compound: Annotated[str | None, Field(description="Compound (exclude: empty = the whole injection; "
-                                                          "manual_integration: required).")] = None,
+        fields: Annotated[dict[str, Any] | None, Field(description="The kind's fields, e.g. {\"respondent\": 17} or "
+                                                                   "{\"injection\": 12, \"compound\": \"PROD\", "
+                                                                   "\"start_min\": 6.41, \"end_min\": 6.55}.")]
+        = None,
+        injection: Annotated[int | None, Field(description="GC kinds: the injection number (or put it in "
+                                                           "fields).")] = None,
+        compound: Annotated[str | None, Field(description="GC kinds: the compound.")] = None,
         start_min: Annotated[float | None, Field(description="manual_integration: peak start (min).")] = None,
         end_min: Annotated[float | None, Field(description="manual_integration: peak end (min).")] = None,
         new_name: Annotated[str | None, Field(description="rename: the correct injection name.")] = None,
@@ -1224,29 +1384,28 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     ) -> dict[str, Any]:
         """Record a correction with its reason. From the user's own panel it applies at the next run; from an AI
         agent it is only proposed: the user approves or rejects it in the panel (Corrections). Raw data is never
-        changed; every correction is listed in the report."""
+        changed; every correction is listed in the report. What a correction does is up to the method's code: the
+        approved ones reach its recipe's `corrections` input."""
         if not reason.strip():
             raise LabError("Every correction needs a reason.")
-        if kind == "manual_integration":
-            if not compound or start_min is None or end_min is None or end_min <= start_min:
-                raise LabError("A manual integration needs the compound and a start before the end (min).")
-        if kind == "rename" and not (new_name or "").strip():
-            raise LabError("A rename needs the new name.")
         e = store.get_experiment(experiment)
+        given = dict(fields or {})
+        for k, v in (("injection", injection), ("compound", compound), ("start_min", start_min),
+                     ("end_min", end_min), ("new_name", new_name)):
+            if v is not None and k not in given:
+                given[k] = v
+        kinds = kinds_of(e)
+        try:
+            checked = declarations.check_correction(kinds, kind, given)
+        except ValueError as err:
+            raise LabError(str(err)) from None
         user = _is_user(ctx)
-        c: dict[str, Any] = {"id": new_id("c"), "kind": kind, "injection": int(injection), "reason": reason.strip(),
+        c: dict[str, Any] = {"id": new_id("c"), "kind": kind, **checked, "reason": reason.strip(),
                              "status": "approved" if user else "proposed", "by": _who(ctx), "at": now()}
-        if compound:
-            c["compound"] = compound
-        if kind == "manual_integration":
-            c["start_min"], c["end_min"] = float(start_min), float(end_min)
-        if kind == "rename":
-            c["new_name"] = new_name.strip()
         corr = e.setdefault("corrections", [])
-        if user:  # a newer decision on the same peak replaces the older one
+        if user:  # a newer decision on the same thing replaces the older one
             for old in corr:
-                if old.get("status") == "approved" and old["kind"] == kind and old["injection"] == c["injection"] \
-                        and old.get("compound") == c.get("compound"):
+                if old.get("status") == "approved" and declarations.same_target(kinds, old, c):
                     old["status"], old["replaced_by"] = "replaced", c["id"]
         corr.append(c)
         if user:
@@ -1272,9 +1431,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         c["status"] = {"approve": "approved", "reject": "rejected", "remove": "removed"}[decision]
         c["decided_by"], c["decided_at"] = _who(ctx), now()
         if decision == "approve":
+            kinds = kinds_of(e)
             for old in e["corrections"]:
-                if old is not c and old.get("status") == "approved" and old["kind"] == c["kind"] \
-                        and old["injection"] == c["injection"] and old.get("compound") == c.get("compound"):
+                if old is not c and old.get("status") == "approved" and declarations.same_target(kinds, old, c):
                     old["status"], old["replaced_by"] = "replaced", c["id"]
         e["changed"] = now()
         store.save_experiment(e)
@@ -1368,11 +1527,25 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         return await asyncio.to_thread(standalone.make_notebook, store, m, e, r)
 
     @mcp.tool()
-    def lab_sample(ctx: Context | None = None) -> dict[str, Any]:
-        """Create the example GC experiment (a made-up activity assay: substrate SUB turned into product PROD, internal
-        standard octanol), to try the methods without real data."""
-        from .sample import make_sample
+    def lab_sample(which: Annotated[Literal["gc", "survey"], Field(
+                       description="gc: a made-up GC activity assay · survey: a made-up attitude survey (scale "
+                                   "scores, reliability, group means, a regression)")] = "gc",
+                   ctx: Context | None = None) -> dict[str, Any]:
+        """Create an example experiment to try the methods without real data: the GC one (a made-up activity assay:
+        substrate SUB turned into product PROD, internal standard octanol) or the survey one (160 made-up
+        respondents answering six 1-5 items)."""
+        from .sample import make_sample, make_survey_sample
 
+        if which == "survey":
+            f = make_survey_sample(store)
+            e = {"id": new_id("e"), "title": "Example: made-up attitude survey", "method": "survey-scores",
+                 "inputs": {"answers_file": f}, "params": {}, "corrections": [], "created": now(),
+                 "created_by": _who(ctx)}
+            store.save_experiment(e)
+            if not store.method_settings("survey-scores").get("reference"):
+                store.set_method_settings("survey-scores", reference=e["id"])
+            changed("experiment", experiment=e["id"])
+            return experiment_summary(e)
         f = make_sample(store)
         e = {"id": new_id("e"), "title": "Example: made-up GC activity assay", "method": "gc-activity-assay",
              "inputs": {"gaml_file": f}, "params": dict(SAMPLE_PARAMS), "corrections": [], "created": now(),

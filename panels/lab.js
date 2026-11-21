@@ -1,8 +1,10 @@
-// Experiments: methods as Python code drawn as a flow and explained from itself, GC peak review, results, checks,
-// corrections, the PhD database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI
-// agents use. The flow (flow.js) is the main screen of an experiment and sits above the code of a method.
+// Experiments: methods as Python code drawn as a flow and explained from itself, the experiment's own pages made of
+// cards (pages.js: numbers, tables, charts, texts, curves to review), results, checks, corrections, the results
+// database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI agents use. The flow
+// (flow.js) is the main screen of an experiment and sits above the code of a method.
 import { createEditor, createMerge, highlight } from "./editor.js";
 import { mountFlow } from "./flow.js";
+import { createPages } from "./pages.js";
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -20,9 +22,8 @@ const S = {
   fn: null,
   line: null,
   numbersExp: null,
-  inj: null,
-  comp: null,
-  injFilter: "all",
+  review: {}, // each review card's item, region, filter and zoom (pages.js)
+  focus: null, // {item, label} a review card opens at (a link from Checks or Corrections)
   table: null,
   dbTable: null,
   flowFrac: 0.42, // the method screen: how much of the height the flow takes
@@ -424,7 +425,7 @@ async function renderHome(t) {
           { class: "section-head" },
           h("h2", {}, "Experiments"),
           h("span", { class: "layr-spacer" }),
-          h("button", { class: "layr-button ghost", onclick: makeExample }, "Try the example"),
+          h("button", { class: "layr-button ghost", onclick: makeExample }, "Try an example ▾"),
           h("button", { class: "layr-button primary", onclick: () => go({ view: "new" }) }, "New experiment"),
         ),
         cards.length
@@ -432,7 +433,8 @@ async function renderHome(t) {
           : h(
               "div",
               { class: "layr-empty" },
-              "No experiments yet. Start one from a GC sequence (GAML export), or try the example.",
+              "No experiments yet. Start one from your data (a table, a survey export, a GC sequence…), or try an " +
+                "example.",
             ),
       ),
       h(
@@ -538,11 +540,21 @@ async function newMethod() {
   }
 }
 
-async function makeExample() {
+async function makeExample(ev) {
+  const which = await new Promise((resolve) =>
+    layr.ui.contextMenu(
+      [
+        { label: "A survey: scale scores, reliability, a regression", icon: "groups", run: () => resolve("survey") },
+        { label: "A GC activity assay: peaks, calibration, rates", icon: "science", run: () => resolve("gc") },
+      ],
+      ev,
+    ),
+  );
+  if (!which) return;
   let e;
   try {
     setStatus("Making the example…");
-    e = await call("lab_sample");
+    e = await call("lab_sample", { which });
   } catch (err) {
     fail(err);
   } finally {
@@ -576,6 +588,9 @@ async function renderNew(t, preset) {
   const drawFiles = () => {
     const m = methods.find((x) => x.id === methodSel.value);
     st.method = m.id;
+    const gc = (m.inputs || []).some((i) => (i.types || []).includes(".gaml"));
+    const card = view.querySelector(".gc-import");
+    if (card) card.hidden = !gc;
     put(
       filesBox,
       ...(m.inputs || []).map((inp) =>
@@ -684,18 +699,39 @@ async function renderNew(t, preset) {
       h("div", { class: "row-end" }, h("button", { class: "layr-button primary", onclick: create }, "Create")),
     ),
   );
+  drawFiles(); // now that the gcassay card is on the screen: shown only for a method that reads a GC sequence
 }
 
 // ------------------------------------------------------------------------------------------------ experiment
 
 const TABS = [
-  ["flow", "Flow"],
-  ["peaks", "Peaks"],
   ["results", "Results"],
   ["checks", "Checks"],
   ["corrections", "Corrections"],
   ["settings", "Settings"],
 ];
+
+// The experiment's own pages (pages.js), with the helpers they share with this file.
+const PG = createPages({
+  h,
+  put,
+  call,
+  fmt,
+  table,
+  badge,
+  openDialog,
+  askReason,
+  fail,
+  go,
+  S,
+  save,
+  startRun: (id) => startRun(id),
+  figureOf: (a) => figureOf(a),
+  human: (n) => human(n),
+  kv: (k, v) => kv(k, v),
+  filteredTable: (...a) => filteredTable(...a),
+  token: () => token,
+});
 
 // The experiment's flow stays mounted while the experiment is shown (its view, selection and inside panel survive a
 // redraw of the screen around it): {exp, host, flow, run, lastRun}.
@@ -747,33 +783,51 @@ async function renderExperiment(t) {
       running ? "Running…" : "Run",
     ),
   ]);
-  const isGc = (exp.method_inputs || []).some((i) => (i.types || []).includes(".gaml"));
   const corr = exp.corrections || [];
   const proposed = corr.filter((c) => c.status === "proposed").length;
   const flags = exp.last_run?.summary?.flags || {};
-  if (S.tab === "method" || !TABS.some(([id]) => id === S.tab)) S.tab = "flow";
-  const tab = S.tab === "peaks" && !isGc ? "flow" : S.tab;
+  const editing = PG.editing();
+  if (editing && (editing.exp !== exp.id || S.tab !== `page:${editing.index}`)) PG.cancelEdit();
+  const pageTabs = PG.tabs(exp);
+  if (PG.editing()?.isNew) pageTabs.push({ id: S.tab, label: PG.editing().page.title || "New page" });
+  if (S.tab === "peaks") S.tab = PG.reviewTab(exp) || "flow"; // the Peaks tab of 0.4
+  const known = ["flow", ...pageTabs.map((p) => p.id), ...TABS.map(([id]) => id)];
+  if (!known.includes(S.tab)) S.tab = "flow";
+  const tab = S.tab;
+  const tabButton = (id, label, extra) =>
+    h("button", { class: `tab ${tab === id ? "active" : ""} tab-${id.replace(":", "-")}`, onclick: () => go({ tab: id }) }, label, extra);
   const tabs = h(
     "div",
     { class: "tabs" },
-    TABS.filter(([id]) => id !== "peaks" || isGc).map(([id, label]) =>
-      h(
-        "button",
-        { class: `tab ${tab === id ? "active" : ""} tab-${id}`, onclick: () => go({ tab: id }) },
+    tabButton("flow", "Flow"),
+    pageTabs.map((p) => tabButton(p.id, p.label)),
+    h(
+      "button",
+      {
+        class: "tab tab-add",
+        title: "A page of your own: numbers, tables, charts, texts, curves to review",
+        onclick: () => PG.addPage(exp),
+      },
+      "+ Page",
+    ),
+    TABS.map(([id, label]) =>
+      tabButton(
+        id,
         label,
         id === "checks" && (flags.error || flags.warning)
           ? h("span", { class: "count" }, (flags.error || 0) + (flags.warning || 0))
-          : null,
-        id === "corrections" && proposed ? h("span", { class: "count warn" }, proposed) : null,
+          : id === "corrections" && proposed
+            ? h("span", { class: "count warn" }, proposed)
+            : null,
       ),
     ),
   );
   const body = h("div", { class: `tab-body${tab === "flow" ? " flow-tab" : ""}` });
   put(view, h("div", { class: "exp" }, tabs, h("div", { class: "exp-banners" }, expBanners(exp, tab)), body));
+  if (tab.startsWith("page:")) return PG.renderPage(body, exp, Number(tab.slice(5)), t, runArgs(exp));
   const fn =
     {
       flow: tabFlow,
-      peaks: tabPeaks,
       results: tabResults,
       checks: tabChecks,
       corrections: tabCorrections,
@@ -817,14 +871,14 @@ function expBanners(exp, tab) {
   else if (exp.changed && exp.changed > (last.started || last.finished) && !S.run)
     out.push(h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate."));
   if (S.run) {
-    const follows = tab === "results" || tab === "checks" || tab === "flow";
+    const follows = tab === "results" || tab === "checks" || tab === "flow" || tab.startsWith("page:");
     out.push(
       h(
         "div",
         { class: "banner earlier" },
         h("b", {}, "You are looking at an earlier run. "),
         follows
-          ? "The flow, Results and Checks show it."
+          ? "The flow, the pages, Results and Checks show it (a curve to review always shows the latest run)."
           : "This tab shows the experiment as it is now (Results and Checks show the earlier run).",
         " ",
         h(
@@ -888,9 +942,8 @@ async function figureOf({ run, output }) {
   return img ? `data:${img.mimeType};base64,${img.data}` : null;
 }
 
-/** The links a box gets on the experiment's screen: the peaks to review, the checks, the corrections. */
+/** The links a box gets on the experiment's screen: the page that shows its table, the checks, the corrections. */
 function expBoxActions(exp, n) {
-  const isGc = (exp.method_inputs || []).some((i) => (i.types || []).includes(".gaml"));
   if (n.folded && n.quality)
     return [{ label: "See the checks", title: "Every check with what it found", run: () => go({ tab: "checks" }) }];
   if (n.input?.kind === "corrections")
@@ -898,14 +951,8 @@ function expBoxActions(exp, n) {
   if (n.input)
     return [{ label: n.input.value ? "Use another file" : "Choose the file", title: "In the experiment's settings",
       run: () => go({ tab: "settings" }) }];
-  if (isGc && (n.fn === "integrate_peaks" || (n.outs || []).includes("peaks")))
-    return [
-      {
-        label: "Review the peaks",
-        title: "Each injection's trace with the integrated peaks; drag a boundary to correct it",
-        run: () => go({ tab: "peaks" }),
-      },
-    ];
+  const page = PG.pageShowing(exp, [...(n.outs || []), n.fn ? `step:${n.fn}` : null].filter(Boolean));
+  if (page) return [{ label: `Open ${page.title}`, title: "The page of this experiment that shows it", run: () => go({ tab: page.tab }) }];
   return [];
 }
 
@@ -914,7 +961,7 @@ function openFromFlow(exp, o) {
   else if (o.what === "settings") go({ tab: "settings", setting: o.setting || null });
   else if (o.what === "corrections") go({ tab: "corrections" });
   else if (o.what === "checks") go({ tab: "checks" });
-  else if (o.what === "peaks") go({ tab: "peaks" });
+  else if (o.what === "peaks") go({ tab: PG.reviewTab(exp) || "flow" });
   else if (o.what === "function")
     go({
       view: "method",
@@ -1193,533 +1240,8 @@ async function draftMethods(exp) {
   }
 }
 
-// ---------- Peaks tab: review the integration, drag the boundaries
-
-const STATUS_CLASS = { ok: "ok", "<LOQ": "loq", "n.d.": "nd", manual: "manual", excluded: "excl" };
-
-async function tabPeaks(body, exp, t) {
-  // The peaks are reviewed (and corrected) on the latest run; an earlier run picked in the flow doesn't change that.
-  if (!exp.last_run || exp.last_run.status !== "done") {
-    put(body, h("div", { class: "layr-empty" }, "Run the experiment first: the peaks come from a run."));
-    return;
-  }
-  const [pk, fl] = await Promise.all([
-    call("result_table", {
-      experiment: exp.id,
-      table: "peaks",
-      limit: 2000,
-      columns: ["injection", "name", "role", "compound", "status", "area", "snr", "rt", "rt_expected", "note"],
-    }),
-    call("result_table", { experiment: exp.id, table: "flags", limit: 2000 }).catch(() => ({ rows: [] })),
-  ]);
-  if (t !== token) return;
-  const peaks = pk.rows;
-  const comps = [...new Set(peaks.map((p) => p.compound))];
-  const byInj = new Map();
-  for (const p of peaks) {
-    if (!byInj.has(p.injection))
-      byInj.set(p.injection, { injection: p.injection, name: p.name, role: p.role, peaks: {} });
-    byInj.get(p.injection).peaks[p.compound] = p;
-  }
-  const flagged = new Map();
-  for (const f of fl.rows)
-    if (f.injection != null && f.injection !== "") {
-      const k = Number(f.injection);
-      if (!flagged.has(k)) flagged.set(k, []);
-      flagged.get(k).push(f);
-    }
-  const injs = [...byInj.values()];
-  if (!S.comp || !comps.includes(S.comp))
-    S.comp = comps.find((c) => c !== exp.resolved_params.internal_standard) || comps[0];
-  if (!S.inj || !byInj.has(S.inj)) S.inj = injs.find((i) => i.role === "sample")?.injection || injs[0]?.injection;
-  const filters = {
-    all: () => true,
-    sample: (i) => i.role === "sample",
-    standard: (i) => i.role === "standard",
-    blank: (i) => i.role === "blank",
-    flagged: (i) =>
-      flagged.has(i.injection) || Object.values(i.peaks).some((p) => p.status !== "ok" && p.status !== "n.d."),
-  };
-  const shown = injs.filter(filters[S.injFilter] || filters.all);
-  const filterSel = h(
-    "select",
-    {
-      class: "layr-select small",
-      onchange: (e) => {
-        S.injFilter = e.target.value;
-        save();
-        tabPeaks(body, exp, token);
-      },
-    },
-    [
-      ["all", "All injections"],
-      ["sample", "Samples"],
-      ["standard", "Standards"],
-      ["blank", "Blanks"],
-      ["flagged", "Needs a look"],
-    ].map(([v, l]) => h("option", { value: v, selected: S.injFilter === v }, l)),
-  );
-  const list = h(
-    "ul",
-    { class: "inj-list" },
-    shown.map((i) =>
-      h(
-        "li",
-        {
-          class: i.injection === S.inj ? "active" : "",
-          onclick: () => {
-            S.inj = i.injection;
-            save();
-            tabPeaks(body, exp, token);
-          },
-        },
-        h("span", { class: "inj-num" }, `#${i.injection}`),
-        h("span", { class: "inj-name", title: i.name }, i.name),
-        h(
-          "span",
-          { class: "dots" },
-          comps.map((c) =>
-            h("i", {
-              class: `dot ${STATUS_CLASS[i.peaks[c]?.status] || "nd"}`,
-              title: `${c}: ${i.peaks[c]?.status || "–"}`,
-            }),
-          ),
-        ),
-        flagged.has(i.injection)
-          ? h(
-              "span",
-              {
-                class: "flag-mark",
-                title: flagged
-                  .get(i.injection)
-                  .map((f) => f.message)
-                  .join("\n"),
-              },
-              "!",
-            )
-          : null,
-      ),
-    ),
-  );
-  const chips = h(
-    "div",
-    { class: "chips" },
-    comps.map((c) =>
-      h(
-        "button",
-        {
-          class: `chip ${c === S.comp ? "active" : ""}`,
-          onclick: () => {
-            S.comp = c;
-            save();
-            tabPeaks(body, exp, token);
-          },
-        },
-        c,
-      ),
-    ),
-  );
-  const idx = shown.findIndex((i) => i.injection === S.inj);
-  const nav = h(
-    "span",
-    {},
-    h(
-      "button",
-      {
-        class: "layr-button small ghost",
-        disabled: idx <= 0,
-        onclick: () => {
-          S.inj = shown[idx - 1].injection;
-          save();
-          tabPeaks(body, exp, token);
-        },
-      },
-      "‹ Previous",
-    ),
-    h(
-      "button",
-      {
-        class: "layr-button small ghost",
-        disabled: idx < 0 || idx >= shown.length - 1,
-        onclick: () => {
-          S.inj = shown[idx + 1].injection;
-          save();
-          tabPeaks(body, exp, token);
-        },
-      },
-      "Next ›",
-    ),
-  );
-  const plotBox = h(
-    "div",
-    { class: "plot-box" },
-    h("div", { class: "layr-empty" }, h("span", { class: "layr-spinner" })),
-  );
-  const legend = h(
-    "div",
-    { class: "legend layr-muted small" },
-    h("i", { class: "dot ok" }),
-    " found  ",
-    h("i", { class: "dot loq" }),
-    " below LOQ  ",
-    h("i", { class: "dot nd" }),
-    " not detected  ",
-    h("i", { class: "dot manual" }),
-    " set by hand  ",
-    h("i", { class: "dot excl" }),
-    " excluded",
-  );
-  put(
-    body,
-    h(
-      "div",
-      { class: "peaks-grid" },
-      h("div", { class: "inj-col" }, filterSel, list),
-      h(
-        "div",
-        { class: "plot-col" },
-        h("div", { class: "plot-head" }, chips, h("span", { class: "layr-spacer" }), nav),
-        plotBox,
-        legend,
-      ),
-    ),
-  );
-  const inj = byInj.get(S.inj);
-  if (inj) drawPeak(plotBox, exp, inj, S.comp, flagged.get(inj.injection) || [], t);
-}
-
-async function drawPeak(box, exp, inj, comp, flags, t) {
-  const p0 = inj.peaks[comp];
-  const center = p0?.rt_expected ?? p0?.rt;
-  if (center == null) {
-    put(box, h("div", { class: "layr-empty" }, "No expected time for this compound."));
-    return;
-  }
-  let half = S.zoom || 0.25;
-  const data = await call("chromatogram", {
-    experiment: exp.id,
-    injection: inj.injection,
-    start_min: center - half,
-    end_min: center + half,
-    points: 1400,
-  });
-  if (t !== token) return;
-  const peak = data.peaks.find((p) => p.compound === comp) || {};
-  const corrHere = data.corrections.filter(
-    (c) => (c.compound || null) === comp || (!c.compound && c.kind === "exclude"),
-  );
-  const active = corrHere.filter((c) => c.status === "approved");
-  const W = Math.max(420, box.clientWidth || 700),
-    H = 300,
-    L = 54,
-    R = 14,
-    T = 12,
-    B = 30;
-  const xs = data.time,
-    ys = data.signal;
-  let ymin = Math.min(...ys),
-    ymax = Math.max(...ys);
-  const pad = (ymax - ymin) * 0.08 || 1;
-  ymin -= pad;
-  ymax += pad;
-  const X = (v) => L + ((v - xs[0]) / (xs[xs.length - 1] - xs[0])) * (W - L - R);
-  const Y = (v) => T + (1 - (v - ymin) / (ymax - ymin)) * (H - T - B);
-  const Xinv = (px) => xs[0] + ((px - L) / (W - L - R)) * (xs[xs.length - 1] - xs[0]);
-  const svgNS = "http://www.w3.org/2000/svg";
-  const s = (tag, attrs) => {
-    const el = document.createElementNS(svgNS, tag);
-    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-    return el;
-  };
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, class: "chrom" });
-  // axes
-  for (let i = 0; i <= 4; i++) {
-    const v = ymin + ((ymax - ymin) * i) / 4;
-    svg.append(s("line", { x1: L, x2: W - R, y1: Y(v), y2: Y(v), class: "grid" }));
-    const lab = s("text", { x: L - 6, y: Y(v) + 4, class: "axis", "text-anchor": "end" });
-    lab.textContent = fmt(v);
-    svg.append(lab);
-  }
-  for (let i = 0; i <= 5; i++) {
-    const v = xs[0] + ((xs[xs.length - 1] - xs[0]) * i) / 5;
-    const lab = s("text", { x: X(v), y: H - 10, class: "axis", "text-anchor": "middle" });
-    lab.textContent = v.toFixed(3);
-    svg.append(lab);
-  }
-  const yl = s("text", { x: 12, y: T + 8, class: "axis" });
-  yl.textContent = "pA";
-  svg.append(yl);
-  const xl = s("text", { x: W - R, y: H - B - 4, class: "axis", "text-anchor": "end" });
-  xl.textContent = "min";
-  svg.append(xl);
-  // expected time and tolerance
-  if (peak.rt_expected != null) {
-    const tol = peak.rt_tolerance || 0;
-    svg.append(
-      s("rect", {
-        x: X(peak.rt_expected - tol),
-        y: T,
-        width: Math.max(1, X(peak.rt_expected + tol) - X(peak.rt_expected - tol)),
-        height: H - T - B,
-        class: "tol",
-      }),
-    );
-    svg.append(s("line", { x1: X(peak.rt_expected), x2: X(peak.rt_expected), y1: T, y2: H - B, class: "expected" }));
-  }
-  // other compounds' integrated peaks, lightly
-  for (const o of data.peaks)
-    if (o.compound !== comp && o.start != null && o.start > xs[0] && o.end < xs[xs.length - 1]) {
-      svg.append(
-        s("polygon", {
-          points: areaPoints(xs, ys, o.start, o.end, o.baseline_start_y, o.baseline_end_y, X, Y),
-          class: "area other",
-        }),
-      );
-    }
-  const shade = s("polygon", { class: "area" });
-  const base = s("line", { class: "baseline" });
-  svg.append(shade, base);
-  svg.append(
-    s("polyline", { points: xs.map((x, i) => `${X(x).toFixed(1)},${Y(ys[i]).toFixed(1)}`).join(" "), class: "trace" }),
-  );
-  if (peak.vendor_rt != null && peak.vendor_rt > xs[0] && peak.vendor_rt < xs[xs.length - 1]) {
-    const vm = s("text", { x: X(peak.vendor_rt), y: T + 10, class: "vendor", "text-anchor": "middle" });
-    vm.textContent = "▼ instrument";
-    svg.append(vm);
-  }
-  // boundaries: automatic or manual, draggable
-  const sel = { start: peak.start, end: peak.end, dirty: false };
-  const yAt = (tm) => {
-    let k = 0;
-    while (k < xs.length - 1 && xs[k] < tm) k++;
-    return ys[k];
-  };
-  const handles = {};
-  for (const which of ["start", "end"]) {
-    const g = s("g", { class: "handle" });
-    g.append(
-      s("line", { y1: T, y2: H - B, class: "handle-line" }),
-      s("rect", { y: T, width: 12, height: 18, rx: 3, class: "handle-grip" }),
-    );
-    svg.append(g);
-    handles[which] = g;
-    g.addEventListener("pointerdown", (e) => {
-      g.setPointerCapture(e.pointerId);
-      const move = (ev) => {
-        const r = svg.getBoundingClientRect();
-        let tm = Xinv(((ev.clientX - r.left) / r.width) * W);
-        tm = Math.max(xs[0], Math.min(xs[xs.length - 1], tm));
-        if (which === "start") sel.start = Math.min(tm, (sel.end ?? tm) - 0.002);
-        else sel.end = Math.max(tm, (sel.start ?? tm) + 0.002);
-        sel.dirty = true;
-        update();
-      };
-      const up = () => {
-        g.removeEventListener("pointermove", move);
-        g.removeEventListener("pointerup", up);
-      };
-      g.addEventListener("pointermove", move);
-      g.addEventListener("pointerup", up);
-    });
-  }
-  const info = h("div", { class: "peak-info" });
-  const saveBtn = h(
-    "button",
-    {
-      class: "layr-button primary small",
-      disabled: true,
-      onclick: async () => {
-        const reason = await askReason(
-          `Integrate ${comp} in #${inj.injection} by hand`,
-          "e.g. Shoulder of the neighbouring impurity cut off; valley at 6.49 min",
-        );
-        if (!reason) return;
-        await correct({
-          kind: "manual_integration",
-          compound: comp,
-          start_min: +sel.start.toFixed(4),
-          end_min: +sel.end.toFixed(4),
-          reason,
-        });
-      },
-    },
-    "Save these boundaries…",
-  );
-  function update() {
-    const ok = sel.start != null && sel.end != null;
-    for (const [which, g] of Object.entries(handles)) {
-      const v = sel[which];
-      g.style.display = v == null ? "none" : "";
-      if (v != null) {
-        g.querySelector("line").setAttribute("x1", X(v));
-        g.querySelector("line").setAttribute("x2", X(v));
-        g.querySelector("rect").setAttribute("x", X(v) - 6);
-      }
-    }
-    if (ok) {
-      const y0 = sel.dirty ? yAt(sel.start) : peak.baseline_start_y,
-        y1 = sel.dirty ? yAt(sel.end) : peak.baseline_end_y;
-      shade.setAttribute("points", areaPoints(xs, ys, sel.start, sel.end, y0, y1, X, Y));
-      base.setAttribute("x1", X(sel.start));
-      base.setAttribute("x2", X(sel.end));
-      base.setAttribute("y1", Y(y0));
-      base.setAttribute("y2", Y(y1));
-      shade.classList.toggle("excluded", peak.status === "excluded" && !sel.dirty);
-    }
-    shade.style.display = base.style.display = ok ? "" : "none";
-    saveBtn.disabled = !sel.dirty;
-  }
-  update();
-  async function correct(args) {
-    try {
-      await call("correction_propose", { experiment: exp.id, injection: inj.injection, ...args });
-      startRun(exp.id);
-    } catch (err) {
-      fail(err);
-    }
-  }
-  const setByHand = () => {
-    if (sel.start == null) {
-      sel.start = (peak.rt_expected ?? center) - 0.02;
-      sel.end = (peak.rt_expected ?? center) + 0.02;
-      sel.dirty = true;
-      update();
-    }
-  };
-  put(
-    info,
-    h(
-      "div",
-      { class: "peak-title" },
-      h("b", {}, `${comp} in #${inj.injection}`),
-      " ",
-      h("span", { class: "layr-muted" }, inj.name),
-    ),
-    h(
-      "div",
-      { class: "kv" },
-      kv("Status", h("span", { class: `st ${STATUS_CLASS[peak.status] || ""}` }, peak.status || "–")),
-      kv("Area", peak.area != null ? `${fmt(peak.area)} pA·min` : "–"),
-      kv("S/N", fmt(peak.snr)),
-      kv("Apex", peak.rt != null ? `${fmt(peak.rt)} min` : "–"),
-      kv("Expected", `${fmt(peak.rt_expected)} ± ${fmt(peak.rt_tolerance)} min`),
-      peak.vendor_rt != null
-        ? kv("Instrument said", `${fmt(peak.vendor_rt)} min, ${fmt(peak.vendor_area)} pA·min`)
-        : null,
-    ),
-    peak.note ? h("div", { class: "layr-muted small" }, peak.note) : null,
-    flags.length
-      ? h(
-          "ul",
-          { class: "peak-flags" },
-          flags.map((f) => h("li", { class: f.level }, `${f.compound ? f.compound + ": " : ""}${f.message}`)),
-        )
-      : null,
-    active.length
-      ? h(
-          "div",
-          { class: "active-corr" },
-          active.map((c) =>
-            h(
-              "div",
-              {},
-              badge(c.kind.replace("_", " "), "accent"),
-              " ",
-              c.reason,
-              h(
-                "button",
-                {
-                  class: "layr-button small ghost",
-                  onclick: async () => {
-                    try {
-                      await call("correction_decide", { experiment: exp.id, correction: c.id, decision: "remove" });
-                      startRun(exp.id);
-                    } catch (err) {
-                      fail(err);
-                    }
-                  },
-                },
-                "Undo",
-              ),
-            ),
-          ),
-        )
-      : null,
-    h(
-      "div",
-      { class: "peak-actions" },
-      sel.start == null
-        ? h("button", { class: "layr-button small", onclick: setByHand }, "Set boundaries by hand")
-        : null,
-      saveBtn,
-      peak.status !== "excluded"
-        ? h(
-            "button",
-            {
-              class: "layr-button small",
-              onclick: async () => {
-                const reason = await askReason(`Exclude ${comp} in #${inj.injection}`);
-                if (reason) await correct({ kind: "exclude", compound: comp, reason });
-              },
-            },
-            "Exclude this peak…",
-          )
-        : null,
-      h(
-        "button",
-        {
-          class: "layr-button small ghost",
-          onclick: async () => {
-            const reason = await askReason(`Exclude the whole injection #${inj.injection}`);
-            if (reason) await correct({ kind: "exclude", reason });
-          },
-        },
-        "Exclude injection…",
-      ),
-      h("span", { class: "layr-spacer" }),
-      h(
-        "button",
-        {
-          class: "layr-button small ghost icon",
-          title: "Zoom in",
-          onclick: () => {
-            S.zoom = Math.max(0.03, half / 1.6);
-            drawPeak(box, exp, inj, comp, flags, token);
-          },
-        },
-        "+",
-      ),
-      h(
-        "button",
-        {
-          class: "layr-button small ghost icon",
-          title: "Zoom out",
-          onclick: () => {
-            S.zoom = Math.min(3, half * 1.6);
-            drawPeak(box, exp, inj, comp, flags, token);
-          },
-        },
-        "−",
-      ),
-    ),
-    h(
-      "div",
-      { class: "layr-muted small" },
-      "Drag the two handles to move the peak's start and end; the baseline is the straight line between them.",
-    ),
-  );
-  put(box, svg, info);
-}
-
 function kv(k, v) {
   return h("div", { class: "kv-row" }, h("span", { class: "layr-muted" }, k), h("span", {}, v));
-}
-
-function areaPoints(xs, ys, a, b, y0, y1, X, Y) {
-  const pts = [];
-  for (let i = 0; i < xs.length; i++)
-    if (xs[i] >= a && xs[i] <= b) pts.push(`${X(xs[i]).toFixed(1)},${Y(ys[i]).toFixed(1)}`);
-  return [...pts, `${X(b).toFixed(1)},${Y(y1).toFixed(1)}`, `${X(a).toFixed(1)},${Y(y0).toFixed(1)}`].join(" ");
 }
 
 // ---------- Results tab
@@ -1774,35 +1296,81 @@ async function tabResults(body, exp, t) {
     ),
   );
   const tbox = h("div", {}, h("span", { class: "layr-spinner" }));
+  const values = Object.keys(outs).filter((n) => outs[n].kind === "value" || outs[n].kind === "text");
+  const valueCard = (n) =>
+    outs[n].kind === "text"
+      ? h(
+          "details",
+          {
+            class: "layr-card value-card text",
+            ontoggle: async (e) => {
+              const d = e.currentTarget;
+              if (!d.open || d.dataset.loaded) return;
+              d.dataset.loaded = "1";
+              try {
+                const got = await call("result_value", { ...runArgs(exp), output: n });
+                d.querySelector("pre").textContent = got.text;
+              } catch (err) {
+                fail(err);
+              }
+            },
+          },
+          h(
+            "summary",
+            {},
+            h("b", {}, outs[n].label || human(n)),
+            " ",
+            h("span", { class: "layr-muted small" }, `text, ${outs[n].chars} characters`),
+          ),
+          h("pre", { class: "text-result" }, outs[n].preview || ""),
+        )
+      : h(
+          "div",
+          { class: "layr-card value-card" },
+          h("div", { class: "layr-muted small" }, outs[n].label || human(n)),
+          h("div", { class: "big-number" }, PG.valueText(outs[n].value)),
+        );
   put(
     body,
     h(
       "div",
       { class: "page wide" },
+      values.length ? h("div", { class: "values" }, values.map(valueCard)) : null,
       figBox,
-      h(
-        "div",
-        { class: "section-head" },
-        sel,
-        h("span", { class: "layr-muted small" }, " Click a number to see how it was calculated."),
-      ),
+      tableNames.length || stepTables.length
+        ? h(
+            "div",
+            { class: "section-head" },
+            sel,
+            h("span", { class: "layr-muted small" }, " Click a number to see how it was calculated."),
+          )
+        : null,
       tbox,
     ),
   );
   if (!S.table) {
-    put(tbox, h("div", { class: "layr-empty" }, "This run returned no tables."));
+    put(tbox, values.length || figs.length ? null : h("div", { class: "layr-empty" }, "This run returned nothing to show."));
     return;
   }
   const data = await call("result_table", { ...runArgs(exp), table: S.table, limit: 2000 });
   if (t !== token) return;
-  const filterCols = data.columns.filter((c) =>
-    ["compound", "substrate", "substrate_fed", "strain", "role", "status", "level", "category"].includes(c),
-  );
+  filteredTable(tbox, exp, S.table, data);
+}
+
+/** A table with a filter for each column of a few repeated texts, every number clickable (how was it calculated). */
+function filteredTable(box, exp, tableName, data, only) {
+  const filterCols = (
+    only ||
+    data.columns.filter((c) => {
+      const vals = new Set(data.rows.map((r) => r[c]));
+      return vals.size >= 2 && vals.size <= 30 && vals.size < data.rows.length && data.rows.some((r) => typeof r[c] === "string");
+    })
+  ).slice(0, 6);
   const filt = {};
   const draw = () => {
     const rows = data.rows.filter((r) => Object.entries(filt).every(([c, v]) => !v || String(r[c]) === v));
     put(
-      tbox,
+      box,
       h(
         "div",
         { class: "filters" },
@@ -1824,29 +1392,34 @@ async function tabResults(body, exp, t) {
         ),
         h("span", { class: "layr-muted small" }, `${rows.length} of ${data.total} rows`),
       ),
-      table(rows, data.columns, { onCell: (r, c) => showProvenance(exp, S.table, r, c) }),
+      table(rows, data.columns, { onCell: (r, c) => showProvenance(exp, tableName, r, c, data.rows) }),
     );
   };
   draw();
 }
 
-const PROV_KEYS = [
-  "injection",
-  "compound",
-  "strain",
-  "substrate",
-  "substrate_fed",
-  "time_min",
-  "interval_min",
-  "replicate",
-  "std_series",
-  "level",
-  "category",
-];
+/** The columns that pick out one row, to ask how one of its numbers was calculated: texts first, then whole numbers,
+ * each kept only when it narrows the rows down. */
+function rowKeys(rows, row, column) {
+  const cand = Object.keys(row).filter(
+    (k) => k !== column && row[k] !== null && row[k] !== "" && (typeof row[k] === "string" || Number.isInteger(row[k])),
+  );
+  cand.sort((a, b) => (typeof row[b] === "string") - (typeof row[a] === "string"));
+  const keys = [];
+  let left = rows;
+  for (const k of cand) {
+    if (left.length <= 1) break;
+    const next = left.filter((r) => String(r[k]) === String(row[k]));
+    if (next.length < left.length) {
+      keys.push(k);
+      left = next;
+    }
+  }
+  return keys.length ? keys : cand.slice(0, 3);
+}
 
-async function showProvenance(exp, tableName, row, column) {
-  let keys = PROV_KEYS.filter((k) => k in row && row[k] !== null && row[k] !== "" && k !== column);
-  if (!keys.length) keys = Object.keys(row).filter((k) => typeof row[k] === "string");
+async function showProvenance(exp, tableName, row, column, rows) {
+  const keys = rowKeys(rows || [row], row, column);
   const where = Object.fromEntries(keys.map((k) => [k, row[k]]));
   try {
     const p = await call("provenance", { ...runArgs(exp), table: tableName, where, column });
@@ -1898,6 +1471,8 @@ async function showProvenance(exp, tableName, row, column) {
 
 // ---------- Checks tab
 
+const FLAG_CORE = ["level", "category", "message"];
+
 async function tabChecks(body, exp, t) {
   if (!exp.last_run || exp.last_run.status !== "done") {
     put(body, h("div", { class: "layr-empty" }, "No checks yet: run the experiment."));
@@ -1906,12 +1481,29 @@ async function tabChecks(body, exp, t) {
   const fl = await call("result_table", { ...runArgs(exp), table: "flags", limit: 2000 }).catch(() => null);
   if (t !== token) return;
   if (!fl) {
-    put(body, h("div", { class: "layr-empty" }, "This method has no quality checks."));
+    put(
+      body,
+      h(
+        "div",
+        { class: "layr-empty" },
+        "This method has no quality checks. A method makes them by returning a table called flags (toolbox: flag, " +
+          "flags_table).",
+      ),
+    );
     return;
   }
   const groups = {};
   for (const f of fl.rows) (groups[f.category] ||= []).push(f);
   const order = { error: 0, warning: 1, info: 2 };
+  const about = (f) => Object.keys(f).filter((k) => !FLAG_CORE.includes(k) && f[k] !== null && f[k] !== "");
+  const review = PG.reviewFor(exp, fl.columns);
+  const reviewTitle = review ? exp.method_pages[Number(review.tab.slice(5))]?.title : null;
+  const open = (f) => {
+    const item = review ? f[review.card.item] : null;
+    if (item == null || item === "") return null;
+    const label = review.card.label ? f[review.card.label] || null : null;
+    return () => go({ tab: review.tab, focus: { item, label } });
+  };
   put(
     body,
     h(
@@ -1920,8 +1512,10 @@ async function tabChecks(body, exp, t) {
       h(
         "p",
         { class: "layr-muted" },
-        "Nothing is changed by these checks: they say what to look at. Click one with an injection to open its peak.",
+        "Nothing is changed by these checks: they say what to look at.",
+        review ? ` Click one to open it on the page ${reviewTitle}.` : "",
       ),
+      fl.rows.length ? null : h("div", { class: "layr-empty" }, "Every check passed."),
       Object.entries(groups)
         .sort((a, b) => order[a[1][0].level] - order[b[1][0].level])
         .map(([cat, rows]) =>
@@ -1935,17 +1529,10 @@ async function tabChecks(body, exp, t) {
               rows.map((f) =>
                 h(
                   "li",
-                  {
-                    class: `${f.level} ${f.injection !== "" && f.injection != null ? "click" : ""}`,
-                    onclick: () => {
-                      if (f.injection !== "" && f.injection != null)
-                        go({ tab: "peaks", inj: Number(f.injection), comp: f.compound || S.comp, injFilter: "all" });
-                    },
-                  },
+                  { class: `${f.level} ${open(f) ? "click" : ""}`, onclick: open(f) },
                   badge(f.level, f.level === "error" ? "danger" : f.level === "warning" ? "warning" : ""),
                   " ",
-                  f.injection !== "" && f.injection != null ? h("b", {}, `#${f.injection} `) : null,
-                  f.compound ? h("b", {}, `${f.compound}: `) : null,
+                  about(f).map((k) => [h("b", {}, `${human(k)} ${f[k]}`), " · "]),
                   f.message,
                 ),
               ),
@@ -1960,6 +1547,7 @@ async function tabChecks(body, exp, t) {
 
 async function tabCorrections(body, exp, t) {
   const corr = (exp.corrections || []).slice().reverse();
+  const kinds = exp.method_corrections || {};
   const decide = async (c, decision) => {
     try {
       await call("correction_decide", { experiment: exp.id, correction: c.id, decision });
@@ -1969,6 +1557,12 @@ async function tabCorrections(body, exp, t) {
     }
   };
   const statusKind = { approved: "success", proposed: "warning", rejected: "", removed: "", replaced: "" };
+  const show = (c) => {
+    const review = PG.reviewFor(exp, Object.keys(c));
+    if (!review || c[review.card.item] == null) return null;
+    return () =>
+      go({ tab: review.tab, focus: { item: c[review.card.item], label: review.card.label ? c[review.card.label] || null : null } });
+  };
   put(
     body,
     h(
@@ -1980,6 +1574,25 @@ async function tabCorrections(body, exp, t) {
         "Every change to the automatic result is here, with its reason; the raw data is never changed. " +
           "An AI agent can only propose corrections: they apply once you approve them.",
       ),
+      !exp.method_takes_corrections && Object.keys(kinds).length
+        ? h(
+            "div",
+            { class: "banner" },
+            "The method's recipe doesn't take corrections yet, so they would change nothing: give its recipe an input " +
+              "called corrections (in the method's code) and use them in a step.",
+          )
+        : null,
+      h(
+        "div",
+        { class: "section-head" },
+        h(
+          "button",
+          { class: "layr-button primary", disabled: !Object.keys(kinds).length, onclick: () => addCorrection(exp) },
+          "Add a correction…",
+        ),
+        h("button", { class: "layr-button ghost", onclick: () => editKinds(exp) }, "Kinds of correction…"),
+        h("span", { class: "layr-muted small" }, Object.values(kinds).map((k) => k.label).join(" · ") || "No kinds yet."),
+      ),
       corr.length
         ? h(
             "div",
@@ -1987,15 +1600,7 @@ async function tabCorrections(body, exp, t) {
             h(
               "table",
               { class: "layr-table" },
-              h(
-                "thead",
-                {},
-                h(
-                  "tr",
-                  {},
-                  ["Injection", "What", "Reason", "By", "Status", ""].map((c) => h("th", {}, c)),
-                ),
-              ),
+              h("thead", {}, h("tr", {}, ["What", "Reason", "By", "Status", ""].map((c) => h("th", {}, c)))),
               h(
                 "tbody",
                 {},
@@ -2003,16 +1608,7 @@ async function tabCorrections(body, exp, t) {
                   h(
                     "tr",
                     { class: c.status === "approved" || c.status === "proposed" ? "" : "dim" },
-                    h("td", {}, `#${c.injection}`),
-                    h(
-                      "td",
-                      {},
-                      c.kind === "rename"
-                        ? `rename to ${c.new_name}`
-                        : c.kind === "exclude"
-                          ? `exclude ${c.compound || "whole injection"}`
-                          : `${c.compound}: ${c.start_min}–${c.end_min} min by hand`,
-                    ),
+                    h("td", {}, c.what || c.kind),
                     h("td", {}, c.reason),
                     h("td", { class: "layr-muted small" }, c.by, h("br"), when(c.at)),
                     h("td", {}, badge(c.status, statusKind[c.status])),
@@ -2021,32 +1617,14 @@ async function tabCorrections(body, exp, t) {
                       { class: "nowrap" },
                       c.status === "proposed"
                         ? [
-                            h(
-                              "button",
-                              { class: "layr-button small primary", onclick: () => decide(c, "approve") },
-                              "Approve",
-                            ),
-                            h(
-                              "button",
-                              { class: "layr-button small ghost", onclick: () => decide(c, "reject") },
-                              "Reject",
-                            ),
+                            h("button", { class: "layr-button small primary", onclick: () => decide(c, "approve") }, "Approve"),
+                            h("button", { class: "layr-button small ghost", onclick: () => decide(c, "reject") }, "Reject"),
                           ]
                         : null,
                       c.status === "approved"
                         ? h("button", { class: "layr-button small ghost", onclick: () => decide(c, "remove") }, "Undo")
                         : null,
-                      c.kind !== "rename"
-                        ? h(
-                            "button",
-                            {
-                              class: "layr-button small ghost",
-                              onclick: () =>
-                                go({ tab: "peaks", inj: c.injection, comp: c.compound || S.comp, injFilter: "all" }),
-                            },
-                            "Show",
-                          )
-                        : null,
+                      show(c) ? h("button", { class: "layr-button small ghost", onclick: show(c) }, "Show") : null,
                     ),
                   ),
                 ),
@@ -2056,6 +1634,207 @@ async function tabCorrections(body, exp, t) {
         : h("div", { class: "layr-empty" }, "No corrections: every number comes from the automatic method."),
     ),
   );
+}
+
+/** A correction typed in by hand: its kind, its fields, a reason. */
+async function addCorrection(exp) {
+  const kinds = exp.method_corrections || {};
+  const st = { kind: Object.keys(kinds)[0], fields: {} };
+  const box = h("div", {});
+  const reason = h("textarea", { class: "layr-textarea", rows: 3, placeholder: "Why? A reviewer reads this." });
+  const draw = () => {
+    const k = kinds[st.kind];
+    put(
+      box,
+      h("label", { class: "layr-label" }, "Kind"),
+      h(
+        "select",
+        {
+          class: "layr-select",
+          onchange: (e) => {
+            st.kind = e.target.value;
+            st.fields = {};
+            draw();
+          },
+        },
+        Object.entries(kinds).map(([id, kk]) => h("option", { value: id, selected: id === st.kind }, kk.label)),
+      ),
+      k.help ? h("div", { class: "layr-muted small" }, k.help) : null,
+      Object.entries(k.fields).map(([name, f]) => [
+        h("label", { class: "layr-label" }, `${human(name)}${f.optional ? " (optional)" : ""}`),
+        f.type === "boolean"
+          ? h("input", { type: "checkbox", onchange: (e) => (st.fields[name] = e.target.checked) })
+          : h("input", {
+              class: "layr-input",
+              type: f.type === "text" ? "text" : "number",
+              step: f.type === "integer" ? "1" : "any",
+              value: st.fields[name] ?? "",
+              oninput: (e) => (st.fields[name] = e.target.value),
+            }),
+      ]),
+      h("label", { class: "layr-label" }, "Reason"),
+      reason,
+    );
+  };
+  draw();
+  const ok = await openDialog({
+    title: "Add a correction",
+    body: box,
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      { label: "Save", kind: "primary", value: () => (reason.value.trim() ? true : (layr.ui.notify("A reason is needed.", "error"), undefined)) },
+    ],
+  });
+  if (!ok) return;
+  try {
+    await call("correction_propose", { experiment: exp.id, kind: st.kind, fields: st.fields, reason: reason.value.trim() });
+    startRun(exp.id);
+  } catch (err) {
+    fail(err);
+  }
+}
+
+/** The kinds of correction the method declares (CORRECTIONS), edited: each with its label, help and fields. */
+async function editKinds(exp) {
+  const kinds = structuredClone(exp.method_corrections || {});
+  const list = Object.entries(kinds).map(([id, k]) => ({
+    id,
+    label: k.label,
+    help: k.help,
+    fields: Object.entries(k.fields).map(([name, f]) => ({ name, ...f })),
+    key: k.key,
+  }));
+  const box = h("div", { class: "kinds-editor" });
+  const draw = () => {
+    put(
+      box,
+      h(
+        "p",
+        { class: "layr-muted small" },
+        "A kind says what a correction holds (a respondent's number, a sample's name, a start and an end…). The " +
+          "method's code decides what it does with the approved ones: they reach its recipe's corrections input.",
+      ),
+      list.map((k, i) =>
+        h(
+          "div",
+          { class: "layr-card kind-card" },
+          h(
+            "div",
+            { class: "kind-head" },
+            h("input", { class: "layr-input", value: k.label || "", placeholder: "What it does, e.g. Leave out a respondent", oninput: (e) => (k.label = e.target.value) }),
+            h("input", {
+              class: "layr-input id-input",
+              value: k.id,
+              placeholder: "id, e.g. drop_respondent",
+              title: "Its id in the code: correction[\"kind\"] == \"…\"",
+              oninput: (e) => (k.id = e.target.value.trim()),
+            }),
+            h(
+              "button",
+              {
+                class: "layr-button small ghost danger",
+                onclick: () => {
+                  list.splice(i, 1);
+                  draw();
+                },
+              },
+              "Remove",
+            ),
+          ),
+          h("input", { class: "layr-input", value: k.help || "", placeholder: "Help (optional)", oninput: (e) => (k.help = e.target.value) }),
+          k.fields.map((f, j) =>
+            h(
+              "div",
+              { class: "field-row" },
+              h("input", { class: "layr-input", value: f.name, placeholder: "field, e.g. respondent", oninput: (e) => (f.name = e.target.value.trim()) }),
+              h(
+                "select",
+                { class: "layr-select", onchange: (e) => (f.type = e.target.value) },
+                [["text", "text"], ["integer", "whole number"], ["number", "number"], ["boolean", "yes / no"]].map(([v, l]) =>
+                  h("option", { value: v, selected: f.type === v }, l),
+                ),
+              ),
+              h(
+                "label",
+                { class: "check" },
+                h("input", { type: "checkbox", checked: !!f.optional, onchange: (e) => (f.optional = e.target.checked) }),
+                " optional",
+              ),
+              h(
+                "button",
+                {
+                  class: "layr-button small ghost",
+                  onclick: () => {
+                    k.fields.splice(j, 1);
+                    draw();
+                  },
+                },
+                "✕",
+              ),
+            ),
+          ),
+          h(
+            "button",
+            {
+              class: "layr-button small ghost",
+              onclick: () => {
+                k.fields.push({ name: "", type: "text", optional: false });
+                draw();
+              },
+            },
+            "+ Field",
+          ),
+        ),
+      ),
+      h(
+        "button",
+        {
+          class: "layr-button small",
+          onclick: () => {
+            list.push({ id: "", label: "", help: "", fields: [{ name: "", type: "text", optional: false }] });
+            draw();
+          },
+        },
+        "+ Kind of correction",
+      ),
+    );
+  };
+  draw();
+  const value = () => {
+    const out = {};
+    for (const k of list) {
+      if (!/^[a-z][a-z0-9_]{0,40}$/.test(k.id || "")) {
+        layr.ui.notify(`"${k.id || k.label || "a kind"}": the id needs lowercase letters, digits and _ (e.g. drop_respondent).`, "error");
+        return undefined;
+      }
+      const fields = {};
+      for (const f of k.fields) if (f.name) fields[f.name] = `${f.optional ? "optional " : ""}${f.type}`;
+      const item = { label: k.label || k.id, ...(k.help ? { help: k.help } : {}), fields };
+      const defaultKey = Object.keys(fields).filter((n) => !fields[n].endsWith("number"));
+      const key = (k.key || []).filter((n) => n in fields);
+      if (key.length && key.join() !== defaultKey.join()) item.key = key;
+      out[k.id] = item;
+    }
+    return out;
+  };
+  const got = await openDialog({
+    title: "Kinds of correction",
+    wide: true,
+    body: box,
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      { label: "Save in the method", kind: "primary", value },
+    ],
+  });
+  if (!got) return;
+  try {
+    const r = await call("method_declare", { method: exp.method, what: "corrections", value: got, change: "Changed the kinds of correction" });
+    if (r.saved === false && !r.draft) return layr.ui.notify(r.note || "Not saved.", "error");
+    layr.ui.notify(`Saved as version ${r.version} of the method`, "success");
+    go({});
+  } catch (err) {
+    fail(err);
+  }
 }
 
 // ---------- Settings tab
@@ -3470,6 +3249,7 @@ function methodActions() {
           layr.ui.contextMenu(
             [
               { label: "Format the code (tidy layout)", icon: "format_align_left", run: formatCode },
+              { label: "Extra Python packages…", icon: "extension", run: editPackages },
               "-",
               {
                 label: "Folder that runs without layr (zip)",
@@ -3485,6 +3265,49 @@ function methodActions() {
     ),
     h("button", { class: "layr-button primary", disabled: !ME.dirty, onclick: () => saveMethod() }, "Save"),
   ]);
+}
+
+/** The method's extra Python packages (REQUIREMENTS): installed for it before its first run. */
+async function editPackages() {
+  if (!ME) return;
+  if (ME.dirty) return layr.ui.notify("Save your changes to the code first.", "error");
+  const current = ME.m?.summary?.requirements || [];
+  const ta = h(
+    "textarea",
+    { class: "layr-textarea", rows: 5, placeholder: "One per line, e.g.\npingouin\nlifelines>=0.27" },
+    current.join("\n"),
+  );
+  setTimeout(() => ta.focus(), 30);
+  const got = await openDialog({
+    title: "Extra Python packages",
+    body: [
+      h(
+        "p",
+        { class: "layr-muted" },
+        "Packages from the internet (PyPI) this method imports, one per line, optionally with a version. They are " +
+          "installed for this method once, before its next run, next to the plugin's own (pandas, numpy, SciPy, " +
+          "statsmodels, scikit-learn, matplotlib, pyreadstat), which need no line here.",
+      ),
+      ta,
+    ],
+    buttons: [
+      { label: "Cancel", id: null, kind: "ghost" },
+      { label: "Save in the method", kind: "primary", value: () => ta.value },
+    ],
+  });
+  if (got == null) return;
+  const list = got
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  try {
+    const r = await call("method_declare", { method: ME.method, what: "requirements", value: list, change: "Changed the packages" });
+    if (r.saved === false && !r.draft && r.note !== "Nothing changed.") return layr.ui.notify(r.note || "Not saved.", "error");
+    if (r.saved) layr.ui.notify(`Saved as version ${r.version}: the packages are installed in the background`, "success");
+    await refreshMethodMeta();
+  } catch (err) {
+    fail(err);
+  }
 }
 
 function drawStatus() {
@@ -4371,7 +4194,7 @@ async function renderDatabase(t) {
       h(
         "div",
         { class: "layr-empty" },
-        "Empty until an experiment has been run: every run adds its results here, to compare across the PhD.",
+        "Empty until an experiment has been run: every run adds its results here, to compare experiments over time.",
       ),
     );
     return;
@@ -4380,9 +4203,14 @@ async function renderDatabase(t) {
     S.dbTable = tables.find((x) => x.table === "activities")?.table || tables[0].table;
   const data = await call("database_query", { table: S.dbTable, limit: 20000 });
   if (t !== token) return;
-  const filterCols = data.columns.filter((c) =>
-    ["experiment_title", "strain", "substrate", "substrate_fed", "compound", "role"].includes(c),
-  );
+  const filterCols = data.columns
+    .filter((c) => {
+      if (c === "experiment_title") return true;
+      if (["experiment", "run", "run_finished"].includes(c)) return false;
+      const vals = new Set(data.rows.map((r) => r[c]));
+      return vals.size >= 2 && vals.size <= 30 && data.rows.some((r) => typeof r[c] === "string");
+    })
+    .slice(0, 7);
   const filt = {};
   const tbox = h("div", {});
   const visible = () => data.rows.filter((r) => Object.entries(filt).every(([c, v]) => !v || String(r[c]) === v));
@@ -4557,6 +4385,8 @@ layr.events.on("research:lab", (ev) => {
       ME.flow?.setRunning(!ev.finished && ev.step ? { step: ev.step } : null);
     return;
   }
+  if (ev.what === "run" && !ev.finished && !ev.step && ev.message && live && live.exp === ev.experiment)
+    setStatus(ev.message); // e.g. installing the method's packages before its first run
   if (ev.what === "run" && !ev.finished && ev.step) {
     if (live && live.exp === ev.experiment) {
       live.step = ev.step;
@@ -4578,7 +4408,7 @@ layr.events.on("research:lab", (ev) => {
   if (S.view === "home" || (S.view === "experiment" && (!ev.experiment || ev.experiment === S.exp))) render();
 });
 window.addEventListener("resize", () => {
-  if (S.tab === "peaks" && S.view === "experiment") {
+  if (String(S.tab).startsWith("page:") && S.view === "experiment" && !PG.editing()) {
     clearTimeout(window.__rz);
     window.__rz = setTimeout(render, 250);
   }

@@ -60,6 +60,7 @@ class Worker:
                                      creationflags=flags)
         self.lines: queue.Queue = queue.Queue()
         self.ready = threading.Event()
+        self.paths: list[str] = []  # the method packages' folders this process has on its path
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
@@ -118,6 +119,12 @@ class Pool:
             time_limit_s: float | None = None) -> dict[str, Any]:
         with self._lock:
             w = self._take()
+            paths = list(job.get("paths") or [])
+            if paths and w.paths and w.paths != paths:  # another method's packages are loaded: start clean
+                w.kill()
+                w = Worker()
+            if paths:
+                w.paths = paths
             self.current, self.current_job = w, job
             self.stop_reason = None
             limit = time_limit_s or TIME_LIMIT_S
@@ -248,8 +255,10 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
              if k not in fn.params]
     kinds = {f.name: f.kind for f in parsed.functions}
     labels = fn.doc.returns
+    from .pages import requirements
+
     return {"recipe": fn.name, "kinds": kinds, "args": args, "params": shown, "inputs": inputs, "notes": notes,
-            "labels": labels, "database": parsed.database}
+            "labels": labels, "database": parsed.database, "requirements": requirements(parsed.constants)}
 
 
 def versions_here() -> dict[str, str]:
@@ -305,6 +314,13 @@ class Runner:
                            "message": msg.get("progress")})
 
         try:
+            if info["requirements"]:
+                from . import packages
+
+                where = packages.ready(info["requirements"]) or packages.install(
+                    info["requirements"], lambda text: progress({"progress": text, "step": None}))
+                job["paths"] = [str(where)]
+                run["requirements"] = info["requirements"]
             reply = self.pool.run(job, progress, time_limit_s)
             run["status"] = reply.get("status", "failed")
             run["steps"] = reply.get("steps") or []

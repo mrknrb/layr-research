@@ -1,4 +1,4 @@
-"""A made-up GC-FID activity assay, written as a GAML file, to try the methods without real data.
+"""Made-up data to try the methods without real data: a GC-FID activity assay (a GAML file) and a survey (a CSV).
 
 Substrate SUB (3.62 min) is consumed by strain WT (first order, k = 0.015 min⁻¹) and becomes product PROD
 (6.47 min) at 80 % yield; octanol (5.13 min) is the internal standard. Standards 0.1-2 mM in two series, two ether
@@ -93,4 +93,42 @@ def make_sample(store: Store) -> dict:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "Example activity assay.gaml"
         write_gaml(p)
+        return store.add_file(p, move=True)
+
+
+# ---------------------------------------------------------------------------------------------------- a survey
+
+SURVEY_ITEMS = ["q1", "q2", "q3", "q4", "q5", "q6"]
+SURVEY_REVERSED = {"q3", "q5"}
+
+
+def write_survey(path: Path, seed: int = 11, n: int = 160) -> None:
+    """A made-up survey: 160 respondents (urban, suburban, rural), age, six 1-5 answers on one attitude scale (q3 and
+    q5 worded the other way round). Urban respondents and younger ones score a little higher; a few answers are
+    missing, two respondents answered too few items and one gave 3 to everything."""
+    rng = np.random.default_rng(seed)
+    groups = rng.choice(["urban", "suburban", "rural"], size=n, p=[0.4, 0.35, 0.25])
+    ages = rng.integers(18, 80, size=n)
+    lines = ["respondent,group,age," + ",".join(SURVEY_ITEMS)]
+    for i in range(n):
+        trait = rng.normal(0, 1) + {"urban": 0.45, "suburban": 0.15, "rural": -0.3}[groups[i]] - 0.012 * (ages[i] - 45)
+        answers = []
+        for item in SURVEY_ITEMS:
+            a = int(np.clip(np.rint(3 + 1.05 * trait + rng.normal(0, 0.75)), 1, 5))
+            if item in SURVEY_REVERSED:
+                a = 6 - a
+            answers.append("" if rng.random() < 0.025 else str(a))
+        if i in (23, 97):
+            answers = [answers[0], "", "", answers[3], "", ""]
+        if i == 58:
+            answers = ["3"] * len(SURVEY_ITEMS)
+        lines.append(f"{i + 1},{groups[i]},{ages[i]}," + ",".join(answers))
+    path.write_text("\n".join(lines) + "\n", "utf-8")
+
+
+def make_survey_sample(store: Store) -> dict:
+    """The example survey's answers in the store."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "Example survey answers.csv"
+        write_survey(p)
         return store.add_file(p, move=True)

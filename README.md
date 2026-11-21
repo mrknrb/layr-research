@@ -1,11 +1,14 @@
 # Research
 
-Explainable data analysis for a researcher who is learning Python. Two panels:
+Explainable data analysis for a researcher who is learning Python, for any study whose data fits in tables (a
+survey, lab measurements, a GC-FID assay...). Two panels:
 
-- **Experiments** (`panels/lab.*`, `panels/flow.*`): an experiment's main screen is its method drawn as a **flow**
-  (boxes for steps, wires for the tables between them, each with this run's values); from a box open its code with
-  its values, its tables, the checks, peak review, corrections; methods are edited in a code editor (CodeMirror 6,
-  `panels/editor.*`) or in the flow; the results database; a guide to the Python the methods use.
+- **Experiments** (`panels/lab.*`, `panels/flow.*`, `panels/pages.js`): an experiment's main screen is its method
+  drawn as a **flow** (boxes for steps, wires for the tables between them, each with this run's values); beside it
+  the experiment's **own pages**, made of cards the user puts together (numbers, tables, charts, texts, curves to
+  review); from a box open its code with its values, its tables, the checks, corrections; methods are edited in a
+  code editor (CodeMirror 6, `panels/editor.*`) or in the flow; the results database; a guide to the Python the
+  methods use.
 - **Quick analysis** (`panels/main.*`): load a CSV, describe it, chart it, t-test and ANOVA (the 0.1 plugin).
 
 What 0.4 is and why: `docs/proposals/research-flow.md`; how its parts fit: `docs/proposals/research-flow/
@@ -110,7 +113,23 @@ The conventions (`backend/lab/methodfile.py` has them in full):
   on whole columns, and their body is drawn as math, once with names and once with a run's numbers.
 - **Units go in names** (`conc_mM`, `time_min`, `rate_mM_per_min`): they are shown as units; there is no unit check.
 - `DATABASE = ["table", ...]` names the returned tables kept in the results database (default: all of them). A
-  returned table named `flags` (level, category, injection, compound, message) is the run's quality summary.
+  returned table named `flags` (level, category, what it is about, message; toolbox `flag(level, category,
+  message, respondent=17)`, the GC method's name an injection and a compound) is the run's quality summary.
+- The recipe returns tables, figures, single values (a number, a dict) and texts; a long text or a report object
+  (a statsmodels summary) is kept as text and shown whole.
+- Three plain values at the top of the file declare what isn't code (`lab/pages.py`; the panel edits them, each
+  edit is a new version that rewrites only that assignment):
+  - `PAGES`: the experiment's own pages, each `{"title", "cards": [...]}`. Cards: text, number, table, figure,
+    chart (drawn by the panel from a table: lines, points, bars) and review (one curve per item from a table of the
+    run or a raw GC file, with regions whose ends are dragged and saved as a correction; the GC peak review is one).
+  - `CORRECTIONS`: the kinds of correction an experiment records, `{kind: {"label", "help", "fields": {name:
+    "text" | "number" | "integer" | "boolean", "optional ..."}, "key"}}`; approved ones reach the recipe's
+    `corrections` as `{"kind", field: value, ..., "reason"}`. A method that takes `corrections` but declares none
+    gets the GC kinds (rename, exclude, manual_integration).
+  - `REQUIREMENTS`: extra packages from PyPI (`["pingouin>=0.5"]`), installed once per set into
+    `LAYR_DATA_DIR/lab/packages/<hash>/` with the plugin's own packages as constraints (`lab/packages.py`), and put
+    after them on the calculation process's path. The plugin itself has pandas, numpy, SciPy, statsmodels,
+    scikit-learn, matplotlib and pyreadstat; `read_table` reads CSV, Excel, SPSS, Stata, SAS and JSON.
 - Steps follow a few patterns a beginner can read: pick rows (`table[table.role == "sample"]`), "for each group:
   calculate, add a row dict to a list, `pd.DataFrame(rows)`", `merge` to join; never change a table you were given.
   The panel's **Python guide** shows each with an example.
@@ -194,9 +213,20 @@ Experiments and runs: `experiments`, `experiment_get`, `experiment_create`, `exp
 `settings`), `run_stop`, `run_get`, `runs`, `compare_runs`. Results and explanations: `result_table`, `figure`,
 `provenance`, `explain`, `explain_function`, `function_inside` (a function's code with the values of every line),
 `value_get` (the rows of any stored table), `chromatogram`, the corrections, `database_tables`, `database_query`,
-`export`, `method_export`, `notebook`. The editor: `code_complete`, `code_hover`, `code_signature`,
+`export`, `method_export`, `notebook`. What a method declares: `method_declare` (pages, kinds of correction,
+packages), `correction_kinds`, and for the pages `curve` (one curve for a review card) and `result_value` (a
+returned value or text). The editor: `code_complete`, `code_hover`, `code_signature`,
 `code_definition`, `code_rename`, `code_format`. For the panel's AI buttons: `ai_prompt` (explain, a Methods
 paragraph, or write a step from her sentence).
+
+## The survey example
+
+`survey-scores` (`backend/lab/methods/survey-scores.py`) shows the plugin on a study that has nothing to do with
+chemistry: Likert answers (CSV, Excel, SPSS or Stata) → corrections (leave out a respondent, recode an answer) →
+reversed items turned around → a score per respondent → Cronbach's alpha → group means → an OLS regression with
+statsmodels (its coefficients as a table, its full report as text) → quality checks per respondent. Its pages:
+Overview (alpha, respondents, a bar chart, the regression) and Respondents (a scatter chart, the scores). Make it
+with Try an example › A survey (`lab_sample` with `which: survey`).
 
 ## The GC-FID activity assay
 

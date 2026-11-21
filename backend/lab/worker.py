@@ -8,7 +8,9 @@ The backend starts it ahead of time (pandas, SciPy and matplotlib load once) and
 A job: {"job": "run", "source": path of the method file (the run's own copy), "run_dir": ..., "recipe": name,
 "kinds": {function: kind}, "args": {parameter: value}, "cache_dir": ..., "limit": calls kept per function,
 "step_cache": folder of remembered steps or null (none), "fresh": true to run every step (still remembering them),
-"inside": false to skip recording the values inside the functions, "values_budget": bytes of tables per run}.
+"inside": false to skip recording the values inside the functions, "values_budget": bytes of tables per run,
+"paths": folders of the method's own packages (lab/packages.py)}. A returned text (long or of several lines, or a
+report object such as a statsmodels summary) is kept as outputs/<name>.txt.
 The run folder gets outputs/<name>.csv|png, steps/<n>_<step>.csv (each step's table), calls.json (every call),
 inside.json (the values inside the functions, by call id) and values/ (every table once; see lab/values.py).
 
@@ -105,8 +107,16 @@ def versions() -> dict[str, str]:
     import pandas
     import scipy
 
-    return {"python": platform.python_version(), "pandas": pandas.__version__, "numpy": numpy.__version__,
-            "scipy": scipy.__version__, "matplotlib": matplotlib.__version__}
+    out = {"python": platform.python_version(), "pandas": pandas.__version__, "numpy": numpy.__version__,
+           "scipy": scipy.__version__, "matplotlib": matplotlib.__version__}
+    from importlib import metadata
+
+    for name in ("statsmodels", "scikit-learn", "pyreadstat"):  # read without importing them (they load slowly)
+        try:
+            out[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            pass
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------- errors
@@ -189,6 +199,26 @@ def explain_error(exc: BaseException, filename: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------------------------------- running
 
 
+def text_of(value: Any) -> str | None:
+    """A result kept as text: a long or multi-line text, or a report object that prints itself as one (a
+    statsmodels summary, a fitted model's results). None: kept as a small value."""
+    if isinstance(value, str):
+        return value if len(value) > 200 or "\n" in value else None
+    if hasattr(value, "as_text") and callable(value.as_text):
+        try:
+            return str(value.as_text())
+        except Exception:
+            return None
+    module = type(value).__module__ or ""
+    if module.startswith("statsmodels") and callable(getattr(value, "summary", None)):
+        try:
+            return str(value.summary())
+        except Exception:
+            return None
+    return None
+
+
+
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
     import matplotlib
 
@@ -201,6 +231,12 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     from lab.values import BUDGET, Later, ValueStore, link_or_copy
 
     t0 = time.perf_counter()
+    added = [p for p in job.get("paths") or [] if p not in sys.path]
+    if added:  # the method's own packages (lab/packages.py): after the plugin's, so they never replace them
+        sys.path.extend(added)
+        import importlib
+
+        importlib.invalidate_caches()
     run_dir = Path(job["run_dir"])
     (run_dir / "steps").mkdir(parents=True, exist_ok=True)
     (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
@@ -327,6 +363,10 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             elif isinstance(value, (bytes, bytearray)) and bytes(value[:8]) == b"\x89PNG\r\n\x1a\n":
                 fresh(run_dir / "outputs" / f"{safe}.png").write_bytes(bytes(value))
                 outputs[key] = {"kind": "figure", "file": f"outputs/{safe}.png"}
+            elif (text := text_of(value)) is not None:
+                fresh(run_dir / "outputs" / f"{safe}.txt").write_text(text, "utf-8")
+                outputs[key] = {"kind": "text", "file": f"outputs/{safe}.txt", "chars": len(text),
+                                "preview": text[:300]}
             else:
                 outputs[key] = {"kind": "value", "value": summarize(value)}
         reply.update(status="done", outputs=outputs)

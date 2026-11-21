@@ -66,9 +66,28 @@ def model(store: Store, exp: dict, run: dict) -> dict[str, Any]:
             tables.append({"name": name, "label": o.get("label") or name, "df": df})
         elif o.get("kind") == "figure":
             tables.append({"name": name, "label": o.get("label") or name, "png": (rdir / o["file"]).read_bytes()})
+        elif o.get("kind") == "text":
+            tables.append({"name": name, "label": o.get("label") or name,
+                           "text": (rdir / o["file"]).read_text("utf-8"), "pre": True})
+        elif o.get("kind") == "value":
+            tables.append({"name": name, "label": o.get("label") or name, "text": _fmt(o.get("value"))})
     text, drafted = methods_paragraph(exp, run)
+    exp = {**exp, "corrections": described(exp, explained["source"])}
     return {"exp": exp, "run": run, "explained": explained, "outputs": tables, "methods_text": text,
             "methods_drafted": drafted, "source": explained["source"]}
+
+
+def described(exp: dict, source: str | None) -> list[dict]:
+    """The experiment's corrections, each with `what` in words, from the kinds its method declares."""
+    from . import methodfile
+    from .pages import correction_kinds, describe
+
+    try:
+        parsed = methodfile.parse(source or "")
+        kinds = correction_kinds(parsed.constants, methodfile.takes_corrections(parsed))
+    except SyntaxError:
+        kinds = {}
+    return [{**c, "what": describe(kinds, c)} for c in exp.get("corrections") or []]
 
 
 def _slug(s: str) -> str:
@@ -190,12 +209,9 @@ def to_html(m: dict) -> str:
     out.append("</table><h3>Corrections</h3>")
     corr = exp.get("corrections") or []
     if corr:
-        out.append("<table><tr><th>Injection</th><th>Kind</th><th>Details</th><th>Reason</th><th>Status</th>"
-                   "<th>By</th></tr>")
+        out.append("<table><tr><th>What</th><th>Reason</th><th>Status</th><th>By</th></tr>")
         for c in corr:
-            span = f"{c.get('compound', '')} {c.get('start_min', '')}–{c.get('end_min', '')} min"
-            details = c.get("new_name") or (span if c["kind"] == "manual_integration" else c.get("compound", "all"))
-            out.append(f"<tr><td>#{c['injection']}</td><td>{e(c['kind'])}</td><td>{e(str(details))}</td>"
+            out.append(f"<tr><td>{e(c.get('what') or c.get('kind', ''))}</td>"
                        f"<td>{e(c.get('reason', ''))}</td><td>{e(c.get('status', ''))}</td>"
                        f"<td>{e(c.get('by', ''))}</td></tr>")
         out.append("</table>")
@@ -222,6 +238,10 @@ def to_html(m: dict) -> str:
         out.append("</div>")
     out.append("<h2>Results</h2>")
     for t in m["outputs"]:
+        if "text" in t:
+            body = f"<pre>{e(t['text'])}</pre>" if t.get("pre") else f"<p><b>{e(t['text'])}</b></p>"
+            out.append(f"<h3>{e(t['label'])}</h3>{body}")
+    for t in m["outputs"]:
         if "png" in t:
             out.append(f"<h3>{e(t['label'])}</h3><img style='max-width:100%' "
                        f"src='data:image/png;base64,{base64.b64encode(t['png']).decode()}'>")
@@ -234,7 +254,7 @@ def to_html(m: dict) -> str:
     v = run.get("versions") or {}
     out.append(f"<h2>Appendix: the method's code</h2><p class='muted'>{e(meth.get('name') or '')}, version "
                f"{meth.get('version')}, exactly as this run ran it. It imports the plugin's toolbox (reading GAML, "
-               "peaks, straight lines).</p>")
+               "tables, peaks, straight lines, quality flags).</p>")
     out.append(f"<pre>{e(m['source'])}</pre>")
     out.append(f"<p class='muted'>Python {e(str(v.get('python')))}, pandas {e(str(v.get('pandas')))}, NumPy "
                f"{e(str(v.get('numpy')))}, SciPy {e(str(v.get('scipy')))}, matplotlib {e(str(v.get('matplotlib')))}. "
@@ -333,8 +353,8 @@ def to_docx(m: dict, path: Path) -> None:
     corr = exp.get("corrections") or []
     doc.add_paragraph("Corrections: " + ("none." if not corr else ""))
     for c in corr:
-        doc.add_paragraph(f"#{c['injection']} {c['kind']} {c.get('compound', '')} {c.get('new_name', '')}: "
-                          f"{c.get('reason', '')} ({c.get('status')}, {c.get('by', '')})", style="List Bullet")
+        doc.add_paragraph(f"{c.get('what') or c.get('kind')}: {c.get('reason', '')} ({c.get('status')}, "
+                          f"{c.get('by', '')})", style="List Bullet")
     doc.add_heading("How every number was calculated", 1)
     for i, s in enumerate(m["explained"]["steps"], 1):
         parts = step_parts(s)
@@ -347,6 +367,14 @@ def to_docx(m: dict, path: Path) -> None:
             doc.add_paragraph("In this run: " + x["label"])
             formula(x["latex"])
     doc.add_heading("Results", 1)
+    for t in m["outputs"]:
+        if "text" in t:
+            doc.add_heading(t["label"], 2)
+            p = doc.add_paragraph()
+            run_ = p.add_run(t["text"])
+            if t.get("pre"):
+                run_.font.name = "Consolas"
+                run_.font.size = Pt(8)
     for t in m["outputs"]:
         if "png" in t:
             doc.add_heading(t["label"], 2)

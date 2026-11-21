@@ -7,7 +7,9 @@ the user; an AI agent's change comes back with them so it fixes them):
 - a step much longer than about 25 lines;
 - a function that changes a table (or list) it was given instead of a copy;
 - a recipe that does more than call steps and keep their results;
-- imports other than the toolbox, pandas, numpy, scipy and the standard maths modules;
+- imports other than the toolbox, pandas, numpy, scipy, statsmodels, scikit-learn, the standard maths modules and
+  the packages the method lists in REQUIREMENTS;
+- PAGES, CORRECTIONS or REQUIREMENTS that can't be used as written (lab/pages.py);
 - reading or writing files, or the network, outside the toolbox;
 - a name used both for a function and for a result in the same function (Python then can't call the function).
 """
@@ -21,8 +23,9 @@ from typing import Any
 from . import methodfile
 from .latex import body_statements, call_name
 
-ALLOWED_IMPORTS = {"toolbox", "pandas", "numpy", "scipy", "math", "statistics", "cmath", "fractions", "decimal",
-                   "__future__"}
+ALLOWED_IMPORTS = {"toolbox", "pandas", "numpy", "scipy", "statsmodels", "sklearn", "pyreadstat", "matplotlib",
+                   "math", "statistics", "cmath", "fractions", "decimal", "re", "datetime", "itertools", "collections",
+                   "functools", "string", "textwrap", "dataclasses", "typing", "random", "__future__"}
 STEP_LINES = 30  # "much longer than about 25"
 FILE_CALLS = {"open", "eval", "exec", "compile", "__import__", "input", "breakpoint"}
 NUMPY_FILE = {"load", "save", "savez", "savez_compressed", "loadtxt", "savetxt", "genfromtxt", "fromfile", "tofile",
@@ -50,6 +53,7 @@ def check(source: str) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     messages += _imports(method)
     messages += _recipe(method)
+    messages += _declarations(method)
     names = {f.name for f in method.functions}
     formulas = {f.name for f in method.functions if f.kind == "formula"}
     for fn in method.functions:
@@ -85,8 +89,29 @@ def _plain_syntax(e: SyntaxError) -> str:
 # ---------------------------------------------------------------------------------------------------- imports
 
 
+def _declarations(method: methodfile.Method) -> list[dict[str, Any]]:
+    """PAGES, CORRECTIONS and REQUIREMENTS that can't be used as written (lab/pages.py)."""
+    from . import pages
+
+    fn = method.recipe_function
+    outputs = set(fn.doc.returns) if fn and fn.doc.returns else None
+    line = {n.targets[0].id: n.lineno for n in method.tree.body
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+    out = [_msg("warning", line.get(name), p) for name, p in pages.problems(method.constants, outputs)]
+    for n in pages.NAMES:
+        if n not in method.constants and any(isinstance(x, ast.Assign) and len(x.targets) == 1 and
+                                             isinstance(x.targets[0], ast.Name) and x.targets[0].id == n
+                                             for x in method.tree.body):
+            out.append(_msg("warning", line.get(n), f"{n} must be written as a plain value (text, numbers, lists and "
+                                                     "dicts), so the panel can read it without running the method."))
+    return out
+
+
 def _imports(method: methodfile.Method) -> list[dict[str, Any]]:
+    from . import packages, pages
+
     out = []
+    reqs = pages.requirements(method.constants)
     for imp in method.imports:
         module = imp["module"]
         top = module.split(".")[0]
@@ -95,16 +120,26 @@ def _imports(method: methodfile.Method) -> list[dict[str, Any]]:
             out.append(_msg("error", line, f"`{module}` is a relative import: a method imports by full names "
                                            "(e.g. `from toolbox import fit_line`)."))
             continue
-        if top not in ALLOWED_IMPORTS:
+        extra = packages.provides(reqs, top) if reqs else None
+        if top not in ALLOWED_IMPORTS and not extra and not (reqs and extra is None):
             out.append(_msg("warning", line, f"`{module}` is imported. Methods use the toolbox, pandas, numpy, "
-                                             "scipy and the maths modules (math, statistics), so anyone can rerun "
-                                             "them; ask for a toolbox function if one is missing."))
+                                             "scipy, statsmodels, scikit-learn and the maths modules, so anyone can "
+                                             "rerun them; a package from the internet goes into the method's "
+                                             "packages (REQUIREMENTS)."))
         try:
             found = importlib.util.find_spec(module) is not None
         except (ImportError, ValueError):
             found = False
+        if not found and extra:
+            continue
+        if not found and reqs and extra is None:
+            out.append(_msg("warning", line, f"`{module}` isn't installed yet: the method's packages "
+                                             f"({', '.join(reqs)}) are installed before its first run."))
+            continue
         if not found:
-            out.append(_msg("error", line, f"There is no module called `{module}`: check its spelling."))
+            hint = " If it is a package from the internet, add it to the method's packages (REQUIREMENTS)." \
+                if top not in ALLOWED_IMPORTS else ""
+            out.append(_msg("error", line, f"There is no module called `{module}`: check its spelling.{hint}"))
             continue
         if top == "toolbox" and imp["names"]:
             try:
