@@ -42,15 +42,16 @@ def addons() -> list[str]:
 def load_addons() -> list[Any]:
     """Import every add-on (once), so what they register is known. An add-on that can't be imported is skipped."""
     global _loaded
-    with _lock:
-        modules = []
-        for name in addons():
-            try:
-                modules.append(importlib.import_module(name))
-            except Exception:  # an add-on is optional: a broken one must not break the toolbox
-                continue
-        _loaded = True
-        return modules
+    # Not under _lock: an add-on registers itself (taking _lock) while it is imported, and Python's import lock
+    # already keeps two threads from importing it twice; holding both could deadlock two threads.
+    modules = []
+    for name in addons():
+        try:
+            modules.append(importlib.import_module(name))
+        except Exception:  # an add-on is optional: a broken one must not break the toolbox
+            continue
+    _loaded = True
+    return modules
 
 
 def _ext(extension: str) -> str:
@@ -89,9 +90,9 @@ def register_curve_reader(extension: str, function: Callable) -> Callable:
 def curve_reader(extension: str) -> Callable | None:
     """The curve reader for a file extension (".xyz"), or None; the add-ons are imported the first time."""
     e = _ext(extension)
+    if e not in _curve_readers and not _loaded:
+        load_addons()
     with _lock:
-        if e not in _curve_readers and not _loaded:
-            load_addons()
         return _curve_readers.get(e)
 
 

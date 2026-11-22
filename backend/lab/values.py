@@ -388,7 +388,7 @@ class ValueStore:
 
     def summary(self, v: Any, depth: int = 0, files: bool = True) -> Any:
         """A small JSON description of a value for the record; tables (and long columns) get a file, unless they
-        are fields of a record (an injection's peak table: that is raw data, not a step's work)."""
+        are fields of a record (a raw file's own table: that is raw data, not a step's work)."""
         if v is None or isinstance(v, (bool, np.bool_)):
             return None if v is None else bool(v)
         if isinstance(v, str):

@@ -323,10 +323,10 @@ def test_code_boxes_nested_calls_starred_keywords_tuples_classes_unknown():
     # the later `table` is the code box's: `mystery` reads that one
     assert port(node(g, "mystery"), "table")["from"] == "table-2"  # unknown inputs are named by their argument
     assert g["groups"] == [
-        {"id": "group-load", "title": "Load", "line": 28, "end_line": 30, "nodes": ["table", "first"],
+        {"id": "group-load", "title": "Load", "line": 29, "end_line": 31, "nodes": ["table", "first"],
          "closed_by": None},
-        {"id": "group-shape-the-data", "title": "Shape the data", "line": 31, "end_line": 38,
-         "nodes": ["table-2", "scaled", "more", "settings", "line", "mystery"], "closed_by": 39}]
+        {"id": "group-shape-the-data", "title": "Shape the data", "line": 32, "end_line": 39,
+         "nodes": ["table-2", "scaled", "more", "settings", "line", "mystery"], "closed_by": 40}]
     assert node(g, "n")["group"] is None and node(g, "scaled")["group"] == "group-shape-the-data"
 
 
@@ -959,9 +959,8 @@ def test_ready_made_blocks_through_add_step():
     checked(gc, wrapped)
     others_unchanged(wrapped, gc)
     imp = [ln for ln in gc.split("\n\n# The kinds of correction")[0].splitlines()[10:] if ln.strip()]
-    assert imp[0].startswith("from toolbox import (") and imp[1].endswith("match_name)")
-    assert imp[1].startswith(" " * 21)  # continuation lines aligned under the first name
-    assert imp[2].startswith("from toolbox.gc import ")  # the add-on's line is left alone
+    assert imp[0].startswith("from toolbox import (") and imp[0].endswith("match_name)")  # still in brackets
+    assert imp[1] == GC.splitlines()[11] and imp[1].startswith("from toolbox.gc import ")  # left alone
     assert "fit_lines" in " ".join(imp) and all(len(line) <= 120 for line in gc.splitlines())
     # undone: the import line is the only one that may be wrapped differently (it wasn't filled to 120 columns)
     back = flow.edit(gc, {"op": "remove_step", "node": "lines"})

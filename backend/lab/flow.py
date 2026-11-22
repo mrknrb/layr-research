@@ -1854,6 +1854,10 @@ def _module_import_patch(A: _Analysis, module: str, add: list[str], remove: list
         line = f"{head} {', '.join(sorted(add))}"
         new = [line] if len(line) <= WIDTH else _wrap(f"{head} (", sorted(add), ")")
         imports = [n for n in A.method.tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        toolbox = [n for n in imports if isinstance(n, ast.ImportFrom) and _is_toolbox(n.module) and not n.level]
+        if toolbox:  # an add-on's line goes right under the toolbox's own
+            at = (toolbox[-1].end_lineno or toolbox[-1].lineno) + 1
+            return [(at, at - 1, new)]
         if imports:
             at = (imports[-1].end_lineno or imports[-1].lineno) + 1
         else:

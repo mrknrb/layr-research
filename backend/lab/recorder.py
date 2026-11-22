@@ -1182,7 +1182,7 @@ class StepCache:
     # --------------------------------------------------------------- fingerprints kept in memory
 
     def remember_fingerprints(self) -> None:
-        """Fingerprint each object once (a sequence's injections are big), and keep fingerprints and remembered
+        """Fingerprint each object once (a raw file read whole is big), and keep fingerprints and remembered
         steps in memory for the next run. Safe only when nothing but the steps can change a value between two
         steps: the worker asks for it when the recipe is plain calls. As soon as a step is found changing a value
         it was given, or a step ran that nobody checked, the memory is forgotten (`distrust`)."""
