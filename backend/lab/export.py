@@ -1,6 +1,7 @@
 """Reports of a run: a self-contained HTML page, an Excel workbook of every table, and a Word document.
 
-All three say the same: what went in (files with checksums, settings, corrections with reasons), how every number
+All three say the same: what went in (files with checksums, the results of other experiments it read with their
+runs, settings, corrections with reasons), how every number
 was calculated (each step in the recipe's order: its sentence from the docstring, the formulas drawn from the code,
 this run's numbers put in), the results and the quality flags, and the method's source as an appendix. Formulas are
 drawn with matplotlib's mathtext, so the files need no JavaScript or fonts.
@@ -124,6 +125,18 @@ def human(name: str) -> str:
     return name.replace("_", " ").capitalize()
 
 
+def sources_read(run: dict) -> list[dict[str, Any]]:
+    """What the run read from other experiments (lab/sources.py), one row per source: input, title, result, run,
+    when, rows."""
+    out = []
+    for input_id, rec in (run.get("sources") or {}).items():
+        for f in rec.get("from") or []:
+            out.append({"input": input_id, "title": f.get("title") or f.get("experiment"), "result": f.get("result"),
+                        "run": f.get("run"), "when": (f.get("finished") or "")[:16].replace("T", " "),
+                        "rows": f.get("rows")})
+    return out
+
+
 def table_text(summary: dict | None) -> str:
     if not isinstance(summary, dict):
         return _fmt(summary)
@@ -203,7 +216,16 @@ def to_html(m: dict) -> str:
     for k, f in (run.get("inputs") or {}).items():
         out.append(f"<tr><td>{e(k)}</td><td>{e(str(f.get('name')))}</td><td><code>{e(str(f.get('sha256')))}</code>"
                    "</td></tr>")
-    out.append("</table><h3>Settings</h3><table><tr><th>Setting</th><th>Value</th></tr>")
+    out.append("</table>")
+    read = sources_read(run)
+    if read:
+        out.append("<h3>Results of other experiments</h3><table><tr><th>Input</th><th>Experiment</th><th>Table</th>"
+                   "<th>Run</th><th>Rows</th></tr>")
+        for x in read:
+            out.append(f"<tr><td>{e(x['input'])}</td><td>{e(str(x['title']))}</td><td>{e(str(x['result']))}</td>"
+                       f"<td>{e(str(x['run']))} · {e(x['when'])}</td><td>{x['rows']}</td></tr>")
+        out.append("</table>")
+    out.append("<h3>Settings</h3><table><tr><th>Setting</th><th>Value</th></tr>")
     for k, v in (run.get("params") or {}).items():
         out.append(f"<tr><td>{e(k)}</td><td>{e(_fmt(v))}</td></tr>")
     out.append("</table><h3>Corrections</h3>")
@@ -285,6 +307,9 @@ def to_xlsx(m: dict, path: Path) -> None:
                 ("Methods", m["methods_text"])]
         info += [(f"File: {k}", f"{f.get('name')} (SHA-256 {f.get('sha256')})") for k, f in
                  (run.get("inputs") or {}).items()]
+        info += [(f"Read: {x['input']}",
+                  f"{x['title']} · {x['result']} (run {x['run']}, {x['when']}, {x['rows']} rows)")
+                 for x in sources_read(run)]
         pd.DataFrame(info, columns=["", "value"]).to_excel(xw, sheet_name=_sheet_name("about", used), index=False)
         for t in m["outputs"]:
             if "df" in t:
@@ -350,6 +375,9 @@ def to_docx(m: dict, path: Path) -> None:
     doc.add_heading("What went in", 1)
     for k, f in (run.get("inputs") or {}).items():
         doc.add_paragraph(f"{k}: {f.get('name')} (SHA-256 {f.get('sha256')})", style="List Bullet")
+    for x in sources_read(run):
+        doc.add_paragraph(f"{x['input']}: the table {x['result']} of the experiment '{x['title']}' (run {x['run']}, "
+                          f"{x['when']}, {x['rows']} rows)", style="List Bullet")
     corr = exp.get("corrections") or []
     doc.add_paragraph("Corrections: " + ("none." if not corr else ""))
     for c in corr:

@@ -30,6 +30,12 @@ of step types) is described, as history, in `docs/proposals/analysis-workflows.m
 - **Experiment**: a method's recipe applied to raw files, with settings and **corrections** of the kinds its method
   declares (leave out a respondent, recode an answer, a region's ends set by hand...), each with a written reason.
   Raw files are copied into the store by checksum and never changed.
+- **Result input**: an input that reads what other experiments made instead of a raw file: the end result of one
+  experiment is the start of another, and an experiment can compare others. The experiment picks one or several
+  experiments and a table each of their latest runs made (`scores`, or a step's table `step:<function>`); the
+  recipe gets them as one table, stacked, with the columns `experiment` (the source's title) and `experiment_id`
+  in front. When a source gets a newer run with other numbers, the reader is **out of date** (it says why); it is
+  never rerun by itself. No loops: an experiment can't read itself, not even through others.
 - **Run**: one calculation of an experiment, in a separate process. It records the raw files' SHA-256, the settings,
   the approved corrections, the library versions, a copy of the exact source it ran, every step's tables, every
   returned table and figure, every call of the method's functions (`calls.json`) and the values inside them
@@ -101,12 +107,22 @@ The conventions (`backend/lab/methodfile.py` has them in full):
 - The module docstring's first line is the method's name; the next paragraph describes it.
 - **The recipe** is the last function in the file, or the one a module-level `RECIPE = "name"` names. It only calls
   steps, keeps their results and returns a dict of named results (tables, figures, values).
-- **Its parameters** are the experiment's inputs and settings: a name ending in `_file` is a raw file; `corrections`
-  gets the approved corrections (a list of dicts); every other parameter is a setting. A setting's default is a plain
-  value or a module-level constant holding one (`strains=STRAINS`); a setting without a default must be set by the
+- **Its parameters** are the experiment's inputs and settings: a name ending in `_file` is a raw file; a parameter
+  whose `Inputs:` line ends in `[result]` is a result of other experiments (below); `corrections` gets the approved
+  corrections (a list of dicts); every other parameter is a setting. A setting's default is a plain value or a
+  module-level constant holding one (`strains=STRAINS`); a setting without a default must be set by the
   experiment. Keep the names of settings stored experiments use.
-- **Its docstring** documents them: `Inputs:` (`name: label [.ext, ...]`), `Settings:` (`name: Label. Help text`,
-  optionally under group lines like `Fitting:`; `(type)` after the name picks the form's editor: text, number,
+- **A result of other experiments** is declared on its `Inputs:` line: `scores: Scores to compare [result]`, or
+  `[result: scores]` to name the table it expects (offered first when she picks; a step's table is
+  `[result: step:scale_scores]`). The recipe gets one DataFrame: the picked tables stacked (every column any of
+  them has; a cell a table doesn't have is empty), with `experiment` (the source's title; two equal titles become
+  "Survey · scores" / "Survey · step:x" when the tables differ, else "Survey (1)", "Survey (2)") and
+  `experiment_id` in front, also for a single source. A table that has those columns already keeps them as
+  `from_experiment` and `from_experiment_id`. A name ending in `_file` stays a raw file and `corrections` stays the
+  corrections whatever their line says; the checker explains a bracket it can't read, a misplaced `[result]` and
+  an `Inputs:` line that is really a setting.
+- **Its docstring** documents them: `Inputs:` (`name: label [.ext, ...]` or `name: label [result]`), `Settings:`
+  (`name: Label. Help text`, optionally under group lines like `Fitting:`; `(type)` after the name picks the form's editor: text, number,
   integer, boolean, list, object, rows; `[unit]` overrides the unit read from the name) and `Returns:` (`name:
   label`). Without `(type)` the default's type decides; a setting without a default whose name ends in a unit is a
   number.
@@ -156,16 +172,17 @@ can't be read or whose default doesn't fit them).
 ## The flow
 
 `backend/lab/flow.py` reads the recipe into a graph: one box per recipe line. `name = step(...)` is a step box whose
-inputs are the step's parameters, each fed by a wire (a name an earlier box made), a setting, a raw file input or a
-value written in place; any other line (an `if`, a loop, arithmetic) is a code box showing its lines. A comment line
+inputs are the step's parameters, each fed by a wire (a name an earlier box made), a setting, a raw file input, a
+result input (drawn like a raw file, `kind: result`, its value "2 experiments · scores", and with a run the table it
+delivered on its wire) or a value written in place; any other line (an `if`, a loop, arithmetic) is a code box showing its lines. A comment line
 `# --- Title` starts a group of boxes. The boxes whose results reach only the `flags` result are the quality lane.
 For each table input the flow knows which columns the step reads (from its code) and marks a wire whose recorded
 table lacks one. With a run, each box has its status (done, cached, failed, not run), its time and the value on every
 wire. Layout is automatic, left to right; no positions are stored.
 
 `flow.edit(source, op)` makes a flow change as an exact edit of the recipe: add or remove a step, connect or
-disconnect an input, rename a wire, add or remove a setting, an input or a result, set a default, group boxes, add a
-code box, start a new function. Only the lines it must touch change; comments stay byte for byte; lines are wrapped
+disconnect an input, rename a wire, add or remove a setting, an input (a raw file, or with `kind: result` a result
+of other experiments) or a result, set a default, group boxes, add a code box, start a new function. Only the lines it must touch change; comments stay byte for byte; lines are wrapped
 at 120 columns as the file is. A change that would break the method is refused in plain words.
 
 ## How it runs, records and explains
@@ -180,6 +197,18 @@ at 120 columns as the file is. A change that would break the method is refused i
   only the steps that depend on it run. "Run everything again" (`run` with `fresh`) and the reference comparison
   calculate every step. A toolbox function can also remember slow results itself (`toolbox/cache.py`; the GC
   add-on does for its files and peaks).
+- **Experiments that read experiments** (`sources.py`): an experiment keeps its picks as `sources: {input:
+  [{experiment, result}]}`, checked when saved in plain words (the experiment exists and isn't this one, the table
+  is one it returns or its latest run has, nothing twice, no loop of any length). Before a run each source's latest
+  run must be done and have the table, else the run doesn't start and says which experiment and what to do. The
+  stacked table is the run's `sources/<input>.csv`; run.json's `sources` keeps, per input, its rows, columns, file
+  and fingerprint and for each source its experiment, title, label, run, finish time, result, rows and the content
+  fingerprint of the table it read. Remembered steps follow the content: the same numbers, the same steps. An
+  experiment is out of date when a source has a newer finished run whose table has another fingerprint (an
+  identical rerun doesn't count), its latest run failed, it lost the table or was deleted, or the picks changed
+  since the last run; `experiments` and `experiment_get` say so (`outdated`), and a source's finished run sends a
+  `research:lab` event (`what: sources`) for each reader. Deleting an experiment others read is refused, naming
+  them, unless forced.
 - `recorder.py` wraps the method's top-level functions (and the toolbox functions it imports) while it runs and
   records every call: inputs, result, time, error. Calls made by the recipe are the steps (their tables are saved);
   deeper calls are the formulas and helpers. A function called many times keeps its first 1000 calls and a count;
@@ -193,7 +222,8 @@ at 120 columns as the file is. A change that would break the method is refused i
 - `explain.py` draws a formula's body as LaTeX (`latex.py`), shows a step's tables and the formulas used inside it
   with this run's numbers, and answers "where does this number come from": the recorded call that returned exactly
   that value (first among the calls inside the step that made the column; for a column-wise formula also by row),
-  with its inputs, then the calls that gave those inputs.
+  with its inputs, then the calls that gave those inputs; a number that came in through a result input ends the
+  chain with a `kind: source` step naming the experiment, its run, table, row (`where`) and column.
 - A run error names the method's own line and says what is wrong in plain words (a missing column: which columns
   the table does have).
 - `compare.py` lists the numbers that moved between two runs. Rows are paired by identifying columns found in the
@@ -201,10 +231,12 @@ at 120 columns as the file is. A change that would break the method is refused i
   most rows apart, then the next that tells more apart, until every row is told apart; when they can't, by
   position.
 - `standalone.py` exports a method as a folder that runs without layr (`python run.py`): the method, the toolbox,
-  the settings, the corrections, the raw files' checksums, a runner and the requirements. It also writes "this run
+  the settings, the corrections, the raw files' checksums, a runner and the requirements; a result input's stacked
+  table goes into `data/<input>.csv`, so the folder runs without the other experiments. It also writes "this run
   in a notebook": a folder in JupyterLab's notebooks (the `jupyter` plugin's data folder) with the run's tables, the
   method and `explore.ipynb`.
-- Reports (`export.py`, HTML / Excel / Word): what went in, how every number was calculated (each step's sentence,
+- Reports (`export.py`, HTML / Excel / Word): what went in (raw files, the results of other experiments with their
+  runs and times, settings), how every number was calculated (each step's sentence,
   formulas drawn from the code, this run's numbers), results, flags, corrections with reasons, and the source code
   as an appendix.
 
@@ -233,15 +265,31 @@ at 120 columns as the file is. A change that would break the method is refused i
 Methods: `methods`, `method_get`, `method_check`, `method_versions`, `method_diff`, `method_create`, `method_write`,
 `method_revert`, `method_reference`, `method_delete`, `draft_get`, `draft_decide` (the user's; `source` accepts a
 merged text), `toolbox_docs`, `toolbox_copy`. The flow: `flow_get`, `flow_edit` (saves nothing), `flow_new`, `blocks`.
-Experiments and runs: `experiments`, `experiment_get`, `experiment_create`, `experiment_update`, `experiment_delete`,
-`examples` and `lab_sample` (make one of them), `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
+Experiments and runs: `experiments` (with each one's tables, what it reads, who reads it, why it is out of date),
+`experiment_get`, `experiment_create` and `experiment_update` (`sources`: the results of other experiments it reads),
+`experiment_delete` (`force` when others read it), `examples` and `lab_sample` (make one of them), `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
 `settings`), `run_stop`, `run_get`, `runs`, `compare_runs`. Results and explanations: `result_table`, `figure`,
 `provenance`, `explain`, `explain_function`, `function_inside` (a function's code with the values of every line),
 `value_get` (the rows of any stored table), the corrections, `export`, `method_export`, `notebook`. What a method declares: `method_declare` (pages, kinds of correction,
 packages), `correction_kinds`, and for the pages `curve` (one curve for a review card) and `result_value` (a
 returned value or text). The editor: `code_complete`, `code_hover`, `code_signature`,
 `code_definition`, `code_rename`, `code_format`. For the panel's AI buttons: `ai_prompt` (explain, a Methods
-paragraph, or write a step from her sentence).
+paragraph, or write a step from her sentence). References: `reference_make`, `reference_get` (below).
+
+## References
+
+Another plugin (a Wiki page) refers to something in Research with an ordinary layr link,
+`layr://research/open/<ref>`: `ref` is a query string (keys `experiment`, `method`, `result` (or
+`step:<function>`), `row` (compact JSON of the columns that pick one row, keys sorted), `column`, `function`, and
+`run` / `was`, the run and the value when it was made) put through `encodeURIComponent`, with `( ) ! ' *` encoded
+too so a Markdown link isn't cut. `layr.json`'s `links` opens it in the Experiments panel with the param `ref`. The
+kind follows from the keys: an experiment, a result, one number (a table's row and column, or a single returned
+number), a step of an experiment (its code with the latest run's values), a function of a method, a method.
+`reference_make` checks the thing exists and gives the reference with its readable Markdown link ("Copy link":
+`[mean score 3.42 · group B (Attitude survey)](layr://research/open/...)`); `reference_get` gives what it shows
+now, always from the experiment's latest finished run: a title, a subtitle, a body (number, table of 8 × 8, image,
+text, code, facts), whether the experiment changed since that run (`stale`), the number's `was` and `now` when it
+moved, or a plain sentence when the thing is gone. The core (`lab/ref_tools.py`) is tested in `tests/test_refs.py`.
 
 ## The survey example
 
@@ -258,7 +306,19 @@ with Try an example › A survey (`lab_sample` with `which: survey`).
 description, method). Each has `ID`, `TITLE`, `DESCRIPTION`, `METHOD`, `EXPERIMENT` (the new experiment's title),
 `ORDER`, `SETTINGS`, `CORRECTIONS` and `files(folder)`, which writes its made-up raw files (`{input id: path}`).
 `lab_sample(which=<id>)` stores the files, makes the experiment and, for the first one of a method, pins it as the
-method's reference experiment.
+method's reference experiment. An example whose method reads other experiments has `SOURCES` (the experiments to
+make and run first: `{key: {title, method, settings?, files}}`) and `PICKS` (`{input: [{source: key, result}]}`);
+`lab_sample` then also gives the ids of those experiments in `made`.
+
+## The comparison example
+
+`compare-experiments` (`backend/lab/methods/compare-experiments.py`, "Compare a result across experiments") reads a
+table from each experiment picked (`results: ... [result]`) and, for one numeric column (a setting) and optionally
+per group of a grouping column: n, mean, sd and se per experiment, each mean's difference from the first
+experiment's (also in %), a bar chart with standard errors, and quality flags (only one experiment picked, an
+experiment without numbers in the column, a single value). Try an example › Compare two surveys (`lab_sample` with
+`which: compare`, `lab/examples/compare.py`) makes two survey waves with survey-scores (made-up spring and autumn
+answers), runs them and makes the comparison of their `scores` per `group`.
 
 ## The GC-FID activity assay
 
@@ -281,7 +341,9 @@ which is a draft the user accepts and comes back with the checker's warnings to 
 lines and the numbers that moved; `draft_decide` is the user's. Corrections need a reason and stay proposed until the
 user approves them. An agent reads the flow with `flow_get`, makes flow changes with `flow_edit` and saves the
 result with `method_write` (a draft like any change), looks inside a run with `function_inside` / `value_get`, and
-tries an unsaved change with `run` and `source` (a trial run that saves nothing). The panel's Explain button, the
+tries an unsaved change with `run` and `source` (a trial run that saves nothing). To compare experiments it makes
+an experiment of a method with a `[result]` input and picks them with `experiment_create` / `experiment_update`
+(`sources`); an experiment that is `outdated` is rerun only when someone runs it. The panel's Explain button, the
 Methods paragraph and "describe a step" ask Claude through the claude plugin's `ask` tool (an optional connection;
 the buttons hide without it) and mark the answer as written by AI; a step Claude writes is a draft she reviews.
 
@@ -290,7 +352,9 @@ the buttons hide without it) and mark the answer as written by AI; a step Claude
 From `plugins/research`: `uv run pytest tests -q` (add `GCASSAY_PROJECT=<folder>` for the real-data comparison).
 `tests/test_flow_server.py` drives 0.4 end to end through the server as layr starts it (the sample run, its flow
 with a value on every wire, the inside of a step, a changed setting with remembered steps, a block added and tried,
-every example made and run). `tests/test_generality.py` fails when a word of one method (GC, GAML, peak, compound,
+every example made and run). `tests/test_sources.py` covers experiments that read experiments (declaring, picks
+and loops, stacking, the record, out of date, remembered steps, deleting, the flow, provenance, the exported
+folder, the comparison example through the server). `tests/test_generality.py` fails when a word of one method (GC, GAML, peak, compound,
 injection...) appears in the core (everything under `backend/` but the methods, the examples and the toolbox's
 add-ons; and `panels/pages.js`, `panels/guide.js`, `layr.json`).
 The panel: start `layr serve` with this plugin linked and its own home, then

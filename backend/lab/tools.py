@@ -31,6 +31,7 @@ from pydantic import Field
 
 from . import checker, compare, examples, methodfile, packages, standalone
 from . import explain as explainer
+from . import sources as sources_mod
 from . import pages as declarations
 from .errors import LabError
 from .runner import Pool, Runner, experiment_inputs
@@ -43,6 +44,10 @@ TASKS: set[asyncio.Future] = set()
 CURVES: dict[str, Any] = {}  # a raw file's curves (or table) by file and settings, so dragging a region stays fast
 CURVES_LOCK = threading.Lock()
 CURVES_KEPT = 3
+SOURCES_HELP = ("Results of other experiments, for the method's inputs that read them (their Inputs: line ends in "
+                "[result]): {input id: [{\"experiment\": id, \"result\": a table it returns, e.g. \"scores\", or "
+                "\"step:<function>\"}, ...]}, one or several experiments; `result` may be left out when the input "
+                "names the one it expects ([result: scores]). The experiments lists each one's tables.")
 
 
 def thin(t: np.ndarray, y: np.ndarray, start: float | None, end: float | None, points: int) -> np.ndarray:
@@ -303,8 +308,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     def methods() -> list[dict[str, Any]]:
-        """The analysis methods (Python files): id, name, latest version, number of steps, raw file inputs, built in
-        or not, whether an AI draft waits for the user, the reference experiment."""
+        """The analysis methods (Python files): id, name, latest version, number of steps, inputs (raw files, kind
+        file, and results of other experiments, kind result), built in or not, whether an AI draft waits for the
+        user, the reference experiment."""
         return store.list_methods()
 
     def method_view(method: str, version: int | None = None) -> dict[str, Any]:
@@ -325,8 +331,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                    version: Annotated[int | None, Field(description="A version; default the latest.")] = None
                    ) -> dict[str, Any]:
         """A method in full: its Python source, the outline of its functions (recipe, steps, formulas, helpers),
-        its settings and inputs (from the recipe's signature and docstring), the style checker's messages, its
-        versions, its reference experiment and a pending AI draft (if any)."""
+        its settings and inputs (from the recipe's signature and docstring; summary.inputs: [{id, label, kind: file
+        (types: extensions) | result (result: the table name it expects, or null), optional}]), the style checker's
+        messages, its versions, its reference experiment and a pending AI draft (if any)."""
         return method_view(method, version)
 
     @mcp.tool()
@@ -840,18 +847,40 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             return [], []
         return methodfile.settings(m), methodfile.inputs(m)
 
+    def linked(e: dict, everyone: list[dict], by_id: dict[str, dict], runs: sources_mod.Runs) -> dict[str, Any]:
+        """How an experiment is tied to others: the tables its latest run has (to pick from), what it reads, who
+        reads it, and why it is out of date."""
+        returned, steps = sources_mod.tables(runs.latest(e))
+        return {"results": returned, "step_results": steps,
+                "reads": [{"input": i, "experiment": s["experiment"], "result": s["result"]}
+                          for i, chosen in sources_mod.picks(e).items() for s in chosen],
+                "read_by": sources_mod.readers(e["id"], everyone),
+                "outdated": sources_mod.outdated(store, e, by_id, runs)}
+
     @mcp.tool()
     def experiments() -> list[dict[str, Any]]:
-        """All experiments (a method applied to raw files): id, title, method, files, last run (status, QC flag
-        counts), proposed corrections waiting for the user."""
-        return [experiment_summary(e) for e in store.list_experiments()]
+        """All experiments (a method applied to raw files, or to results of other experiments): id, title, method,
+        files, last run (status, QC flag counts), proposed corrections waiting for the user; `results` (the tables
+        its latest run returned) and `step_results` (its steps' tables, `step:<function>`) to pick from for an input
+        that reads other experiments; `reads` [{input, experiment, result}] and `read_by` [{experiment, title,
+        input}]; `outdated` [{input, experiment, title, reason}]: a source changed since its latest run (run it
+        again to see it; nothing reruns by itself)."""
+        everyone = store.list_experiments()
+        by_id = {e["id"]: e for e in everyone}
+        runs = sources_mod.Runs(store)
+        return [{**experiment_summary(e), **linked(e, everyone, by_id, runs)} for e in everyone]
 
     @mcp.tool()
     def experiment_get(experiment: Annotated[str, Field(description="Experiment id, like e1a2b3c4d.")]
                        ) -> dict[str, Any]:
         """One experiment in full: method, files (with checksums), settings (with the method's defaults for the
-        rest), corrections with reasons and status, last run."""
+        rest), corrections with reasons and status, last run. For each input that reads other experiments,
+        `sources` {input: [{experiment, result, title, method, missing, last_run: {id, status, finished} | null,
+        has_result}]}; `results`, `step_results`, `reads`, `read_by` and `outdated` as in experiments."""
         e = store.get_experiment(experiment)
+        everyone = store.list_experiments()
+        by_id = {x["id"]: x for x in everyone}
+        runs = sources_mod.Runs(store)
         decl: dict[str, Any] = {}
         try:
             m = method_of(e)
@@ -874,7 +903,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         corrections = [{**c, "what": declarations.describe(kinds, c)} for c in e.get("corrections") or []]
         return {**e, "corrections": corrections, "inputs": {**(e.get("inputs") or {}), **files},
                 "resolved_params": resolved, "method_params": settings, "method_inputs": inputs,
-                "running": experiment in LIVE, "method_problem": problem, **decl}
+                "running": experiment in LIVE, "method_problem": problem, **decl,
+                "sources": sources_mod.view(store, e, inputs, by_id, runs), **linked(e, everyone, by_id, runs)}
 
     def _apply_files(e: dict, inputs: list[dict], files: dict[str, Any] | None) -> None:
         ids = [i["id"] for i in inputs]
@@ -933,15 +963,18 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         corrections: Annotated[list[dict[str, Any]] | None, Field(
             description="Corrections to start with, each {kind, its fields..., reason}; from an agent they are only "
                         "proposed.")] = None,
+        sources: Annotated[dict[str, list[dict[str, Any]]] | None, Field(description=SOURCES_HELP)] = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Create an experiment: a method plus its raw files and settings. Then run it with run."""
+        """Create an experiment: a method plus its raw files (or the results of other experiments it reads) and
+        settings. Then run it with run."""
         m = store.get_method(method)
         settings, inputs = form(m)
         e = {"id": new_id("e"), "title": title.strip() or "Experiment", "method": method, "inputs": {},
              "params": checked_params(settings, params), "corrections": [], "created": now(),
              "created_by": _who(ctx)}
         add_corrections(e, corrections, _is_user(ctx), _who(ctx))
+        e["sources"] = sources_mod.check(store, e, inputs, sources)
         e["changed"] = now()
         await asyncio.to_thread(_apply_files, e, inputs, files)
         store.save_experiment(e)
@@ -962,9 +995,11 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         notes: Annotated[str | None, Field(description="Free notes about the experiment.")] = None,
         methods_text: Annotated[str | None, Field(description="A Methods paragraph to keep with the experiment "
                                                               "(goes into its reports).")] = None,
+        sources: Annotated[dict[str, list[dict[str, Any]] | None] | None, Field(
+            description=SOURCES_HELP + " Replaces the picks of each input given; null or [] clears one.")] = None,
     ) -> dict[str, Any]:
-        """Change an experiment's title, settings, raw files, method (or pinned version), notes or Methods
-        paragraph. Run again to see the effect."""
+        """Change an experiment's title, settings, raw files, the results of other experiments it reads, method (or
+        pinned version), notes or Methods paragraph. Run again to see the effect."""
         e = store.get_experiment(experiment)
         if method is not None:
             store.get_method(method)
@@ -978,6 +1013,11 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             e["title"] = title.strip() or e["title"]
         e["params"] = checked_params(settings, params, e.get("params"))
         _apply_files(e, inputs, files)
+        if method is not None or method_version is not None:  # another method: the picks it can't use go
+            takes = {i["id"] for i in inputs if i["kind"] == "result"}
+            e["sources"] = {k: v for k, v in sources_mod.picks(e).items() if k in takes}
+        if sources is not None:
+            e["sources"] = sources_mod.check(store, e, inputs, sources)
         if notes is not None:
             e["notes"] = notes
         if methods_text is not None:
@@ -988,17 +1028,39 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         return experiment_get(experiment)
 
     @mcp.tool()
-    def experiment_delete(experiment: Annotated[str, Field(description="Experiment id.")]) -> dict[str, Any]:
-        """Delete an experiment and its runs (raw files stay in the store)."""
-        store.get_experiment(experiment)
+    def experiment_delete(experiment: Annotated[str, Field(description="Experiment id.")],
+                          force: Annotated[bool, Field(description="Delete it even when other experiments read its "
+                                                                   "results (they then show it as missing).")] = False
+                          ) -> dict[str, Any]:
+        """Delete an experiment and its runs (raw files stay in the store). When other experiments read its results
+        it is refused, naming them (remove it from their inputs first), unless `force`."""
+        e = store.get_experiment(experiment)
+        everyone = store.list_experiments()
+        readers = [r for r in sources_mod.readers(experiment, everyone) if r["experiment"] != experiment]
+        if readers and not force:
+            names = ", ".join(f"'{r['title'] or r['experiment']}' ({r['experiment']})"
+                              for r in {r["experiment"]: r for r in readers}.values())
+            raise LabError(f"Other experiments read the results of '{e.get('title') or experiment}': {names}. Remove "
+                           "it from their inputs first, or delete it anyway (force): they then show it as missing.")
         store.delete_experiment(experiment)
         for m in store.list_methods():
             if m.get("reference") == experiment:
                 store.set_method_settings(m["id"], reference=None)
         changed("experiment", experiment=experiment, deleted=True)
-        return {"deleted": experiment}
+        for r in {r["experiment"] for r in readers}:
+            changed("sources", experiment=r, source=experiment, deleted=True)
+        return {"deleted": experiment, "readers": readers}
 
     # ------------------------------------------------------------------ running
+
+    def announce_readers(exp_id: str, run: dict) -> None:
+        """Tell the panels that the experiments reading this one have a source with a new run."""
+        try:
+            readers = sources_mod.readers(exp_id, store.list_experiments())
+        except (LabError, OSError):
+            return
+        for r in {r["experiment"] for r in readers if r["experiment"] != exp_id}:
+            changed("sources", experiment=r, source=exp_id, run=run.get("id"), status=run.get("status"))
 
     def start_run(exp_id: str, time_limit_s: float | None, fresh: bool = False, trial: dict | None = None
                   ) -> asyncio.Future:
@@ -1034,6 +1096,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             run = f.result() if not f.exception() else None
             changed("run", experiment=exp_id, run=(run or {}).get("id"), status=(run or {}).get("status", "failed"),
                     finished=True, **extra)
+            if run and not trial:  # the experiments reading this one may be out of date now: their screens redraw
+                announce_readers(exp_id, run)
 
         fut.add_done_callback(done)
         TASKS.add(fut)
@@ -1056,7 +1120,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 "started": run["started"], "finished": run.get("finished"), "method": run["method"],
                 "summary": run.get("summary"), "trial": run.get("trial", False), "ms": run.get("ms"),
                 "fresh": bool(run.get("fresh")), "cache": run.get("cache"), "reason": run.get("reason"),
-                "settings": run.get("settings"), "notes": run.get("notes") or [],
+                "settings": run.get("settings"), "notes": run.get("notes") or [], "sources": run.get("sources") or {},
                 "steps": [{"function": s.get("function"), "kind": s.get("kind"),
                            "status": s.get("status"),
                            "ms": s.get("ms"), "error": s.get("error"),
@@ -1490,25 +1554,50 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         title, description, method}]}."""
         return {"examples": examples.listing()}
 
-    @mcp.tool()
-    def lab_sample(which: Annotated[str, Field(description="Which example: its id, as the examples tool lists "
-                                                           "them.")],
-                   ctx: Context | None = None) -> dict[str, Any]:
-        """Create an example experiment with made-up raw files, to try a method without real data. The first
-        example made for a method becomes its reference experiment."""
-        ex = examples.get(which)
-        m = store.get_method(ex.METHOD)
-        settings, _ = form(m)
-        e = {"id": new_id("e"), "title": ex.EXPERIMENT, "method": ex.METHOD,
-             "inputs": examples.stored_files(store, ex),
-             "params": checked_params(settings, getattr(ex, "SETTINGS", None)), "corrections": [], "created": now(),
-             "created_by": _who(ctx)}
-        add_corrections(e, getattr(ex, "CORRECTIONS", None), True, "the example")
+    def example_experiment(title: str, method: str, files, settings: dict | None, corrections: list | None,
+                           picks: dict | None, who: str) -> dict:
+        """One experiment of an example, saved: its made-up raw files stored, its settings, corrections and the
+        results of other experiments it reads. The first one made for a method becomes its reference."""
+        m = store.get_method(method)
+        settings_form, inputs = form(m)
+        e = {"id": new_id("e"), "title": title, "method": method, "inputs": examples.stored_files(store, files),
+             "params": checked_params(settings_form, settings), "corrections": [], "created": now(),
+             "created_by": who}
+        add_corrections(e, corrections, True, "the example")
+        e["sources"] = sources_mod.check(store, e, inputs, picks)
         store.save_experiment(e)
-        if not store.method_settings(ex.METHOD).get("reference"):
-            store.set_method_settings(ex.METHOD, reference=e["id"])
+        if not store.method_settings(method).get("reference"):
+            store.set_method_settings(method, reference=e["id"])
         changed("experiment", experiment=e["id"])
-        return experiment_summary(e)
+        return e
+
+    @mcp.tool()
+    async def lab_sample(which: Annotated[str, Field(description="Which example: its id, as the examples tool lists "
+                                                                 "them.")],
+                         ctx: Context | None = None) -> dict[str, Any]:
+        """Create an example experiment with made-up raw files, to try a method without real data. The first
+        example made for a method becomes its reference experiment. An example that compares experiments first
+        makes and runs the experiments it reads: their ids come back in `made`."""
+        ex = examples.get(which)
+        who = _who(ctx)
+        made: dict[str, str] = {}
+        for key, spec in (getattr(ex, "SOURCES", None) or {}).items():
+            e = await asyncio.to_thread(example_experiment, spec["title"], spec["method"], spec.get("files"),
+                                        spec.get("settings"), spec.get("corrections"), None, who)
+            run = await asyncio.to_thread(runner.run, e, method_of(e))
+            changed("run", experiment=e["id"], run=run["id"], status=run["status"], finished=True)
+            if run["status"] != "done":
+                raise LabError(f"The example's experiment '{spec['title']}' didn't run: "
+                               f"{(run.get('error') or {}).get('message')}")
+            made[key] = e["id"]
+        picks = {i: [{"experiment": made[p["source"]], "result": p["result"]} for p in chosen]
+                 for i, chosen in (getattr(ex, "PICKS", None) or {}).items()}
+        e = await asyncio.to_thread(example_experiment, ex.EXPERIMENT, ex.METHOD, getattr(ex, "files", None),
+                                    getattr(ex, "SETTINGS", None), getattr(ex, "CORRECTIONS", None), picks, who)
+        out = experiment_summary(e)
+        if made:
+            out["made"] = list(made.values())
+        return out
 
     # ------------------------------------------------------------------ the flow, inside a run, code help
     from . import code_tools, flow_tools, inside_tools

@@ -590,7 +590,7 @@ select.fl-field {
 .fl-res:hover {
   text-decoration: underline;
 }
-/* the host's actions at a box's foot ("Review the peaks", "See the checks") */
+/* the host's actions at a box's foot ("Open Overview", "See the checks") */
 .fl-acts {
   display: flex;
   flex-wrap: wrap;

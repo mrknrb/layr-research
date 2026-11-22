@@ -9,6 +9,10 @@ lab/recorder.py's StepCache): it is marked "cached" in the run's steps. `fresh=T
 reference comparison and anything that proves numbers use it). A trial run (`trial=True`, also of an unsaved
 source) doesn't become the experiment's latest run.
 
+A result input (results of other experiments, lab/sources.py) is stacked into one table before the run starts and
+written to the run's `sources/<input>.csv`; the calculation process reads it into a DataFrame for the recipe, and
+run.json's `sources` says what was read. A source that can't be read stops the run before it starts.
+
 Runs pile up: `prune_runs` (every few runs) keeps the newest `TRIAL_KEEP` trial runs of each experiment and lets
 only the newest `INSIDE_KEEP` runs of each experiment (and its latest run) keep the values inside their steps
 (inside.json, values/); older runs keep everything else: their settings, steps' tables, outputs and calls.
@@ -209,7 +213,10 @@ def _parse(source: str) -> methodfile.Method:
 
 
 def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
-    """What the recipe gets from this experiment: {recipe, kinds, args, params (shown), inputs, notes}."""
+    """What the recipe gets from this experiment: {recipe, kinds, args, params (shown), inputs, notes, tables (each
+    result input's stacked table and what it read, lab/sources.py)}."""
+    from .sources import gather
+
     try:
         parsed = _parse(source)
     except SyntaxError as e:
@@ -218,6 +225,7 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     if fn is None:
         raise LabError("The method has no recipe function to run.")
     files = [p for p in fn.params if p.endswith("_file")]
+    results = methodfile.result_inputs(parsed)
     inputs = experiment_inputs(exp, files)
     given = exp.get("params") or {}
     args: dict[str, Any] = {}
@@ -225,6 +233,8 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     for p in fn.params:
         if p == "corrections":
             args[p] = approved_corrections(exp)
+        elif p in results:
+            continue  # a table, given to the calculation process as a file (below)
         elif p in files:
             f = inputs.get(p)
             if f is None:
@@ -249,8 +259,9 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     labels = fn.doc.returns
     from .pages import requirements
 
+    tables = gather(store, exp, results, {p for p in results if p in fn.defaults})
     return {"recipe": fn.name, "kinds": kinds, "args": args, "params": shown, "inputs": inputs, "notes": notes,
-            "labels": labels, "requirements": requirements(parsed.constants)}
+            "labels": labels, "requirements": requirements(parsed.constants), "tables": tables}
 
 
 def versions_here() -> dict[str, str]:
@@ -293,9 +304,20 @@ class Runner:
         rdir = store.run_dir(run["id"])
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "method.py").write_text(method["source"], "utf-8", newline="\n")
+        tables: dict[str, str] = {}  # each result input's stacked table, read by the calculation process
+        if info["tables"]:
+            from .sources import fingerprint
+
+            (rdir / "sources").mkdir(exist_ok=True)
+            run["sources"] = {}
+            for name, got in info["tables"].items():
+                rel = f"sources/{name}.csv"
+                got["table"].to_csv(rdir / rel, index=False)
+                run["sources"][name] = {**got["record"], "file": rel, "fingerprint": fingerprint(rdir / rel)}
+                tables[name] = str(rdir / rel)
         store.save_run(run)
         job = {"job": "run", "source": str(rdir / "method.py"), "run_dir": str(rdir), "recipe": info["recipe"],
-               "kinds": info["kinds"], "args": info["args"], "cache_dir": str(store.root / "cache"),
+               "kinds": info["kinds"], "args": info["args"], "tables": tables, "cache_dir": str(store.root / "cache"),
                "step_cache": str(store.root / "cache" / "steps") if self.remember_steps else None,
                "fresh": fresh, "inside": self.record_inside, "experiment": exp["id"]}
 

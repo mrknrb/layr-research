@@ -5,6 +5,9 @@ A method is one Python file:
 - The **recipe** is the function named by a module-level `RECIPE = "name"`, or else the last function in the file.
   Its parameters are the experiment's inputs and settings:
   - a parameter whose name ends in `_file` is a raw file the experiment supplies (`plate_file`, `answers_file`);
+  - a parameter whose line under `Inputs:` ends in `[result]` (or `[result: scores]`, naming the result it expects)
+    is a **result of other experiments**: the experiment picks one or several experiments and a table each of their
+    latest runs made, and the recipe gets them as one table (lab/sources.py);
   - a parameter named `corrections` gets the experiment's approved corrections (a list of dicts);
   - every other parameter is a setting; its default (a literal, or a module-level constant holding one) is what an
     experiment uses unless it sets its own. A setting without a default must be set by the experiment.
@@ -28,6 +31,7 @@ The recipe's docstring documents its parameters (sections Inputs, Settings, Retu
 
         Inputs:
             plate_file: Plate reader export (CSV or Excel) [.csv, .xlsx]
+            earlier: Growth rates of earlier plates [result: rates]
         Settings:
             Fitting:
                 window_h: Exponential window. Start and end of the exponential phase.
@@ -344,8 +348,49 @@ def parse(source: str) -> Method:
 # ---------------------------------------------------------------------------------------------------- the form
 
 
-def is_input(param: str) -> bool:
-    return param.endswith("_file") or param == "corrections"
+_MARKER = re.compile(r"\[([^\]]*)\]\s*\.?\s*$")
+_RESULT = re.compile(r"^\s*result\s*(?::\s*(?P<name>.*?))?\s*$", re.IGNORECASE)
+RESULT_NAME = re.compile(r"^(step:)?[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def input_marker(text: str) -> tuple[str, str | None]:
+    """An `Inputs:` line's label and what its last bracket holds (`.csv, .xlsx`, `result: scores`), or None."""
+    m = _MARKER.search(text or "")
+    if not m:
+        return (text or "").strip(), None
+    return text[:m.start()].strip(), m.group(1).strip()
+
+
+def result_marker(marker: str | None) -> tuple[bool, str | None]:
+    """Whether a bracket's text marks a result of other experiments (`result`, `result: scores`), and the result's
+    name it suggests (None: any)."""
+    m = _RESULT.match(marker or "") if marker is not None else None
+    if not m:
+        return False, None
+    return True, (m.group("name") or "").strip() or None
+
+
+def result_inputs(method: Method) -> dict[str, str | None]:
+    """The recipe's parameters that take a result of other experiments ({parameter: the result name it suggests,
+    or None}): those whose `Inputs:` line ends in `[result]` or `[result: name]`. A name ending in `_file` stays a
+    raw file and `corrections` stays the corrections, whatever their line says (the checker warns)."""
+    fn = method.recipe_function
+    if fn is None:
+        return {}
+    out: dict[str, str | None] = {}
+    for p in fn.params:
+        if p.endswith("_file") or p == "corrections":
+            continue
+        ok, name = result_marker(input_marker(fn.doc.inputs.get(p, ""))[1])
+        if ok:
+            out[p] = name
+    return out
+
+
+def is_input(param: str, results: Any = ()) -> bool:
+    """A parameter the experiment supplies as an input (a raw file, the corrections, or one of `results`: the
+    method's result inputs, `result_inputs(method)`), not a setting."""
+    return param.endswith("_file") or param == "corrections" or param in results
 
 
 def _editor(default: Any, explicit: str | None, unit: str | None) -> str:
@@ -453,9 +498,10 @@ def settings(method: Method) -> list[dict[str, Any]]:
     documented = {s["id"]: s for s in fn.doc.settings}
     order = [s["id"] for s in fn.doc.settings if s["id"] in fn.params] + \
         [p for p in fn.params if p not in documented]
+    results = result_inputs(method)
     out = []
     for pid in order:
-        if is_input(pid):
+        if is_input(pid, results):
             continue
         d = documented.get(pid, {})
         _, unit = split_unit(pid)
@@ -493,17 +539,22 @@ def _default_node(fn: Function, pid: str) -> ast.AST:
 
 
 def inputs(method: Method) -> list[dict[str, Any]]:
-    """The raw files the recipe takes: [{id, kind: file, label, types}]."""
+    """What the experiment supplies, in the recipe's order: raw files [{id, kind: file, label, types, optional}] and
+    results of other experiments [{id, kind: result, label, result (the result name it suggests, or None),
+    optional}]."""
     fn = method.recipe_function
     if fn is None:
         return []
+    results = result_inputs(method)
     out = []
     for p in fn.params:
+        label, marker = input_marker(fn.doc.inputs.get(p, ""))
         if p.endswith("_file"):
-            text = fn.doc.inputs.get(p, "")
-            types = re.findall(r"\.[A-Za-z0-9]+", (re.search(r"\[([^\]]*)\]\s*$", text) or [None, ""])[1] or "")
-            label = re.sub(r"\s*\[[^\]]*\]\s*$", "", text).strip() or p.replace("_", " ")
-            out.append({"id": p, "kind": "file", "label": label, "types": types,
+            types = re.findall(r"\.[A-Za-z0-9]+", marker or "")
+            out.append({"id": p, "kind": "file", "label": label or p.replace("_", " "), "types": types,
+                        "optional": p in fn.defaults})
+        elif p in results:
+            out.append({"id": p, "kind": "result", "label": label or p.replace("_", " "), "result": results[p],
                         "optional": p in fn.defaults})
     return out
 
@@ -536,4 +587,5 @@ def unit_of(name: str) -> str | None:
     return split_unit(name)[1]
 
 
-__all__ = ["parse", "settings", "inputs", "outline", "summary", "UNKNOWN", "is_input", "is_arithmetic", "UNITS"]
+__all__ = ["parse", "settings", "inputs", "outline", "summary", "UNKNOWN", "is_input", "is_arithmetic", "UNITS",
+           "result_inputs", "input_marker", "result_marker"]

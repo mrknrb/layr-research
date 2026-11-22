@@ -6,7 +6,9 @@ The folder holds everything needed to recompute the numbers on another computer:
     toolbox/             the toolbox it imports
     settings.json        the experiment's settings (the rest are the method's defaults)
     corrections.json     the approved corrections, with their reasons
-    inputs.json          the raw files: name, SHA-256, size, and where they are on this PC
+    inputs.json          the raw files: name, SHA-256, size, and where they are on this PC; a result of other
+                         experiments (kind "result") is the table the run read, with where it came from
+    data/<input>.csv     each such table (always written: it is no raw file kept anywhere else)
     run.py               the runner: python run.py [--data <folder with the raw files>] [--out <folder>]
     requirements.txt     the Python packages (the versions of the run)
     README.txt           how to run it
@@ -89,7 +91,12 @@ def main():
     if "corrections" in recipe.__code__.co_varnames[:recipe.__code__.co_argcount]:
         kwargs["corrections"] = json.loads((HERE / "corrections.json").read_text("utf-8"))
     for name, info in json.loads((HERE / "inputs.json").read_text("utf-8")).items():
-        kwargs[name] = str(find_input(info, Path(args.data)))
+        path = find_input(info, Path(args.data))
+        if info.get("kind") == "result":  # results of other experiments, as the run read them: one table
+            import pandas
+            kwargs[name] = pandas.read_csv(path)
+        else:
+            kwargs[name] = str(path)
     results = recipe(**kwargs)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -116,11 +123,22 @@ This folder recomputes the numbers without layr. With Python 3.11 or newer:
     pip install -r requirements.txt
     python run.py --data <folder with the raw files>
 
-The raw files are listed in inputs.json with their SHA-256; run.py checks them before it starts. The method is
+The raw files are listed in inputs.json with their SHA-256; run.py checks them before it starts. A table that came
+from other experiments (a result input) is in data/ as <input>.csv, exactly as the run read it. The method is
 {method_file} (plain Python: read it to see how every number is calculated); the toolbox/ folder holds the
 functions it imports. settings.json holds the experiment's settings, corrections.json the corrections with their
 reasons. The results go to results/.
 """
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def module_name(method_id: str) -> str:
@@ -155,9 +173,10 @@ def export_folder(store: Store, method: dict[str, Any], dest: Path, exp: dict[st
     settings: dict[str, Any] = {}
     corrections: list[dict[str, Any]] = []
     inputs: dict[str, Any] = {}
+    results = methodfile.result_inputs(parsed)
     if exp is not None:
         given = dict((run or {}).get("settings") or exp.get("params") or {})
-        settings = {k: v for k, v in given.items() if k in params and not methodfile.is_input(k)}
+        settings = {k: v for k, v in given.items() if k in params and not methodfile.is_input(k, results)}
         corrections = (run or {}).get("corrections") if run else \
             [c for c in exp.get("corrections") or [] if c.get("status") == "approved"]
         from .runner import experiment_inputs
@@ -170,6 +189,17 @@ def export_folder(store: Store, method: dict[str, Any], dest: Path, exp: dict[st
             if include_raw:
                 (dest / "data").mkdir(exist_ok=True)
                 shutil.copyfile(path, dest / "data" / inputs[name]["name"])
+        # results of other experiments: the table the run read, always copied (it isn't a raw file kept anywhere)
+        for name, rec in ((run or {}).get("sources") or {}).items():
+            path = store.run_dir(run["id"]) / str(rec.get("file") or "")
+            if name not in results or not rec.get("file") or not path.is_file():
+                continue
+            (dest / "data").mkdir(exist_ok=True)
+            shutil.copyfile(path, dest / "data" / f"{name}.csv")
+            inputs[name] = {"kind": "result", "name": f"{name}.csv", "sha256": _sha256(path),
+                            "size": path.stat().st_size, "path": str(path),
+                            "from": [{k: f.get(k) for k in ("experiment", "title", "run", "finished", "result", "rows")}
+                                     for f in rec.get("from") or []]}
     (dest / "settings.json").write_text(json.dumps(jsonable(settings), indent=1, ensure_ascii=False), "utf-8")
     (dest / "corrections.json").write_text(json.dumps(jsonable(corrections or []), indent=1, ensure_ascii=False),
                                            "utf-8")
@@ -258,7 +288,8 @@ def make_notebook(store: Store, method: dict[str, Any], exp: dict[str, Any], run
     rerun = (
         'settings = json.load(open("settings.json"))\n'
         'inputs = json.load(open("inputs.json"))\n'
-        "files = {name: info[\"path\"] for name, info in inputs.items()}\n"
+        "files = {name: pd.read_csv(info[\"path\"]) if info.get(\"kind\") == \"result\" else info[\"path\"]\n"
+        "         for name, info in inputs.items()}  # a result of other experiments is one table\n"
         + ('corrections = json.load(open("corrections.json"))\n' if takes_corrections else "")
         + f"results = method.{recipe.name if recipe else 'recipe'}(**files, "
         + ("corrections=corrections, " if takes_corrections else "") + "**settings)\n"

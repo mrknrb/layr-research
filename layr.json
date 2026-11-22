@@ -21,6 +21,7 @@
     { "id": "open", "title": "Research: Quick analysis", "panel": "main" },
     { "id": "sample", "title": "Research: Load the sample data", "tool": "load_sample" }
   ],
+  "links": [{ "path": "open", "panel": "experiments", "param": "ref" }],
   "menus": [
     { "menu": "View", "command": "experiments" },
     { "menu": "View", "command": "open" },
@@ -36,7 +37,8 @@
                   "experiment_get", "runs", "run_get", "result_table", "figure", "provenance", "compare_runs",
                   "curve", "result_value", "correction_kinds", "examples", "flow_get", "flow_edit", "flow_new",
                   "value_get", "function_inside", "loop_rounds", "blocks", "code_complete", "code_hover",
-                  "code_signature", "code_definition", "code_rename", "code_format"],
+                  "code_signature", "code_definition", "code_rename", "code_format", "reference_get",
+                  "reference_make"],
         "defaults": { "plugins": "allow", "agents": "allow" } },
       { "id": "load", "label": "Load data (also files from this PC) and create experiments",
         "tools": ["load_csv", "load_sample", "file_import", "file_fetch", "upload_chunk", "upload_finish",

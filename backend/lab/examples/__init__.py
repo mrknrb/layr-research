@@ -13,6 +13,13 @@ Each example is one module in this folder; the plugin lists whatever is here. A 
 
     def files(folder: Path) -> dict[str, Path]:
         '''Write the made-up raw files into `folder`: {the recipe's input id: the file}.'''
+
+An example whose method reads results of other experiments (an input marked `[result]`, lab/sources.py) makes those
+experiments first, runs them, and picks their tables (`files` may then be left out):
+
+    SOURCES = {"spring": {"title": "Example: survey in spring", "method": "survey-scores", "settings": {...},
+                          "files": spring_files}, ...}          # each made and run first, in this order
+    PICKS = {"results": [{"source": "spring", "result": "scores"}, ...]}   # the new experiment's sources
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -52,7 +60,11 @@ def get(which: str) -> ModuleType:
     raise LabError(f"There is no example '{which}'. Examples: {known}.")
 
 
-def stored_files(store, example: ModuleType) -> dict[str, dict[str, Any]]:
-    """The example's raw files written and put into the store (the same file twice is stored once): {input: ref}."""
+def stored_files(store, files: ModuleType | Callable | None) -> dict[str, dict[str, Any]]:
+    """An example's raw files written and put into the store (the same file twice is stored once): {input: ref}.
+    `files`: the example module (its `files`), or a function writing them (an experiment of its SOURCES)."""
+    write = getattr(files, "files", None) if isinstance(files, ModuleType) else files
+    if write is None:
+        return {}
     with tempfile.TemporaryDirectory() as d:
-        return {name: store.add_file(path, move=True) for name, path in example.files(Path(d)).items()}
+        return {name: store.add_file(path, move=True) for name, path in write(Path(d)).items()}

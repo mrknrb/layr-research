@@ -501,8 +501,9 @@ class _Analysis:
         self.stmts = rest[:-1] if self.ret else rest
         self.indent = _lead(src.line(body[0].lineno)) if body else "    "
         self.params = list(fn.params)
-        self.inputs = [p for p in self.params if methodfile.is_input(p)]
-        self.settings = [p for p in self.params if not methodfile.is_input(p)]
+        self.results = methodfile.result_inputs(method)  # inputs that take results of other experiments
+        self.inputs = [p for p in self.params if methodfile.is_input(p, self.results)]
+        self.settings = [p for p in self.params if not methodfile.is_input(p, self.results)]
         self.functions = {f.name for f in method.functions}
         self.classes = {n.name for n in method.tree.body if isinstance(n, ast.ClassDef)}
         self.module_names: set[str] = set()
@@ -1320,6 +1321,16 @@ def _call_columns(A: _Analysis, n: _Node, ports: list[dict[str, Any]], setting_v
     return needs
 
 
+def _sources_text(chosen: list[dict[str, Any]]) -> str | None:
+    """A result input's value as its box shows it: "Survey in spring · scores", "3 experiments · scores"."""
+    if not chosen:
+        return None
+    results = ", ".join(dict.fromkeys(str(s.get("result")) for s in chosen))
+    if len(chosen) == 1:
+        return f"{chosen[0].get('title') or chosen[0].get('experiment')} · {results}"
+    return f"{len(chosen)} experiments · {results}"
+
+
 def _setting_type(setting: dict[str, Any]) -> str:
     return {"number": "number", "integer": "number", "text": "text"}.get(setting.get("type"), "data")
 
@@ -1379,6 +1390,12 @@ def graph(method: str | methodfile.Method | dict, run: dict | None = None, exper
     exp_values = (experiment or {}).get("params") or {}
     run_values = (run or {}).get("settings") or (run or {}).get("params") or {}
     setting_values = {s["id"]: exp_values.get(s["id"], run_values.get(s["id"], s.get("default"))) for s in settings}
+    # the table each result input delivered in this run (lab/sources.py): its stacked table, as on any wire
+    delivered: dict[str, Any] = {}
+    for name, rec in ((run or {}).get("sources") or {}).items():
+        if name in A.results and isinstance(rec, dict):
+            delivered[name] = {"kind": "table", "rows": rec.get("rows"), "columns": rec.get("columns") or [],
+                               "file": rec.get("file")}
     for n, nd in zip(A.nodes, nodes):
         params = {p.name: p for p in n.callee.params or []} if n.callee else {}
         at_call = _call_columns(A, n, nd["ports"], setting_values) if n.kind == "call" else None
@@ -1386,25 +1403,31 @@ def graph(method: str | methodfile.Method | dict, run: dict | None = None, exper
             src = port["source"]
             param = params.get(port["name"])
             t = _type_of_annotation(param.ann) if param is not None else None
+            result_input = src == "input" and port["input"] in A.results
             if src == "wire":
                 made = by_id[port["from"]]["types"].get(port["wire"])
                 t = made if (t is None or (t == "table" and made == "flags")) and made else t
             elif src == "setting":
                 t = t or (_setting_type(by_setting[port["setting"]]) if port["setting"] in by_setting else None)
             elif src == "input":
-                t = t or ("data" if port["input"] == "corrections" else "text")
-            if t is None and port.get("_seen") is not None:
-                t = type_of_value(port["_seen"])
-            port.pop("_seen", None)
+                t = t or ("data" if port["input"] == "corrections" else "table" if result_input else "text")
+            seen = port.pop("_seen", None)
+            if t is None and seen is not None:
+                t = type_of_value(seen)
             port["type"] = t
-            if src == "wire" and n.kind == "call" and t in (None, "table", "flags"):
+            if result_input and run is not None:
+                if port["input"] not in delivered and isinstance(seen, dict) and seen.get("kind") == "table":
+                    delivered[port["input"]] = seen
+                port["value"] = delivered.get(port["input"])
+            if (src == "wire" or result_input) and n.kind == "call" and t in (None, "table", "flags"):
                 if at_call is not None:  # a ready-made step: the columns named at this call
                     read, made_cols = at_call.get(port["name"], []), set()
                 else:
                     cols = columns.of(n.fn)
                     read, made_cols = cols.get(port["name"], ([], set())) if cols else ([], set())
                 port["columns_read"] = list(read)
-                value = by_id[port["from"]]["values"].get(port["wire"])
+                value = by_id[port["from"]]["values"].get(port["wire"]) if src == "wire" \
+                    else delivered.get(port["input"])
                 if read and isinstance(value, dict) and value.get("kind") == "table":
                     have = set(value.get("columns") or [])
                     port["missing"] = [x for x in read if x not in have and x not in made_cols]
@@ -1451,6 +1474,14 @@ def graph(method: str | methodfile.Method | dict, run: dict | None = None, exper
                     "optional": False}
             if experiment is not None:
                 item["value"] = sum(1 for x in experiment.get("corrections") or [] if x.get("status") == "approved")
+        elif p in A.results:
+            item = {**file_inputs[p], "types": []}
+            if experiment is not None:
+                item["value"] = _sources_text(((experiment.get("sources") or {}).get(p)) or [])
+                item["sources"] = list(((experiment.get("sources") or {}).get(p)) or [])
+            if run is not None:
+                item["table"] = delivered.get(p)
+                item["read"] = ((run.get("sources") or {}).get(p) or {}).get("from") or []
         else:
             item = {**file_inputs.get(p, {"id": p, "kind": "file", "label": _humanize(p), "types": [],
                                           "optional": False})}
@@ -1963,7 +1994,7 @@ def _insert_param(A: _Analysis, text: str, name: str, has_default: bool, first_p
             if n == "/":
                 continue
             if first_place:
-                if methodfile.is_input(n):
+                if methodfile.is_input(n, A.results):
                     at = i + 1
             elif not d:
                 at = i + 1
@@ -2461,9 +2492,14 @@ def _op_set_default(A: _Analysis, op: dict) -> list:
 
 
 def _op_add_input(A: _Analysis, op: dict) -> list:
+    """A raw file (a name ending in _file), `corrections`, or with `kind: result` a result of other experiments
+    (its docstring line ends in `[result]`, or `[result: <result>]` with `result`)."""
+    if op.get("kind") == "result":
+        return _add_result_input(A, op)
     name = _check_name(A, _need(op, "name", "the input's name, ending in _file (e.g. plate_file)"), "input name")
     if not methodfile.is_input(name):
-        raise LabError(f"An input's name ends in _file (e.g. `{name}_file`), or is `corrections`.")
+        raise LabError(f"An input's name ends in _file (e.g. `{name}_file`), or is `corrections`; for results of "
+                       "other experiments give `kind: result`.")
     optional = bool(op.get("optional"))
     params = _insert_param(A, name + ("=None" if optional else ""), name, optional, first_place=True)
     types = op.get("types") or []
@@ -2473,6 +2509,24 @@ def _op_add_input(A: _Analysis, op: dict) -> list:
     label = (op.get("label") or ("The experiment's approved corrections" if name == "corrections"
                                  else _humanize(name.removesuffix("_file")))).strip()
     text = f"{name}: {label}" + (f" [{', '.join(types)}]" if types else "")
+    doc = _Doc(A)
+    doc.add("Inputs", text)
+    return [_signature_patch(A, params), doc.patch()]
+
+
+def _add_result_input(A: _Analysis, op: dict) -> list:
+    name = _check_name(A, _need(op, "name", "the input's name, e.g. scores"), "input name")
+    if name.endswith("_file") or name == "corrections":
+        raise LabError(f"`{name}` would be a raw file or the corrections: give a result input another name, e.g. "
+                       f"`{name.removesuffix('_file') if name != 'corrections' else 'results'}`.")
+    result = op.get("result")
+    if result is not None and (not isinstance(result, str) or not methodfile.RESULT_NAME.match(result.strip())):
+        raise LabError("`result` is the name the other experiments return the table under, one word like `scores` "
+                       "(or `step:<function>`).")
+    optional = bool(op.get("optional"))
+    params = _insert_param(A, name + ("=None" if optional else ""), name, optional, first_place=True)
+    label = (op.get("label") or _humanize(name)).strip().rstrip(".")
+    text = f"{name}: {label} [result{': ' + result.strip() if result else ''}]"
     doc = _Doc(A)
     doc.add("Inputs", text)
     return [_signature_patch(A, params), doc.patch()]

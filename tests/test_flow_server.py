@@ -181,7 +181,7 @@ async def test_every_example_is_listed_made_and_runs(tmp_path: Path):
 
     async with server(tmp_path) as s:
         listed = value(await s.call_tool("examples", {}))["examples"]
-        assert [e["id"] for e in listed] == ["survey", "gc"]
+        assert [e["id"] for e in listed] == ["survey", "gc", "compare"]
         assert all(e["title"] and e["description"] and e["method"] for e in listed)
         for e in listed:
             made = value(await s.call_tool("lab_sample", {"which": e["id"]}))
@@ -189,4 +189,4 @@ async def test_every_example_is_listed_made_and_runs(tmp_path: Path):
             run = value(await s.call_tool("run", {"experiment": made["experiment"]}))
             assert run["status"] == "done", (e["id"], run.get("error"))
         unknown = await s.call_tool("lab_sample", {"which": "nope"})
-        assert "Examples: survey, gc" in error_text(unknown)
+        assert "Examples: survey, gc, compare" in error_text(unknown)

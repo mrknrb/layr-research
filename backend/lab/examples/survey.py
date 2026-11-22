@@ -19,16 +19,18 @@ SURVEY_ITEMS = ["q1", "q2", "q3", "q4", "q5", "q6"]
 SURVEY_REVERSED = {"q3", "q5"}
 
 
-def write_survey(path: Path, seed: int = 11, n: int = 160) -> None:
+def write_survey(path: Path, seed: int = 11, n: int = 160, shift: float = 0.0) -> None:
     """A made-up survey: 160 respondents (urban, suburban, rural), age, six 1-5 answers on one attitude scale (q3 and
     q5 worded the other way round). Urban respondents and younger ones score a little higher; a few answers are
-    missing, two respondents answered too few items and one gave 3 to everything."""
+    missing, two respondents answered too few items and one gave 3 to everything. `shift` moves everyone's attitude
+    (another survey wave)."""
     rng = np.random.default_rng(seed)
     groups = rng.choice(["urban", "suburban", "rural"], size=n, p=[0.4, 0.35, 0.25])
     ages = rng.integers(18, 80, size=n)
     lines = ["respondent,group,age," + ",".join(SURVEY_ITEMS)]
     for i in range(n):
-        trait = rng.normal(0, 1) + {"urban": 0.45, "suburban": 0.15, "rural": -0.3}[groups[i]] - 0.012 * (ages[i] - 45)
+        trait = rng.normal(0, 1) + {"urban": 0.45, "suburban": 0.15, "rural": -0.3}[groups[i]] \
+            - 0.012 * (ages[i] - 45) + shift
         answers = []
         for item in SURVEY_ITEMS:
             a = int(np.clip(np.rint(3 + 1.05 * trait + rng.normal(0, 0.75)), 1, 5))

@@ -78,7 +78,11 @@ mcp = FastMCP(
         "(no transform, set_index().map(), index tricks); never change a table you were given (copy it); about 25 "
         "lines at most, else split. The recipe (the last function, or RECIPE = 'name'): only calls steps, keeps "
         "their results and returns a dict of named results; its parameters are the inputs (names ending in _file are "
-        "raw files; `corrections` gets the approved corrections) and the settings (defaults; keep existing setting "
+        "raw files; a parameter whose Inputs: line ends in [result] or [result: scores] reads results of other "
+        "experiments: the experiment picks them with experiment_create/experiment_update sources={input: "
+        "[{experiment, result}]} and the recipe gets one table, the picked tables stacked with the columns "
+        "experiment and experiment_id in front; `corrections` gets the approved corrections) and the settings "
+        "(defaults; keep existing setting "
         "names so stored experiments still work); its docstring documents them (Inputs:, Settings: with groups, "
         "Returns:). Every function starts with a docstring whose first line is one plain sentence; put a Formula: "
         "block in it for what isn't one expression. Units go in names (conc_mM, time_min, rate_mM_per_min). Imports: "
@@ -105,6 +109,11 @@ mcp = FastMCP(
         "run of an unsaved change: it saves nothing and isn't the experiment's latest run; run(fresh=true) "
         "calculates every step again. Numbers you report still come only from runs (result_table, provenance, "
         "value_get, function_inside), with the run id. "
+        "An experiment that reads others is `outdated` (experiments, experiment_get say why) when a source has newer "
+        "numbers; it is never rerun by itself: run it when the user wants the new numbers. To compare experiments, "
+        "use the built-in method compare-experiments (lab_sample which=compare shows it). "
+        "To refer to a result, a number, a step or a method from another plugin (a Wiki page), put the markdown of "
+        "reference_make there (a layr://research/open/... link); reference_get shows what a reference shows now. "
         "(2) Quick one-off analyses: load_csv (or load_sample) returns a dataset id; then describe, plot, ttest or "
         "anova it; list_datasets shows what is loaded."
     ),
@@ -910,12 +919,14 @@ def remove_dataset(dataset: Annotated[str, Field(description="The dataset id to 
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lab import ref_tools  # noqa: E402
 from lab import tools as lab_tools  # noqa: E402
 from lab.events import Emitter  # noqa: E402
 
 HUB = _Hub()
 EVENTS = Emitter(HUB.send, _hub_known)
 LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
+ref_tools.register(mcp, LAB)
 
 
 def _warm() -> None:

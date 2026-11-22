@@ -11,8 +11,16 @@ import { createEditor, highlight } from "./editor.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
 const BOX_TYPES = new Set(["table", "flags", "data", "figure"]);
-const UNIT = /_(mM_per_min|U_per_gCDW|gCDW_per_L|g_per_L|per_h|per_min|mM|uM|nM|min|pct|ms|h|s|nm|mL|uL|mg|g)$/;
-const READERS = { gaml: "read_gaml", table: "read_table" };
+// The units a name can end in (rate_mM_per_min → rate [mM/min]): the same list as the backend's (lab/latex.py UNITS),
+// so a column is labelled as the formulas label it.
+const UNITS = {
+  mM: "mM", uM: "µM", nM: "nM", M: "M", mol: "mol", mmol: "mmol", umol: "µmol", nmol: "nmol",
+  min: "min", s: "s", h: "h", ms: "ms", d: "d",
+  L: "L", l: "L", mL: "mL", ml: "mL", uL: "µL", ul: "µL",
+  g: "g", mg: "mg", ug: "µg", kg: "kg", gCDW: "gCDW", gcdw: "gCDW", gDW: "gDW",
+  U: "U", pA: "pA", mAU: "mAU", pct: "%", percent: "%", nm: "nm", um: "µm", mm: "mm",
+  degC: "°C", K: "K", rpm: "rpm", OD: "OD", Da: "Da", kDa: "kDa", bar: "bar",
+};
 
 // -------------------------------------------------------------------------------- small helpers
 
@@ -65,11 +73,25 @@ function fmtNum(x) {
   if (a >= 1e5 || a < 1e-3) return x.toPrecision(3);
   return String(+x.toPrecision(4));
 }
+/** A name's words and its unit, read from the end of the name: rate_mM_per_min → ["rate", "mM/min"]; growth_per_h →
+ * ["growth", "1/h"]; [name, null] when it ends in no unit. */
+function splitUnit(name) {
+  const tokens = String(name).split("_");
+  for (let i = 1; i < tokens.length; i++) {
+    let tail = tokens.slice(i);
+    const inverse = tail[0] === "per" && tail.length > 1;
+    if (inverse) tail = tail.slice(1);
+    if (tail[tail.length - 1] === "per" || !(tail[0] in UNITS)) continue;
+    if (!tail.every((t) => t in UNITS || t === "per")) continue;
+    const unit = tail.map((t) => (t === "per" ? "/" : UNITS[t])).join("");
+    return [tokens.slice(0, i).join("_"), inverse ? `1/${unit}` : unit];
+  }
+  return [name, null];
+}
 function colName(c) {
-  const m = UNIT.exec(c);
-  if (!m) return [c];
-  const unit = m[1].replace(/_per_/g, "/").replace(/^per_/, "1/").replace("pct", "%").replace("uM", "µM");
-  return [c.slice(0, m.index), h("span", { class: "fl-unit" }, unit)];
+  const [words, unit] = splitUnit(c);
+  if (!unit || !words) return [c];
+  return [words, h("span", { class: "fl-unit" }, unit)];
 }
 /**
  * A Python literal written in the code (a text in quotes, a number, True, False, None, a list or tuple of them) as a
@@ -228,9 +250,11 @@ function tableEl(columns, rows, maxCols = 99) {
 
 /**
  * The options are the contract's (build-contract.md › The flow component), and a few more a host may give:
- * `boxActions(node)` → [{label, run, title?}] (links at a box's foot), `runNote: false` (the host says itself that the
+ * `picker: "runs"` (the host picks the experiment: the bar offers only its runs), `boxActions(node)` →
+ * [{label, run, title?}] (links at a box's foot), `runNote: false` (the host says itself that the
  * shown run failed), `figure({run, output})` → an image's src (a returned figure in cards and the inside panel).
- * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now) and `fit()`.
+ * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now),
+ * `setInside("panel" | "host")` and `fit()`.
  * Keys: Escape closes the newest thing open, Delete removes the selected box (editable), Enter or Space on a box's
  * head looks inside.
  */
@@ -266,6 +290,7 @@ export function mountFlow(container, options = {}) {
   let VIEW = null; // the last layout
   let BLOCKS = {}; // ready-made steps by function
   let BLOCK_LIST = [];
+  let READERS = []; // the readers of raw files: [{function, module, label, extensions, out, param}]
   let FUNCS = []; // the method's own functions, read from the source
   let RUNS = null; // the chosen experiment's runs
   let EXPS = null; // experiments of this method
@@ -1593,6 +1618,7 @@ export function mountFlow(container, options = {}) {
   }
   function picker() {
     const box = h("span", { class: "fl-pick" });
+    if (O.picker === "runs") return runPicker(box);
     const methodName = G?.method?.name;
     if (EXPS === null) {
       box.append(h("b", { class: "fl-title" }, methodName || ""));
@@ -1610,19 +1636,22 @@ export function mountFlow(container, options = {}) {
       EXPS.map((e) => h("option", { value: e.experiment, selected: e.experiment === S.experiment }, e.title)));
     exp.addEventListener("change", () => pick(exp.value || null, null));
     box.append(h("span", { class: "fl-dim fl-lab" }, "Data"), exp);
-    if (S.experiment) {
-      const runs = (RUNS || []).filter((r) => !r.trial);
-      if (!runs.length) box.append(h("span", { class: "fl-dim" }, RUNS === null ? "…" : "not calculated yet"));
-      else {
-        const trial = S.run && !runs.some((r) => r.id === S.run);
-        const sel = h("select", { class: "layr-select fl-sel", title: "Which calculation of it" },
-          trial ? h("option", { value: S.run }, "Your change, calculated just now") : null,
-          runs.map((r, i) => h("option", { value: i === 0 ? "" : r.id },
-            `${i === 0 ? "Latest · " : ""}${when(r.started)}${statusWord(r.status)}`)));
-        sel.value = trial || (S.run && S.run !== runs[0].id) ? S.run : "";
-        sel.addEventListener("change", () => pick(S.experiment, sel.value || null));
-        box.append(sel);
-      }
+    return runPicker(box);
+  }
+  /** Which calculation of the chosen experiment flows through: its latest run, an earlier one, or a trial run. */
+  function runPicker(box) {
+    if (!S.experiment) return box;
+    const runs = (RUNS || []).filter((r) => !r.trial);
+    if (!runs.length) box.append(h("span", { class: "fl-dim" }, RUNS === null ? "…" : "not calculated yet"));
+    else {
+      const trial = S.run && !runs.some((r) => r.id === S.run);
+      const sel = h("select", { class: "layr-select fl-sel", title: "Which calculation of it", "aria-label": "Run" },
+        trial ? h("option", { value: S.run }, "Your change, calculated just now") : null,
+        runs.map((r, i) => h("option", { value: i === 0 ? "" : r.id },
+          `${i === 0 ? "Latest · " : ""}${when(r.started)}${statusWord(r.status)}`)));
+      sel.value = trial || (S.run && S.run !== runs[0].id) ? S.run : "";
+      sel.addEventListener("change", () => pick(S.experiment, sel.value || null));
+      box.append(sel);
     }
     return box;
   }
@@ -2592,32 +2621,36 @@ export function mountFlow(container, options = {}) {
     });
   }
   function addRawFile(e) {
+    // the kinds of file are the readers the toolbox and its add-ons announce (blocks › readers)
+    if (!READERS.length) {
+      bubble(e.currentTarget || e.target, "The toolbox's readers aren't known yet: try again in a moment.");
+      loadBlocks(true);
+      return;
+    }
+    const readerOf = (fn) => READERS.find((r) => r.function === fn) || READERS[0];
     ask(e, {
       title: "Add a raw file",
       text: "The file your instrument or spreadsheet gives you. A step that reads it is added with it.",
       fields: [
-        { name: "name", label: "What it holds", value: "", placeholder: "e.g. plate reads", help: "A short name: " +
-          "it becomes plate_reads_file in the code." },
-        { name: "kind", label: "Kind of file", kind: "select", value: "table", options: [["table",
-          "A table (CSV, TSV, Excel, SPSS, Stata)"], ["gaml", "A GC sequence (GAML from Chromeleon)"]] },
+        { name: "kind", label: "Kind of file", kind: "select", value: READERS[0].function,
+          options: READERS.map((r) => [r.function, `${r.label} (${r.extensions.join(", ")})`]) },
+        { name: "name", label: "What it holds (optional)", value: "", placeholder: "e.g. plate reads", help: "A short " +
+          "name: it becomes plate_reads_file in the code. Empty: the reader's usual name." },
       ],
       submit: "Add it",
       run: (v, where) => {
+        const r = readerOf(v.kind);
         const slug = v.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
           .replace(/_file$/, "");
-        if (!slug) {
-          bubble(where, "Say in a word or two what the file holds.");
-          return Promise.resolve(false);
-        }
-        const name = (/^\d/.test(slug) ? "f_" + slug : slug) + "_file";
-        const reader = READERS[v.kind];
-        const readerParam = BLOCKS[reader]?.fields.find((f) => f.kind === "file")?.name ||
-          (v.kind === "gaml" ? "gaml_file" : "table_file");
-        const types = v.kind === "gaml" ? [".gaml"] : [".csv", ".tsv", ".xlsx", ".sav", ".dta"];
-        return tryEdit([{ op: "add_input", name, types, label: v.name.trim() },
-          { op: "add_step", function: reader, args: { [readerParam]: { input: name } },
-            out: v.kind === "gaml" ? (G.nodes.some((n) => n.outs.includes("injections")) ? undefined : "injections") :
-              slug.replace(/^\d/, "t_$&") }], where);
+        const free = (n) => !G.nodes.some((x) => x.outs.includes(n)) && !(G.inputs || []).some((i) => i.id === n);
+        const base = slug ? (/^\d/.test(slug) ? "f_" + slug : slug) + "_file" : r.param;
+        let name = base;
+        for (let i = 2; INPUT[name]; i++) name = base.replace(/_file$/, `_${i}_file`);
+        const out = slug ? slug.replace(/^\d/, "t_$&") : r.out;
+        const readerParam = BLOCKS[r.function]?.fields.find((f) => f.kind === "file")?.name || r.param;
+        return tryEdit([{ op: "add_input", name, types: r.extensions, label: v.name.trim() || undefined },
+          { op: "add_step", function: r.function, args: { [readerParam]: { input: name } },
+            out: out && free(out) ? out : undefined }], where);
       },
     });
   }
@@ -2626,7 +2659,7 @@ export function mountFlow(container, options = {}) {
       title: "Add a setting",
       text: "A number or a choice the experiment can change. Connect it to a step's input afterwards.",
       fields: [
-        { name: "label", label: "What it is", value: "", placeholder: "e.g. Smallest peak area" },
+        { name: "label", label: "What it is", value: "", placeholder: "e.g. Lowest score kept" },
         { name: "name", label: "Name in the code", value: "", placeholder: "e.g. min_area",
           help: "Letters, digits and _." },
         { name: "value", label: "Its usual value", value: "", placeholder: "e.g. 5, or \"sample\"" },
@@ -2787,12 +2820,13 @@ export function mountFlow(container, options = {}) {
     loadPicker(mine).finally(() => mine === S.loadTicket && root.classList.remove("settling"));
     if (S.python) ensureSource().then(() => drawPython());
   }
-  async function loadBlocks() {
-    if (BLOCK_LIST.length) return;
+  async function loadBlocks(again = false) {
+    if (BLOCK_LIST.length && !again) return;
     try {
       const r = await call("blocks", {});
       BLOCK_LIST = r.blocks || [];
       BLOCKS = Object.fromEntries(BLOCK_LIST.map((b) => [b.function, b]));
+      READERS = r.readers || [];
     } catch {
       /* the palette is optional for drawing */
     }
@@ -2800,7 +2834,7 @@ export function mountFlow(container, options = {}) {
   async function loadPicker(mine) {
     const methodId = G?.method?.id || S.method;
     try {
-      if (EXPS === null || S.refreshExps) {
+      if (O.picker !== "runs" && (EXPS === null || S.refreshExps)) {
         const all = await read("experiments", {});
         EXPS = methodId ? all.filter((e) => e.method === methodId) : [];
         S.refreshExps = false;
@@ -2873,6 +2907,15 @@ export function mountFlow(container, options = {}) {
       if (JSON.stringify(p || null) === JSON.stringify(S.problem || null)) return;
       S.problem = p || null;
       drawNote();
+    },
+    /**
+     * Where looking inside a box happens: "panel" (the flow's own side panel) or "host" (the host shows the box's
+     * function itself, e.g. in its code editor; the side panel closes).
+     */
+    setInside(mode) {
+      if (mode === O.inside) return;
+      O.inside = mode;
+      if (mode !== "panel" && side.classList.contains("open")) closeSide();
     },
     /** Select a box by its node id, or by a line of the method file. */
     select(x) {

@@ -11,6 +11,9 @@ the user; an AI agent's change comes back with them so it fixes them):
   the packages the method lists in REQUIREMENTS;
 - PAGES, CORRECTIONS or REQUIREMENTS that can't be used as written (lab/pages.py);
 - a `rows` setting whose columns can't be read, or whose default doesn't fit its columns;
+- an `Inputs:` line that can't be used as written: a bracket that is neither file types (`[.csv, .xlsx]`) nor
+  `[result]` / `[result: name]`, `[result]` on a raw file or on `corrections`, a result's name that isn't one, an
+  input the recipe doesn't take, an entry that is really a setting, `[result]` written under `Settings:`;
 - reading or writing files, or the network, outside the toolbox;
 - a name used both for a function and for a result in the same function (Python then can't call the function).
 """
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 from typing import Any
 
 from . import methodfile
@@ -56,6 +60,7 @@ def check(source: str) -> dict[str, Any]:
     messages += _recipe(method)
     messages += _declarations(method)
     messages += _rows_settings(method)
+    messages += _inputs_section(method)
     names = {f.name for f in method.functions}
     formulas = {f.name for f in method.functions if f.kind == "formula"}
     for fn in method.functions:
@@ -124,6 +129,56 @@ def _rows_settings(method: methodfile.Method) -> list[dict[str, Any]]:
             methodfile.check_value(s, s.get("default"))
         except ValueError as e:
             out.append(_msg("warning", fn.line, f"The default of `{s['id']}` doesn't fit its columns: {e}", fn.name))
+    return out
+
+
+def _inputs_section(method: methodfile.Method) -> list[dict[str, Any]]:
+    """The recipe docstring's `Inputs:` lines that can't be used as written (see the module's docstring)."""
+    fn = method.recipe_function
+    if fn is None:
+        return []
+    out = []
+    lines = fn.source.splitlines()
+
+    def warn(text: str, name: str | None = None) -> None:
+        """A warning at the docstring line of `name` (else the recipe's def line)."""
+        at = next((fn.line + i for i, ln in enumerate(lines) if name and re.match(
+            rf"\s*{re.escape(name)}\s*(\([^)]*\))?\s*:", ln) and i > 0), fn.line)
+        out.append(_msg("warning", at, text, fn.name))
+
+    for name, text in fn.doc.inputs.items():
+        _, marker = methodfile.input_marker(text)
+        is_result, wanted = methodfile.result_marker(marker)
+        if marker is not None and not is_result and not re.fullmatch(r"(\s*\.[A-Za-z0-9]+\s*,?)+", marker):
+            warn(f"The input `{name}` ends with `[{marker}]`, which is neither file types (like `[.csv, .xlsx]`) nor "
+                 "`[result]` (a result of other experiments, e.g. `[result]` or `[result: scores]`).", name)
+            continue
+        if name not in fn.params:
+            what = "a result of other experiments" if is_result else "an input"
+            warn(f"`Inputs:` lists `{name}` as {what}, but the recipe `{fn.name}` has no parameter `{name}`: add it "
+                 f"to the recipe's parameters, or remove the line.", name)
+            continue
+        if is_result and name.endswith("_file"):
+            warn(f"`{name}` is marked `[result]`, but a name ending in _file always means a raw file: rename it "
+                 f"(e.g. `{name.removesuffix('_file')}`) to take a result of other experiments.", name)
+            continue
+        if is_result and name == "corrections":
+            warn("`corrections` is marked `[result]`, but that name always gets the experiment's corrections: give "
+                 "the result input another name, e.g. `results`.", name)
+            continue
+        if is_result and wanted is not None and not methodfile.RESULT_NAME.match(wanted):
+            warn(f"In `[result: {wanted}]` of `{name}`, the name after `result:` is the name the other experiments' "
+                 "recipe returns the table under: one word like `scores` (or `step:<function>` for a step's table).",
+                 name)
+            continue
+        if not is_result and not name.endswith("_file") and name != "corrections":
+            warn(f"`Inputs:` lists `{name}`, but it is neither a raw file (its name would end in _file) nor a result "
+                 f"of other experiments (its line would end in `[result]`), so it is a setting: move it under "
+                 "`Settings:`, or end its line with `[result]`.", name)
+    for s in fn.doc.settings:
+        if methodfile.result_marker(s.get("unit"))[0]:
+            warn(f"`{s['id']}` is marked `[result]` under `Settings:`: a result of other experiments is an input; "
+                 "move its line under `Inputs:`.", s["id"])
     return out
 
 
