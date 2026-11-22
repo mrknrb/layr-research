@@ -1884,7 +1884,7 @@ export function mountFlow(container, options = {}) {
       const box = h("div", { class: "fl-editor" });
       body.append(box);
       tallBox(box, "code");
-      editor = createEditor(box, { doc: ex.code, readOnly: true, chipsBelow: true,
+      editor = createEditor(box, { doc: ex.code, readOnly: true, chipsBelow: true, wrap: true,
         firstLine: !toolbox && ex.line ? ex.line : 1 });
     }
     if (node) {
@@ -1941,7 +1941,7 @@ export function mountFlow(container, options = {}) {
     const box = h("div", { class: "fl-editor" });
     body.append(box);
     tallBox(box, "code");
-    editor = createEditor(box, { doc: f.code || "", readOnly: true, firstLine: base, chipsBelow: true });
+    editor = createEditor(box, { doc: f.code || "", readOnly: true, firstLine: base, chipsBelow: true, wrap: true });
     if (R) add(body, sec(R.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), R.el);
     const lineOf = (n) => n - base + 1;
     const step = (dir) => {
