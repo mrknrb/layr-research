@@ -790,7 +790,6 @@ function tabKey(view) {
  * - `onRename({source, line, column})`: F2 (not when read-only): rename the name at the cursor.
  * - `firstLine`: the number shown for the first line (the code of one function, numbered as in its file).
  * - `chipsBelow`: values that don't fit at the end of their line go on their own row under it (a narrow editor).
- * - `wrap`: a line too long for the editor goes on in the next row instead of scrolling sideways.
  */
 export function createEditor(parent, opts = {}) {
   const ctx = { cards: cardManager() };
@@ -825,7 +824,6 @@ export function createEditor(parent, opts = {}) {
   };
 
   const extensions = () => [
-    opts.wrap ? EditorView.lineWrapping : [],
     lintGutter(),
     firstLine !== 1 ? lineNumbers({ formatNumber: (n) => String(n + firstLine - 1) }) : lineNumbers(),
     foldGutter({ openText: "⌄", closedText: "›" }),
