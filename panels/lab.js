@@ -619,7 +619,11 @@ async function makeExample(ev) {
   }
   if (!e) return;
   await show({ method: e.method, exp: e.experiment, tab: "flow", code: false });
-  startRun(e.experiment); // after the status above is cleared: the status now follows the run
+  // the run starts once the workspace has read what it shows (on Windows a run's files can't be replaced while they
+  // are being read: see the backend's store), and after the status above is cleared: the status follows the run
+  for (let i = 0; i < 60 && !ME?.flow?.graph; i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 400));
+  startRun(e.experiment);
 }
 
 // ------------------------------------------------------------------------------------------------ new experiment

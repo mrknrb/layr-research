@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -77,18 +78,31 @@ def step_output(step: dict[str, Any]) -> dict[str, Any]:
     return out if isinstance(out, dict) else {}
 
 
+def _replace(tmp: Path, path: Path) -> None:
+    """Put the finished file in place. Windows refuses while another thread has the old file open to read it
+    (a tool answering at that moment): try again for about a second before giving up."""
+    for attempt in range(40):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.025)
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(jsonable(value), indent=1, ensure_ascii=False), "utf-8")
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, "utf-8", newline="\n")
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def _read_json(path: Path) -> Any:
