@@ -16,6 +16,7 @@ import asyncio
 import base64
 import difflib
 import json
+import logging
 import os
 import threading
 import urllib.parse
@@ -209,6 +210,8 @@ def analysis(table_file, value_column="value", group_column="group", control="co
 
 def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     store = Store(data_dir / "lab")
+    if store.started_fresh:
+        logging.getLogger("research").warning("the data of an earlier version was cleared: %s starts fresh", store.root)
     packages.configure(store.root)
     pool = Pool()
     runner = Runner(store, pool)

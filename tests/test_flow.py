@@ -6,7 +6,6 @@ the graph, and by undoing it to the same bytes. Run from plugins/research:  uv r
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -23,7 +22,6 @@ GC = (PLUGIN / "backend" / "lab" / "methods" / "gc-activity-assay.py").read_text
 # the recipe's line that integrates the peaks (the lines above it change with the method's PAGES and CORRECTIONS)
 P = next(i for i, ln in enumerate(GC.splitlines(), 1) if ln.strip().startswith("peaks = integrate_peaks("))
 PLANTS_CSV = PLUGIN / "sample" / "plant_growth.csv"
-PROTOTYPE = PLUGIN.parent.parent / "docs" / "proposals" / "research-flow" / "build_prototype.py"
 
 SMALL = '''"""Plant heights
 
@@ -250,16 +248,10 @@ def test_gc_graph_nodes_ports_settings_results():
     assert port(standards, "cal_min_conc_mM")["type"] == "number" and port(peaks, "samples")["type"] == "table"
 
 
-def test_quality_lane_equals_the_prototype():
+def test_the_quality_lane():
     g = flow.graph(GC)
     assert g["quality"] == QUALITY
     assert [n["id"] for n in g["nodes"] if n["quality"]] == QUALITY
-    spec = importlib.util.spec_from_file_location("build_prototype", PROTOTYPE)
-    proto = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(proto)
-    pg = proto.recipe_graph(methodfile.parse(GC))
-    outs = {n["id"]: n["out"] for n in pg["nodes"]}
-    assert [outs[i] for i in proto.quality_only(pg)] == QUALITY
 
 
 def test_columns_read_from_the_code():

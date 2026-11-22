@@ -110,7 +110,8 @@ MAX_ROWS = 10_000  # rows of a loop's table per answer
 
 
 def _kind(values: list) -> str:
-    """number, text (booleans too), shape (a table's or list's size) or mixed; blanks don't count."""
+    """number, text (booleans too), shape (a table's or list's size, with a small list's preview) or mixed; blanks
+    don't count."""
     found = None
     for v in values:
         if v is None:
@@ -290,7 +291,8 @@ def register(mcp, store, api) -> None:
     @mcp.tool()
     def value_get(
         run: Annotated[str, Field(description="Run id.")],
-        file: Annotated[str, Field(description="The `file` of a value summary (values/…, steps/…, outputs/…).")],
+        file: Annotated[str, Field(description="The `file` of a value summary (values/…, steps/…, outputs/…, "
+                                                    "sources/…).")],
         offset: Annotated[int, Field(description="Rows to skip.")] = 0,
         limit: Annotated[int, Field(description="Rows to return (max 2000).")] = 50,
     ) -> dict[str, Any]:
@@ -334,7 +336,9 @@ def register(mcp, store, api) -> None:
         in its body, in the order of the code; a loop inside it is one column saying how many rounds it made in
         that round ({kind: loop, line, rounds}). A blank (null) is a round where that statement didn't run.
         Numbers, true/false and short texts are shown as they are; tables, lists and other big values only by
-        their size ({kind: table, rows, columns}, {kind: list, length}...).
+        their size ({kind: table, rows, columns}, {kind: list, length}...); a small list or dict of plain values
+        (at most 12) also by a short text of its content ({kind: dict, length: 7, preview: "respondent=17, q1=3,
+        ..."}).
         Gives {run, function, call, line, end_line, code, total (rounds made), kept (rounds with values), cut,
         why?, offset, columns: [{name, line, kind: number|text|shape|mixed|loop, cut?}], rows: [[round, value,
         ...]], failed?: {round, line, error}}. For a loop inside another loop, `outer` is {line, names, total, code}

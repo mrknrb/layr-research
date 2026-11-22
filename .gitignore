@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .layr-data/
 tests/panel/out/
+.ruff_cache/

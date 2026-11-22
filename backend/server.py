@@ -1,7 +1,9 @@
-"""layr research backend: an MCP server (FastMCP, stdio) for small data analyses.
+"""layr research backend: an MCP server (FastMCP, stdio) for explainable data analysis.
 
-Load a CSV table, look at it (describe), draw charts (plot) and compare groups (ttest, anova). Every result is kept
-in a history, so the panel shows what an AI agent did too. Files live in LAYR_DATA_DIR:
+The methods, experiments and runs of the Experiments panel are the tools of `lab/` (lab/tools.py and the modules it
+registers, lab/ref_tools.py), with their files under LAYR_DATA_DIR/lab (see lab/store.py). This file adds the quick
+analyses of the Quick analysis panel: load a CSV table, look at it (describe), draw charts (plot) and compare groups
+(ttest, anova). Every quick result is kept in a history, so the panel shows what an AI agent did too. Their files:
 
     datasets/<id>.csv + <id>.json   the loaded tables (normalized CSV) and what we know about them
     plots/<id>.png                  every chart drawn
@@ -64,7 +66,7 @@ mcp = FastMCP(
         "experiment applies a method's recipe to raw files with settings and corrections (experiments, "
         "experiment_create, experiment_update); run computes it in a separate process; result_table, figure, explain "
         "(each step, its formulas drawn from the code, this run's numbers), explain_function and provenance read the "
-        "results; compare_runs lists numbers that moved. "
+        "results; compare_runs lists numbers that moved; examples and lab_sample make a ready example to try. "
         "Rules: every number you tell the user comes from result_table / provenance, with the run "
         "id; never compute statistics yourself. Change a method only with method_write (the whole file, or one "
         "function): your change is a DRAFT that counts only when the user accepts it in the panel; method_write "
@@ -89,11 +91,12 @@ mcp = FastMCP(
         "toolbox, pandas, numpy, scipy, statsmodels, scikit-learn (sklearn), matplotlib and the maths modules; any "
         "other package from PyPI goes into the method's REQUIREMENTS (method_declare what=requirements; installed "
         "before its next run); no file or network access (raw files come in through the recipe, read_table reads "
-        "CSV, Excel, SPSS, Stata; results go out by returning them: tables, figures, single values, texts such as a "
+        "CSV, Excel, SPSS, Stata, SAS and JSON; results go out by returning them: tables, figures, single values, texts such as a "
         "model's summary). Quality checks: return a table named flags (toolbox flag(level, category, message, "
         "respondent=17) names any item). Corrections are of the kinds the method declares in CORRECTIONS "
-        "(correction_kinds lists them; a method that declares none takes none); each needs a reason and "
-        "stays proposed until the user approves it; don't call correction_decide yourself unless the user asks. "
+        "(correction_kinds lists them; a method that declares none takes none); propose one with "
+        "correction_propose: each needs a reason and stays proposed until the user approves it; don't call "
+        "correction_decide yourself unless the user asks. "
         "Each experiment has pages the method declares in PAGES, made of cards (text, number, table, figure, chart, "
         "review: a curve per item with regions to correct); change them, the kinds of correction or the packages "
         "only with method_declare (a draft for you, like method_write). "
@@ -105,12 +108,14 @@ mcp = FastMCP(
         "input or a result, group steps), call flow_edit: it returns the new source and saves nothing; then save it "
         "with method_write(source=...), which is a draft for you like any change. To see what happened inside a "
         "step in a run: function_inside (its code with the values of every line, loops' first and last rounds); "
+        "loop_rounds gives every round of one of its loops as a table (a row per round, a column per name); "
         "a value with a `file` is a table: read its rows with value_get. run(source=..., settings=...) is a trial "
         "run of an unsaved change: it saves nothing and isn't the experiment's latest run; run(fresh=true) "
         "calculates every step again. Numbers you report still come only from runs (result_table, provenance, "
         "value_get, function_inside), with the run id. "
         "An experiment that reads others is `outdated` (experiments, experiment_get say why) when a source has newer "
-        "numbers; it is never rerun by itself: run it when the user wants the new numbers. To compare experiments, "
+        "numbers; it is never rerun by itself: run it when the user wants the new numbers. experiment_delete "
+        "refuses to delete an experiment others read unless force=true (ask the user first). To compare experiments, "
         "use the built-in method compare-experiments (lab_sample which=compare shows it). "
         "To refer to a result, a number, a step or a method from another plugin (a Wiki page), put the markdown of "
         "reference_make there (a layr://research/open/... link); reference_get shows what a reference shows now. "

@@ -269,7 +269,7 @@ def test_every_round_of_a_loop_is_kept(lab):
     assert not st[("even",)]["cut"] and [r["round"] for r in st[("total",)]["rounds"]] == [1, 2, 3, 498, 499, 500]
     assert "every" not in inside and all("values" not in s for s in inside["statements"])  # no long lists there
     rec = record(lab.store, run)
-    assert rec["version"] == 2 and rec["every"]["kept"] > 0 and rec["every"]["cut"] == 0
+    assert rec["version"] == 3 and rec["every"]["kept"] > 0 and rec["every"]["cut"] == 0
     simple = inside_of(lab.store, run, "simple")
     assert "at" not in simple["every"][str(SIMPLE + 1)]  # ran in every round: round i is simply the i-th value
     assert simple["every"][str(SIMPLE + 5)]["at"][:3] == [1, 3, 5]  # `even = i`: the rounds it ran in
@@ -288,8 +288,9 @@ def test_loops_inside_loops(lab):
     inner = rounds_of(mcp, run, "nested", INNER)
     assert inner["total"] == inner["kept"] == 9 and inner["outer"]["line"] == OUTER and inner["outer"]["total"] == 3
     assert [c["name"] for c in inner["columns"]] == ["col", "cell", "cells"]
-    assert inner["rows"][0] == [1, 1, 0, 0, {"kind": "list", "length": 1}]
-    assert inner["rows"][6] == [3, 2, 1, 21, {"kind": "list", "length": 7}]  # outer round 3, round 2
+    assert inner["rows"][0] == [1, 1, 0, 0, {"kind": "list", "length": 1, "preview": "0"}]
+    # outer round 3, round 2: the list as it was in that round
+    assert inner["rows"][6] == [3, 2, 1, 21, {"kind": "list", "length": 7, "preview": "0, 1, 10, 11, 12, 20, 21"}]
     assert [r[:2] for r in inner["rows"]] == [[1, 1], [1, 2], [2, 1], [2, 2], [2, 3], [3, 1], [3, 2], [3, 3], [3, 4]]
 
 
@@ -299,11 +300,102 @@ def test_a_loop_that_fails_keeps_its_rounds(lab):
     mcp = tools_on(lab.store)
     got = rounds_of(mcp, run, "broken", BROKEN)
     assert got["total"] == 3 and [c["name"] for c in got["columns"]] == ["i", "x", "seen"]
-    assert got["rows"] == [[1, 0, 50, {"kind": "list", "length": 1}], [2, 1, 100, {"kind": "list", "length": 2}],
-                           [3, 2, None, None]]
+    assert got["rows"] == [[1, 0, 50, {"kind": "list", "length": 1, "preview": "50"}],
+                           [2, 1, 100, {"kind": "list", "length": 2, "preview": "50, 100"}], [3, 2, None, None]]
     assert got["failed"]["round"] == 3 and got["failed"]["line"] == X and "ZeroDivisionError" in got["failed"]["error"]
     x = by_line(inside_of(lab.store, run, "broken"))[("x",)]
     assert x["n"] == 3 and x["all"] == 2 and [r["round"] for r in x["rounds"]] == [1, 2, 3] and x["rounds"][-1]["failed"]
+
+
+ROWS = '''"""Rows"""
+
+import numpy as np
+import pandas as pd
+
+
+def answers(table):
+    """Go through the answers row by row."""
+    scores = []
+    for row in table.to_dict("records"):
+        values = [row["q1"], row["q2"], row["q3"]]
+        mean = np.mean(values)
+        pair = (row["respondent"], mean)
+        seen = {row["respondent"], row["group"]}
+        nested = {"row": row}
+        many = list(range(row["respondent"] + 12))
+        long = [row["note"]] * 12
+        scores.append(mean)
+    return scores
+
+
+def recipe(n=4):
+    """Run it."""
+    table = pd.DataFrame({"respondent": range(1, n + 1), "q1": [3] * n, "q2": [4.5] * n, "q3": [np.int64(2)] * n,
+                          "group": ["A", "B"] * (n // 2), "ok": [True] * n, "when": [pd.Timestamp("2024-05-01")] * n,
+                          "note": ["a fairly long note, " * 2] * n, "nothing": [None] * n})
+    scores = answers(table)
+    return {"scores": scores}
+'''
+
+ROWS_METHOD = {"id": "rows", "version": 1, "name": "Rows", "source": ROWS}
+ROWS_LOOP = next(i + 1 for i, t in enumerate(ROWS.splitlines()) if t.strip().startswith("for row in"))
+
+
+def rows_experiment(store, **params) -> dict:
+    exp = {"id": new_id("e"), "title": "rows", "method": "rows", "inputs": {}, "params": params,
+           "corrections": [], "created": now()}
+    store.save_experiment(exp)
+    return exp
+
+
+def test_small_lists_and_dicts_keep_a_preview_of_their_content(lab):
+    from lab.recorder import PREVIEW_TEXT
+
+    run = lab.runner.run(rows_experiment(lab.store), ROWS_METHOD, fresh=True)
+    assert run["status"] == "done", run.get("error")
+    got = rounds_of(tools_on(lab.store), run, "answers", ROWS_LOOP)
+    names = [c["name"] for c in got["columns"]]
+    assert names == ["row", "values", "mean", "pair", "seen", "nested", "many", "long", "scores"]
+    assert {c["name"]: c["kind"] for c in got["columns"]}["row"] == "shape"  # still a size, now with its content
+    first = dict(zip(names, got["rows"][0][1:]))
+    assert first["row"] == {"kind": "dict", "length": 9, "preview": "respondent=1, q1=3, q2=4.5, q3=2, group=A, ok=True, "
+                            "when=2024-05-01T00:00:00, …"}
+    assert len(first["row"]["preview"]) <= PREVIEW_TEXT
+    assert first["values"] == {"kind": "list", "length": 3, "preview": "3, 4.5, 2"}
+    assert first["pair"] == {"kind": "list", "length": 2, "preview": "1, 3.16667"}
+    assert first["seen"]["length"] == 2 and sorted(first["seen"]["preview"].split(", ")) == ["1", "A"]
+    assert first["nested"] == {"kind": "dict", "length": 1}  # not plain inside: its size only
+    assert first["many"] == {"kind": "list", "length": 13}  # more than 12 items: its size only
+    assert first["long"]["length"] == 12 and first["long"]["preview"].endswith(", …")
+    assert first["scores"] == {"kind": "list", "length": 1, "preview": "3.16667"}
+    last = dict(zip(names, got["rows"][-1][1:]))
+    assert last["many"] == {"kind": "list", "length": 16} and last["scores"]["preview"].count(",") == 3
+
+
+def test_a_preview_counts_against_the_budget(tmp_path):
+    from lab.recorder import Inside, Recorder, load, light_count
+    from lab.values import ValueStore
+
+    source = ROWS.replace("def recipe(n=4)", "def recipe(n=400)")
+    path = tmp_path / "rows.py"
+    path.write_text(source, "utf-8")
+    kept = {}
+    for budget in (10**6, 1500):
+        inside = Inside(source, str(path), ValueStore(tmp_path / str(budget)), all_budget=budget)
+        rec = Recorder(inside=inside)
+        module = load(source, path, rec, {}, "recipe")
+        inside.start()
+        try:
+            module.recipe()
+        finally:
+            inside.stop()
+        report = inside.report(rec.report()["calls"])
+        every = next(c for c in report["calls"].values() if c["function"] == "answers")["every"]
+        kept[budget] = (report["every"], every)
+    big, small = kept[10**6], kept[1500]
+    values = sum(len(col) for e in big[1].values() for col in e["values"].values())
+    assert big[0]["kept"] >= light_count(big[1]) > values  # previews count more than one value each
+    assert small[0]["cut"] >= 1 and small[0]["kept"] <= 1500 + 10  # one statement may pass it by its last previews
 
 
 def test_a_loop_longer_than_the_rounds_kept(lab):

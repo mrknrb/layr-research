@@ -5,16 +5,9 @@ survey, lab measurements, an instrument's export...). Nothing in the plugin's co
 belongs to one method lives in its method file, its example and, when it needs its own readers, a toolbox add-on.
 Two panels:
 
-- **Experiments** (`panels/lab.*`, `panels/flow.*`, `panels/pages.js`): an experiment's main screen is its method
-  drawn as a **flow** (boxes for steps, wires for the tables between them, each with this run's values); beside it
-  the experiment's **own pages**, made of cards the user puts together (numbers, tables, charts, texts, curves to
-  review); from a box open its code with its values, its tables, the checks, corrections; methods are edited in a
-  code editor (CodeMirror 6, `panels/editor.*`) or in the flow; a guide to the Python the methods use.
-- **Quick analysis** (`panels/main.*`): load a CSV, describe it, chart it, t-test and ANOVA (the 0.1 plugin).
-
-What 0.4 is and why: `docs/proposals/research-flow.md`; how its parts fit: `docs/proposals/research-flow/
-build-contract.md` (its "Tools as built" has every new tool with a real result). The step design of 0.2 (JSON lists
-of step types) is described, as history, in `docs/proposals/analysis-workflows.md`.
+- **Experiments** (`panels/lab.html`): methods and the experiments that use them, in one workspace (below).
+- **Quick analysis** (`panels/main.html`): load a CSV, describe it, chart it, t-test and ANOVA, with a history of
+  every result. "Research: Load the sample data" (Tools menu) loads the plant growth table of `sample/`.
 
 ## Words
 
@@ -25,8 +18,7 @@ of step types) is described, as history, in `docs/proposals/analysis-workflows.m
 - **Toolbox** (`backend/toolbox/`): ready-made functions a method imports (`from toolbox import fit_line`): reading
   tables, straight lines, quality flags, ready-made steps and charts. Its **add-ons** are its sub-packages
   (`backend/toolbox/<add-on>/`, imported as `from toolbox.<add-on> import ...`) with the functions for one kind of
-  data or instrument; the GC add-on (`toolbox/gc/`) reads GAML files and finds and measures peaks. Readable, not
-  editable in layr: to change one, copy it into the method (the panel does it).
+  data or instrument. Readable, not editable in layr: to change one, copy it into the method (the panel does it).
 - **Experiment**: a method's recipe applied to raw files, with settings and **corrections** of the kinds its method
   declares (leave out a respondent, recode an answer, a region's ends set by hand...), each with a written reason.
   Raw files are copied into the store by checksum and never changed.
@@ -50,6 +42,81 @@ of step types) is described, as history, in `docs/proposals/analysis-workflows.m
 - **Draft**: a change an AI agent wrote. It doesn't count until the user accepts it in the panel, where she sees the
   changed lines and the numbers that moved on the reference experiment. Her own saves count at once.
 - **Example**: an experiment with made-up raw files to try a method (`backend/lab/examples/<id>.py`, see below).
+- **Reference** (a link): `layr://research/open/<ref>`, a link to an experiment, a result, one number, a step, a
+  function or a method that another plugin (a Wiki page) shows and opens (see References).
+
+## The Experiments panel
+
+**Home**: the experiments grouped by the method they use, a section per method (a method nobody uses yet too, with
+its version and whether a draft of Claude's waits), each experiment a card with its files, what it reads and who
+reads it (links), its state (calculated, failed, running, out of date and why), its quality flags and proposed
+corrections. Above them: Python guide, Try an example ▾, New method, New experiment. New experiment asks for a
+title, a method, a file for each raw file input and the experiments each result input reads; opening an SPSS or
+Stata file (`.sav`, `.dta`) with the panel starts a new experiment with it.
+
+**The workspace**: one screen for a method and an experiment of it. The path at the top is Experiments › the method
+› the **experiment picker**: every experiment of the method (with its state, and "out of date"), New experiment…,
+or "No data: just the method". Beside it: More ▾ (versions, format the code, extra Python packages, the reference
+experiment, Copy link to the experiment or the method, the folder that runs without layr, duplicate the method, the
+Python guide), Export ▾ (a report as a web page, Word or Excel, a Methods paragraph for a paper, the folder that
+runs without layr, this run in a notebook), Save, Run all again (or Stop) and Run. A
+method is **shared** by all its experiments: the status line says "Shared with 2 other experiments" (a click lists
+them); a saved change is theirs too, and they show their old results until they are run again.
+
+The tabs:
+
+- **Flow & code**: the method's flow with this experiment's data on it (`panels/flow.js`), and under it the code
+  (`panels/editor.js`, CodeMirror 6). The code is folded away when an experiment opens (the flow fills the tab) and
+  shown for a method without data, or when a link or a box asks for a function; "Show the code" unfolds it. Beside
+  the code: the outline (recipe, steps, formulas, helpers, the toolbox, read only) and the inspector (what the
+  function at the cursor does, its formulas drawn as math, the checker's notes, Explain). The code shows this run's
+  values at the ends of its lines; a change is tried at once in a trial run (it can be switched off). A box of the
+  flow opens its side panel: its code with this run's values, its tables, its rounds, the checks, Copy link. A run
+  picked in the flow (Latest ▾) is what every tab shows.
+- **The experiment's own pages** (`panels/pages.js`): tabs made of cards the method declares (numbers, tables,
+  charts, texts, curves to review with regions to drag); "+ Page" and Edit page change them (a new version of the
+  method).
+- **Results**: one list of everything the run returned (its single values together as Numbers, then texts, tables,
+  figures, and each step's table); the one picked is shown beside it. Click a number to see how it was calculated;
+  right-click a cell to copy a link to it.
+- **Checks** (the `flags` table), **Corrections** (proposed, approved, rejected; add one with its reason; edit the
+  kinds of correction) and **Settings** (the settings form, the raw files, and for a result input the experiments it
+  reads: the picker, below).
+
+**Rounds tables** (`panels/rounds.js`): every `for` loop of a function gets a table under its code, in the flow's
+side panel and beside the code: one row per round, one column per name the loop gives (a blank where a line didn't
+run in that round; a loop inside it is one column with its number of rounds, which opens its own table for that
+round). Numbers, true/false and short texts are shown as they are; a table or a big list by its size; a small list
+or dict of plain values (at most 12) by its content, cut to the column (`respondent=17, q1=3, …`, the whole of it and
+its length in the cell's tooltip). Clicking a row (or ↑ ↓) makes the code show that round; Copy as CSV copies every
+round. Only the rows in view are on the page, 1,000 rounds are read at a time (`loop_rounds`), so a loop of 10,000
+rounds stays quick. A loop of more than 10,000 rounds keeps the first 10,000 and says so; a round that failed is
+marked and shown first.
+
+**Resizing** (`panels/resize.js`): the flow's side panel and the boxes in it, the outline and the inspector beside
+the code, the divider between flow and code, the Results list, a review card's list and the rounds tables are
+resized by dragging their edge; a double click puts the usual size back. The sizes are kept with the panel's state;
+on a narrow screen the boxes stack and keep their usual size.
+
+**Result inputs in the panel** (`panels/sources.js`): the picker lists the experiments that can be read (not this
+one, nothing that would make a loop), each with the tables its latest run has (the one the method asks for first);
+the picks are chips (each opens its experiment). After a change of the picks the experiment says it is out of date
+until it is run; in the flow a result input is a box with what it delivered; "where does this number come from" ends
+at the experiment, run, table and row it came from, with Open it there. Deleting an experiment others read asks
+first and names them.
+
+**References** (Copy link): every experiment card, the workspace's More menu, a result, a number in a table
+(right-click), a step in the flow's side panel, a function in the outline and a method have Copy link. It puts a
+readable Markdown link on the clipboard (`[mean score 3.42 · group B (Attitude survey)](layr://research/open/...)`):
+pasted in a Wiki page, the Wiki draws it as a card with what it shows now (a number with its value and whether it
+changed, a table, a figure, a step's code with its values...), from the experiment's latest finished run. Opening
+the link (layr.json's `links`: the Experiments panel with the param `ref`) goes there: the experiment, the result
+with the number highlighted, the step looked inside in the flow, the function in the code; what no longer exists is
+said in one notice.
+
+**Python guide** (`panels/guide.js`): the few Python and pandas patterns the methods use, each with an example
+(formulas, picking rows, for each group, going through rows, merging, the toolbox, f-strings, the recipe, reading
+another experiment's result, when something goes wrong).
 
 ## Writing a method
 
@@ -122,15 +189,16 @@ The conventions (`backend/lab/methodfile.py` has them in full):
   corrections whatever their line says; the checker explains a bracket it can't read, a misplaced `[result]` and
   an `Inputs:` line that is really a setting.
 - **Its docstring** documents them: `Inputs:` (`name: label [.ext, ...]` or `name: label [result]`), `Settings:`
-  (`name: Label. Help text`, optionally under group lines like `Fitting:`; `(type)` after the name picks the form's editor: text, number,
-  integer, boolean, list, object, rows; `[unit]` overrides the unit read from the name) and `Returns:` (`name:
-  label`). Without `(type)` the default's type decides; a setting without a default whose name ends in a unit is a
-  number.
+  (`name: Label. Help text`, optionally under group lines like `Fitting:`; `(type)` after the name picks the form's
+  editor: text, number, integer, boolean, list, object, rows; `[unit]` overrides the unit read from the name) and
+  `Returns:` (`name: label`). Without `(type)` the default's type decides; a setting without a default whose name
+  ends in a unit is a number.
 - **A small table as a setting**: `strains (rows: strain text, dilution number, optional note text): Strains.` Its
   value is a list of row dicts (`[{"strain": "WT", "dilution": 2.0}]`); each column has a type (text, number,
-  integer, boolean), may be `optional`, and gets its label and unit from its name (`rt_min` → rt [min]). The form
-  edits it as a table; values are checked row by row when an experiment's settings are saved (`methodfile.columns`,
-  `methodfile.check_value`), and the checker warns about a default that doesn't fit the columns.
+  integer, boolean), may be `optional`, and gets its label and unit from its name (`time_min` → time [min]). The
+  form edits it as a table; values are checked row by row when an experiment's settings are saved
+  (`methodfile.columns`, `methodfile.check_value`), and the checker warns about a default that doesn't fit the
+  columns.
 - **Every function starts with a docstring** whose first line is one plain sentence: it is shown everywhere. A
   `Formula:` block holds formulas that aren't one expression, one per line, in Python (drawn as math) or as `$LaTeX$`.
 - **Formulas** use only arithmetic (+ - * / ** and abs, sqrt, log, exp, min, max): they work on single numbers and
@@ -148,8 +216,8 @@ The conventions (`backend/lab/methodfile.py` has them in full):
     "item", "x", "y"}`) or from a raw file of the experiment (`{"file": "<input>"}`): a table file (CSV, Excel...)
     with the same item, x and y columns, any other kind through the **curve reader** the toolbox or an add-on
     registers for its extension (`toolbox/registry.py`: `register_curve_reader(".ext", fn)`, `fn(path, settings)`
-    gives `[{"item", "name"?, "x", "y"}]`; the GC add-on registers `.gaml`). The curves are thinned and kept in memory
-    for the last few files, so dragging a region stays fast.
+    gives `[{"item", "name"?, "x", "y"}]`). The curves are thinned and kept in memory for the last few files, so
+    dragging a region stays fast.
   - `CORRECTIONS`: the kinds of correction an experiment records, `{kind: {"label", "help", "fields": {name:
     "text" | "number" | "integer" | "boolean", "optional ..."}, "key"}}`; approved ones reach the recipe's
     `corrections` as `{"kind", field: value, ..., "reason"}`. A method that declares none has none (proposing one
@@ -174,16 +242,18 @@ can't be read or whose default doesn't fit them).
 `backend/lab/flow.py` reads the recipe into a graph: one box per recipe line. `name = step(...)` is a step box whose
 inputs are the step's parameters, each fed by a wire (a name an earlier box made), a setting, a raw file input, a
 result input (drawn like a raw file, `kind: result`, its value "2 experiments · scores", and with a run the table it
-delivered on its wire) or a value written in place; any other line (an `if`, a loop, arithmetic) is a code box showing its lines. A comment line
-`# --- Title` starts a group of boxes. The boxes whose results reach only the `flags` result are the quality lane.
-For each table input the flow knows which columns the step reads (from its code) and marks a wire whose recorded
-table lacks one. With a run, each box has its status (done, cached, failed, not run), its time and the value on every
-wire. Layout is automatic, left to right; no positions are stored.
+delivered on its wire) or a value written in place; any other line (an `if`, a loop, arithmetic) is a code box
+showing its lines. A comment line `# --- Title` starts a group of boxes. The boxes whose results reach only the
+`flags` result are the quality lane, folded into one box until unfolded. For each table input the flow knows which
+columns the step reads (from its code) and marks a wire whose recorded table lacks one. With a run, each box has its
+status (done, cached, failed, not run), its time and the value on every wire. Layout is automatic, left to right; no
+positions are stored.
 
 `flow.edit(source, op)` makes a flow change as an exact edit of the recipe: add or remove a step, connect or
 disconnect an input, rename a wire, add or remove a setting, an input (a raw file, or with `kind: result` a result
-of other experiments) or a result, set a default, group boxes, add a code box, start a new function. Only the lines it must touch change; comments stay byte for byte; lines are wrapped
-at 120 columns as the file is. A change that would break the method is refused in plain words.
+of other experiments) or a result, set a default, group boxes, add a code box, start a new function. Only the lines
+it must touch change; comments stay byte for byte; lines are wrapped at 120 columns as the file is. A change that
+would break the method is refused in plain words.
 
 ## How it runs, records and explains
 
@@ -194,9 +264,8 @@ at 120 columns as the file is. A change that would break the method is refused i
 - **Remembered steps**: a step whose code (and the code of the method's functions it uses), the toolbox, the
   libraries and the content of its inputs are the same as in an earlier run isn't calculated again: its result and
   its whole record come back from `LAYR_DATA_DIR/lab/cache/steps` and it is marked `cached`. After a changed setting
-  only the steps that depend on it run. "Run everything again" (`run` with `fresh`) and the reference comparison
-  calculate every step. A toolbox function can also remember slow results itself (`toolbox/cache.py`; the GC
-  add-on does for its files and peaks).
+  only the steps that depend on it run. "Run all again" (`run` with `fresh`) and the reference comparison calculate
+  every step. A toolbox function can also remember slow results itself (`toolbox/cache.py`).
 - **Experiments that read experiments** (`sources.py`): an experiment keeps its picks as `sources: {input:
   [{experiment, result}]}`, checked when saved in plain words (the experiment exists and isn't this one, the table
   is one it returns or its latest run has, nothing twice, no loop of any length). Before a run each source's latest
@@ -215,10 +284,14 @@ at 120 columns as the file is. A change that would break the method is refused i
   a formula used on a whole column keeps the column's index and values.
 - **Inside the functions**: with Python 3.12's `sys.monitoring`, on the method file's own code only (pandas and the
   toolbox run at full speed), every statement that gives a name a value keeps that value: in a loop the first 3 and
-  last 3 rounds and a failed one, with all rounds counted. Every table is stored once by its content
-  (`values.py`: `runs/<id>/values/<fingerprint>.csv.gz`), with a size budget per run past which tables are kept as
-  their first rows (and it says so). The values inside steps of old runs are cleared after a while to save space;
-  their results stay.
+  last 3 rounds in full and a failed one, with all rounds counted. **Every round** of a loop also keeps a light value
+  of each name, up to 10,000 rounds per loop: numbers, true/false, short texts and dates as they are, a table, an
+  array or a big list only its kind and size, and a small list, tuple, set or dict of plain values (at most 12) a
+  short preview of its content too (about 120 characters). A run keeps at most 2,000,000 light values (a preview
+  counts as more than one); past that, loops keep only their full rounds and the record says where it cut. Every
+  table is stored once by its content (`values.py`: `runs/<id>/values/<fingerprint>.csv.gz`), with a size budget
+  per run past which tables are kept as their first rows (and it says so). The values inside steps of old runs are
+  cleared after a while to save space; their results stay.
 - `explain.py` draws a formula's body as LaTeX (`latex.py`), shows a step's tables and the formulas used inside it
   with this run's numbers, and answers "where does this number come from": the recorded call that returned exactly
   that value (first among the calls inside the step that made the column; for a column-wise formula also by row),
@@ -236,9 +309,8 @@ at 120 columns as the file is. A change that would break the method is refused i
   in a notebook": a folder in JupyterLab's notebooks (the `jupyter` plugin's data folder) with the run's tables, the
   method and `explore.ipynb`.
 - Reports (`export.py`, HTML / Excel / Word): what went in (raw files, the results of other experiments with their
-  runs and times, settings), how every number was calculated (each step's sentence,
-  formulas drawn from the code, this run's numbers), results, flags, corrections with reasons, and the source code
-  as an appendix.
+  runs and times, settings), how every number was calculated (each step's sentence, formulas drawn from the code,
+  this run's numbers), results, flags, corrections with reasons, and the source code as an appendix.
 
 ## Blocks and code help
 
@@ -256,25 +328,9 @@ at 120 columns as the file is. A change that would break the method is refused i
   and the editor's help, explanations, the recorder (it wraps every imported `toolbox...` function), the remembered
   steps (their key hashes every file of the toolbox, add-ons included) and the exported folder (it copies them).
 - `lab/codeintel.py`: help in the editor from the plugin's own Python with Jedi: completion (columns of the tables
-  the last run saw come first after `peaks.` and inside `peaks["`), hover, the signature being typed, go to
+  the last run saw come first after `table.` and inside `table["`), hover, the signature being typed, go to
   definition, rename everywhere; Ruff lays a method out at 120 columns, only when asked. Jedi is warmed up in the
   background when the server starts.
-
-## Tools
-
-Methods: `methods`, `method_get`, `method_check`, `method_versions`, `method_diff`, `method_create`, `method_write`,
-`method_revert`, `method_reference`, `method_delete`, `draft_get`, `draft_decide` (the user's; `source` accepts a
-merged text), `toolbox_docs`, `toolbox_copy`. The flow: `flow_get`, `flow_edit` (saves nothing), `flow_new`, `blocks`.
-Experiments and runs: `experiments` (with each one's tables, what it reads, who reads it, why it is out of date),
-`experiment_get`, `experiment_create` and `experiment_update` (`sources`: the results of other experiments it reads),
-`experiment_delete` (`force` when others read it), `examples` and `lab_sample` (make one of them), `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
-`settings`), `run_stop`, `run_get`, `runs`, `compare_runs`. Results and explanations: `result_table`, `figure`,
-`provenance`, `explain`, `explain_function`, `function_inside` (a function's code with the values of every line),
-`value_get` (the rows of any stored table), the corrections, `export`, `method_export`, `notebook`. What a method declares: `method_declare` (pages, kinds of correction,
-packages), `correction_kinds`, and for the pages `curve` (one curve for a review card) and `result_value` (a
-returned value or text). The editor: `code_complete`, `code_hover`, `code_signature`,
-`code_definition`, `code_rename`, `code_format`. For the panel's AI buttons: `ai_prompt` (explain, a Methods
-paragraph, or write a step from her sentence). References: `reference_make`, `reference_get` (below).
 
 ## References
 
@@ -285,20 +341,11 @@ Another plugin (a Wiki page) refers to something in Research with an ordinary la
 too so a Markdown link isn't cut. `layr.json`'s `links` opens it in the Experiments panel with the param `ref`. The
 kind follows from the keys: an experiment, a result, one number (a table's row and column, or a single returned
 number), a step of an experiment (its code with the latest run's values), a function of a method, a method.
-`reference_make` checks the thing exists and gives the reference with its readable Markdown link ("Copy link":
-`[mean score 3.42 · group B (Attitude survey)](layr://research/open/...)`); `reference_get` gives what it shows
-now, always from the experiment's latest finished run: a title, a subtitle, a body (number, table of 8 × 8, image,
-text, code, facts), whether the experiment changed since that run (`stale`), the number's `was` and `now` when it
-moved, or a plain sentence when the thing is gone. The core (`lab/ref_tools.py`) is tested in `tests/test_refs.py`.
-
-## The survey example
-
-`survey-scores` (`backend/lab/methods/survey-scores.py`) shows the plugin on a study that has nothing to do with
-chemistry: Likert answers (CSV, Excel, SPSS or Stata) → corrections (leave out a respondent, recode an answer) →
-reversed items turned around → a score per respondent → Cronbach's alpha → group means → an OLS regression with
-statsmodels (its coefficients as a table, its full report as text) → quality checks per respondent. Its pages:
-Overview (alpha, respondents, a bar chart, the regression) and Respondents (a scatter chart, the scores). Make it
-with Try an example › A survey (`lab_sample` with `which: survey`).
+`reference_make` checks the thing exists and gives the reference with its readable Markdown link ("Copy link");
+`reference_get` gives what it shows now, always from the experiment's latest finished run: a title, a subtitle, a
+body (number, table of 8 × 8, image, text, code, facts), whether the experiment changed since that run (`stale`),
+the number's `was` and `now` when it moved, or a plain sentence when the thing is gone. The Wiki draws its cards
+from `reference_get`. The core (`lab/ref_tools.py`) is tested in `tests/test_refs.py`.
 
 ## Examples
 
@@ -308,7 +355,16 @@ description, method). Each has `ID`, `TITLE`, `DESCRIPTION`, `METHOD`, `EXPERIME
 `lab_sample(which=<id>)` stores the files, makes the experiment and, for the first one of a method, pins it as the
 method's reference experiment. An example whose method reads other experiments has `SOURCES` (the experiments to
 make and run first: `{key: {title, method, settings?, files}}`) and `PICKS` (`{input: [{source: key, result}]}`);
-`lab_sample` then also gives the ids of those experiments in `made`.
+`lab_sample` then also gives the ids of those experiments in `made`. Try an example ▾ on the home lists them.
+
+## The survey example
+
+`survey-scores` (`backend/lab/methods/survey-scores.py`) shows the plugin on a study that has nothing to do with
+chemistry: Likert answers (CSV, Excel, SPSS or Stata) → corrections (leave out a respondent, recode an answer) →
+reversed items turned around → a score per respondent → Cronbach's alpha → group means → an OLS regression with
+statsmodels (its coefficients as a table, its full report as text) → quality checks per respondent. Its pages:
+Overview (alpha, respondents, a bar chart, the regression) and Respondents (a scatter chart, the scores). Make it
+with Try an example › A survey (`lab_sample` with `which: survey`).
 
 ## The comparison example
 
@@ -320,42 +376,117 @@ experiment without numbers in the column, a single value). Try an example › Co
 `which: compare`, `lab/examples/compare.py`) makes two survey waves with survey-scores (made-up spring and autumn
 answers), runs them and makes the comparison of their `scores` per `group`.
 
-## The GC-FID activity assay
+## The GC-FID activity assay (a method, its add-on and its example)
 
 `gc-activity-assay` (`backend/lab/methods/gc-activity-assay.py`) is Ragini's assay (gcassay, her Python package,
-rewritten as one readable method): read the GAML export → sample names and design checks → reference retention
-times from the standards → RT-locked peak integration (with drift correction and the corrections) → internal
-standard ratio → calibration with LOD/LOQ → concentrations → time course → initial rates (U/gCDW) → interval rates →
-mass balance → quality checks → figure. Its GC-only functions are the toolbox's GC add-on (`toolbox/gc/`: GAML,
-peaks, the time-course figure; it registers `.gaml` as a reader and a curve reader), its example is
-`lab/examples/gc.py` (a made-up GAML sequence). Its compounds and sample name patterns are `rows` settings; the
-biomass is a number with an optional row per fed substrate. `tests/test_lab_real.py` proves its numbers equal
-gcassay's on a real run (set `GCASSAY_PROJECT` to the gcassay project folder; the data never leaves it; the test
-reads gcassay's config with its own helper, `tests/gcassay_config.py`).
+rewritten as one readable method): read the GAML export → sample names and design checks → reference retention times
+from the standards → RT-locked peak integration (with drift correction and the corrections) → internal standard ratio →
+calibration with LOD/LOQ → concentrations → time course → initial rates (U/gCDW) → interval rates → mass balance →
+quality checks → figure. Its GC-only functions are the toolbox's GC add-on (`toolbox/gc/`: GAML files, finding and
+measuring peaks, the time-course figure; it registers `.gaml` as a reader and a curve reader, and remembers its files
+and peaks with `toolbox/cache.py`); its example is `lab/examples/gc.py` (a made-up GAML sequence, Try an example › A GC
+activity assay). Its compounds and sample name patterns are `rows` settings; the biomass is a number with an optional
+row per fed substrate. `tests/test_lab_real.py` proves its numbers equal gcassay's on a real run (set `GCASSAY_PROJECT`
+to the gcassay project folder; the data never leaves it; the test reads gcassay's config with its own helper,
+`tests/gcassay_config.py`); without it the test is skipped.
+
+## Tools
+
+The same tools serve the panels and AI agents; `layr.json`'s access groups list each of them once.
+
+- **See** (group `read`): the quick analyses' `list_datasets`, `preview`, `describe`, `plot`, `ttest`, `anova`,
+  `history`, `get_plot`; methods: `methods`, `method_get`, `method_check` (the checker, without saving),
+  `method_versions`, `method_diff`, `draft_get`, `toolbox_docs`, `toolbox_copy` (a toolbox function's code to put
+  into a method), `correction_kinds`, `examples`; the flow: `flow_get`, `flow_edit` (a flow change as an edit of
+  the code; saves nothing), `flow_new` (the source of a new, empty method), `blocks`; experiments and runs:
+  `experiments` (with each one's tables, what it reads, who reads it, why it is out of date), `experiment_get`,
+  `runs`, `run_get`, `compare_runs`; results and explanations: `result_table`, `figure`, `result_value` (a returned
+  value or text), `curve` (one curve for a review card), `provenance`, `explain`, `explain_function`,
+  `function_inside` (a function's code with the values of every line), `loop_rounds` (every round of a loop as a
+  table), `value_get` (the rows of any stored table); the editor: `code_complete`, `code_hover`, `code_signature`,
+  `code_definition`, `code_rename`, `code_format`; `ai_prompt` (the panel's AI buttons: explain, a Methods
+  paragraph, a step from her sentence); references: `reference_get`, `reference_make`.
+- **Load** (group `load`): `load_csv`, `load_sample`, `file_import` (a file from this PC into the store),
+  `file_fetch` (a file the panel picked, through layr), `upload_chunk` and `upload_finish` (a file sent in pieces),
+  `experiment_create`, `lab_sample` (make an example).
+- **Build** (group `build`): `method_create`, `method_write` (an agent's is a draft), `method_declare` (pages, kinds of
+  correction, packages), `method_revert`, `method_reference`, `experiment_update` (title, settings, files, the method or
+  its version, notes, the Methods paragraph, the results of other experiments it reads), `run` (also everything again,
+  or a trial run of an unsaved change that saves nothing), `run_stop`, `export` (reports), `method_export` (the folder
+  that runs without layr), `notebook` (this run in a notebook).
+- **Propose** (group `propose`): `correction_propose` (with a reason; it waits for her approval).
+- **Approve** (group `approve`, the user's): `correction_decide`, `draft_decide` (accepts a merged text too).
+- **Remove** (group `remove`): `remove_dataset`, `experiment_delete` (refused while others read it, unless forced),
+  `method_delete`.
 
 ## For AI agents
 
 The server's instructions say the rules and the style; in short: numbers only from `result_table` / `provenance`
-(with the run id); a method changes only through `method_write` (the whole file or one function),
-which is a draft the user accepts and comes back with the checker's warnings to fix; `draft_get` shows the changed
-lines and the numbers that moved; `draft_decide` is the user's. Corrections need a reason and stay proposed until the
-user approves them. An agent reads the flow with `flow_get`, makes flow changes with `flow_edit` and saves the
-result with `method_write` (a draft like any change), looks inside a run with `function_inside` / `value_get`, and
-tries an unsaved change with `run` and `source` (a trial run that saves nothing). To compare experiments it makes
-an experiment of a method with a `[result]` input and picks them with `experiment_create` / `experiment_update`
-(`sources`); an experiment that is `outdated` is rerun only when someone runs it. The panel's Explain button, the
-Methods paragraph and "describe a step" ask Claude through the claude plugin's `ask` tool (an optional connection;
-the buttons hide without it) and mark the answer as written by AI; a step Claude writes is a draft she reviews.
+(with the run id); a method changes only through `method_write` (the whole file or one function), which is a draft
+the user accepts and comes back with the checker's warnings to fix; `draft_get` shows the changed lines and the
+numbers that moved; `draft_decide` is the user's. Corrections need a reason and stay proposed until the user
+approves them. An agent reads the flow with `flow_get`, makes flow changes with `flow_edit` and saves the result
+with `method_write` (a draft like any change), looks inside a run with `function_inside` / `loop_rounds` /
+`value_get`, and tries an unsaved change with `run` and `source` (a trial run that saves nothing). To compare
+experiments it makes an experiment of a method with a `[result]` input and picks them with `experiment_create` /
+`experiment_update` (`sources`); an experiment that is `outdated` is rerun only when someone runs it. To point at a
+number from a Wiki page it pastes `reference_make`'s Markdown. The panel's Explain button, the Methods paragraph and
+"describe a step" ask Claude through the claude plugin's `ask` tool (an optional connection; the buttons hide
+without it) and mark the answer as written by AI; a step Claude writes is a draft she reviews.
+
+## Files
+
+- `layr.json` (the manifest: panels, commands, menus, the link `open`, the access groups), `pyproject.toml` and
+  `uv.lock` (the Python packages), `sample/` (the Quick analysis sample table).
+- `backend/server.py`: the MCP server (stdio): the instructions for agents, the Quick analysis tools, and the lab's
+  tools registered from `backend/lab/`.
+- `backend/lab/`:
+  - `tools.py`: the tools for methods, experiments, runs, corrections, results and explanations; it registers the
+    others: `flow_tools.py` (the flow), `code_tools.py` (blocks and code help), `inside_tools.py` (`value_get`,
+    `function_inside`, `loop_rounds`). `ref_tools.py`: references (`reference_make`, `reference_get`).
+  - `store.py`: where methods, experiments, raw files and runs live (`LAYR_DATA_DIR/lab`). `sources.py`:
+    experiments that read experiments. `errors.py`: the plain-words error. `events.py`: the `research:lab` events.
+  - `methodfile.py`: reading a method without running it. `checker.py`: the style checker. `pages.py`: `PAGES`,
+    `CORRECTIONS`, `REQUIREMENTS`. `packages.py`: installing extra packages. `flow.py`: the flow and its edits.
+    `codeintel.py`: help while writing code (Jedi, Ruff).
+  - `runner.py`: a run, in `worker.py` (the calculation process). `recorder.py`: every call and every value inside
+    the functions, and the remembered steps. `values.py`: values stored once by content.
+  - `explain.py` and `latex.py`: how a number was calculated, formulas as math. `compare.py`: numbers that moved.
+    `export.py`: reports. `standalone.py`: the folder that runs without layr, and the notebook.
+  - `methods/`: the built-in methods. `examples/`: the examples (`__init__.py` says what a module holds).
+- `backend/toolbox/`: `tables.py` (reading tables, flags), `fit.py` (straight lines), `names.py` (a design from
+  sample names), `blocks.py` (ready-made steps), `plots.py` (colours), `cache.py` (remembering slow results),
+  `registry.py` (add-ons, readers, curve readers); each add-on is a folder of its own (see the method's section).
+- `panels/`:
+  - `lab.html`, `lab.js`, `lab.css`: the Experiments panel (home, new experiment, the workspace and its tabs, the
+    guide's page, links).
+  - `flow.js`, `flow.css`: the flow (and the CSS of the rounds tables and the resize handles). `editor.js`,
+    `editor.css`: the code editor (CodeMirror 6 from `vendor/cm6/`; KaTeX from `vendor/katex/` draws formulas).
+  - `pages.js`: the experiment's own pages and their cards. `rounds.js`: the rounds tables. `resize.js`: dragging an
+    edge. `sources.js`: the result inputs' picker and chips. `guide.js`: the Python guide. `units.js`: units in
+    names.
+  - `main.html`, `main.js`, `main.css`: the Quick analysis panel.
+  - `dev-editor.html`, `dev-flow.html`: pages to try the editor and the flow by themselves (not panels).
+- `tests/`: the Python tests, and `tests/panel/` the panel test bench.
 
 ## Tests
 
-From `plugins/research`: `uv run pytest tests -q` (add `GCASSAY_PROJECT=<folder>` for the real-data comparison).
-`tests/test_flow_server.py` drives 0.4 end to end through the server as layr starts it (the sample run, its flow
-with a value on every wire, the inside of a step, a changed setting with remembered steps, a block added and tried,
-every example made and run). `tests/test_sources.py` covers experiments that read experiments (declaring, picks
-and loops, stacking, the record, out of date, remembered steps, deleting, the flow, provenance, the exported
-folder, the comparison example through the server). `tests/test_generality.py` fails when a word of one method (GC, GAML, peak, compound,
-injection...) appears in the core (everything under `backend/` but the methods, the examples and the toolbox's
-add-ons; and `panels/pages.js`, `panels/guide.js`, `layr.json`).
-The panel: start `layr serve` with this plugin linked and its own home, then
-`node plugins/dev/research.test.mjs --port <port> --home <that home>`.
+From the plugin's folder: `uv run pytest tests -q` (`tests/test_lab_real.py` compares a built-in method's numbers with
+real data: it needs a folder its method's section names, and is skipped without it). `tests/test_flow_server.py` drives
+the flow end to end through the server as layr starts it (the sample run, its flow with a value on every wire, the
+inside of a step, a changed setting with remembered steps, a block added and tried, every example made and run).
+`tests/test_record.py` covers what a run records (values inside, every round of a loop and its previews, the budgets,
+remembered steps). `tests/test_sources.py` covers experiments that read experiments (declaring, picks and loops,
+stacking, the record, out of date, remembered steps, deleting, the flow, provenance, the exported folder, the comparison
+example through the server). `tests/test_generality.py` fails when a word that belongs to one method appears in the
+core: everything under `backend/` but the methods, the examples and the toolbox's add-ons; every file of `panels/` but
+`vendor/`; `layr.json`; this README outside the sections about one method; the panel test bench but the scripts that
+make that method's example on purpose.
+
+**The panel test bench** (`tests/panel/`, its README says everything): `harness.py` stands in for layr's core
+(serves the panels with layr's real panel SDK, starts the backend, answers menus, dialogs and the clipboard from
+queues a test fills), `lib.mjs` drives headless Chromium with Playwright. The scripts, each
+`node tests/panel/<name>.e2e.mjs`: `smoke`, `tabs`, `code` (the workspace and its tabs), `rounds` (the rounds
+tables), `resize` (every resizable place), `sources` (experiments that read other experiments) and `links` (Copy
+link everywhere, then every link opened). Screenshots go to `tests/panel/out/` (or `$SHOTS`); Playwright comes from
+`$PWTOOLS`, outside the plugin.

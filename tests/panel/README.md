@@ -14,8 +14,10 @@ export PYTHONDONTWRITEBYTECODE=1
 node tests/panel/smoke.e2e.mjs
 ```
 
-The scripts: `smoke`, `tabs`, `code` (the workspace and its tabs), `rounds` (the rounds tables of loops) and `resize`
-(every resizable place), each `tests/panel/<name>.e2e.mjs`. Screenshots go to `tests/panel/out/` (or `$SHOTS`), with the harness's stderr in `out/harness.log`. Playwright is not
+The scripts: `smoke`, `tabs`, `code` (the workspace and its tabs), `rounds` (the rounds tables of loops), `resize`
+(every resizable place), `sources` (experiments that read other experiments: the picker, out of date, the flow's
+input box, provenance › Open it there, deleting a source) and `links` (Copy link on every kind of thing, then each
+link opened through the param `ref`, broken links), each `tests/panel/<name>.e2e.mjs`. Screenshots go to `tests/panel/out/` (or `$SHOTS`), with the harness's stderr in `out/harness.log`. Playwright is not
 in the plugin: it is loaded from `$PWTOOLS` (default `C:/Users/mrknr/pwtools`, a folder whose `node_modules` has
 `playwright` and its Chromium). `UV_PROJECT_ENVIRONMENT` defaults to the venv above when it isn't set. The exit code
 says pass (0) or fail (1); the last lines say how long it took and that every process it started is gone.
@@ -115,10 +117,12 @@ reported, unknown layr methods, unmatched menu picks and error notifications (`u
   times out or is answered with `null` is dismissed, which the SDK reports as `null` to the panel.
 - **File dialogs** the same way: `h.answer("open", {name: "a.csv", text: "x,y\n1,2\n"})` before clicking; after a
   save, `h.files()` gives the path of what the panel wrote.
-- **Params** (a `layr://research/...` link opening the panel): `h.params({...})` while it is open, or
-  `h.setPanelState(null)` + `h.params(...)` before `open()` for a fresh panel opened with them. The manifest has no
-  `links` section yet, so the harness doesn't turn a `layr://` URL into params: a script gives the params object the
-  link should deliver.
+- **Params** (a `layr://research/open/<ref>` link opening the panel): `h.params({ref})` while it is open, or
+  `h.params(...)` before `open()` for a panel started with them (`layr.info.params`). The harness doesn't turn a
+  `layr://` URL into params itself (the manifest's `links` section says how layr does): a script decodes the link
+  and gives the params object it delivers, `{ref: decodeURIComponent(<the part after open/>)}`.
+- **The clipboard**: `layr.clipboard.writeText` goes through the shell bridge and is logged (`h.log(since,
+  "clipboard")`, each entry's `text`).
 - **Events** from the backend arrive at the panel only while it is subscribed; `h.log(0, "event")` shows what the
   backend sent.
 - The theme: `h.theme("light")`, then wait for `document.documentElement.dataset.theme === "light"`.

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -115,8 +116,13 @@ def result_file(store: Store, run: dict[str, Any], result: str):
 
 
 def when(stamp: str | None) -> str:
-    """A run's time as people read it: 2026-11-22 14:03."""
-    return (stamp or "")[:16].replace("T", " ")
+    """A run's time as people read it, in this computer's time zone (runs are stamped in UTC): 2026-11-22 14:03."""
+    if not stamp:
+        return ""
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return stamp[:16].replace("T", " ")
 
 
 # ---------------------------------------------------------------------------------------------------- picking

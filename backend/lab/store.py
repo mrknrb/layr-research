@@ -11,6 +11,7 @@
     runs/<id>/outputs/, steps/      its tables (CSV) and figures (PNG); calls.json: every recorded call
     cache/                          remembered slow results of toolbox functions (toolbox/cache.py) and steps
     exports/                        reports and folders written for the user
+    format.json                     which layout this folder has (FORMAT): a folder of an earlier one is emptied
 """
 
 from __future__ import annotations
@@ -120,9 +121,40 @@ def method_name(source: str, fallback: str) -> tuple[str, str]:
     return m.name or fallback, m.description
 
 
+# The layout of everything under the store's folder. It was 0.6 that first wrote this mark: what earlier versions
+# stored (experiments, runs, copies of the built-in methods) can't be read any more, and the person chose to start
+# fresh rather than convert it. A later change that real data must survive has to convert the data, NOT raise this.
+FORMAT = 6
+
+
+def start_fresh_if_older(root: Path) -> bool:
+    """Empties a store an earlier version of the plugin wrote (no mark, or another format), and marks it as this
+    version's. True when something was cleared. A new, empty folder is only marked."""
+    mark = root / "format.json"
+    try:
+        if _read_json(mark).get("format") == FORMAT:
+            return False
+    except (OSError, ValueError, AttributeError):
+        pass
+    cleared = False
+    if root.is_dir():
+        for child in list(root.iterdir()):
+            cleared = True
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+    _write_json(mark, {"format": FORMAT, "note": "The Research plugin's own mark: which layout this folder has."})
+    return cleared
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
+        self.started_fresh = start_fresh_if_older(root)
         for d in ("files", "methods", "experiments", "runs", "exports", "uploads", "cache"):
             (root / d).mkdir(parents=True, exist_ok=True)
 

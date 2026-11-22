@@ -22,9 +22,10 @@ full speed (their calls are still in calls.json, as far as `LIMIT`). The record 
 **Every round** (light values): a statement inside a loop, or one that runs more than once in a call, also keeps a
 light value of each name for every round, up to `ALL_ROUNDS` rounds: numbers, booleans, None, short texts and dates
 as they are; anything else (tables, lists, arrays, objects) only as its kind and size, with nothing copied, hashed or
-stored. Kept column-wise, one list per name, with the round of the statement's innermost loop beside each value, so
+stored. A small list, tuple, set or dict (at most `PREVIEW_ITEMS` items, all of them plain values) also keeps a short
+text of its content, its preview (`"3, 5, 2, 4"`, `"respondent=17, q1=3"`). Kept column-wise, one list per name, with the round of the statement's innermost loop beside each value, so
 a loop's rounds can be laid out as a table (one row per round, one column per name). A run keeps at most
-`ALL_BUDGET` light values; past it, statements keep only their full rounds, and the record says where it cut.
+`ALL_BUDGET` light values (a preview counts as one more for every `PREVIEW_COST` characters); past it, statements keep only their full rounds, and the record says where it cut.
 
 **Remembered steps** (`StepCache`): a step whose code and inputs are the same as in an earlier run isn't run again:
 its result and its whole record (calls, values inside, tables) come back from the cache.
@@ -61,6 +62,9 @@ INSIDE_LIMIT = 50  # calls per function whose values inside are recorded (the fi
 ALL_ROUNDS = 10_000  # rounds per statement and call whose light values are kept (every round, see `Inside`)
 ALL_BUDGET = 2_000_000  # light values kept per run, all statements together (a job's "all_budget" changes it)
 LIGHT_TEXT = 80  # characters of a text kept as a light value
+PREVIEW_ITEMS = 12  # a list, tuple, set or dict of at most this many plain items keeps a preview of its content
+PREVIEW_TEXT = 120  # characters of such a preview
+PREVIEW_COST = 20  # characters of a preview that count as one more light value against the run's budget
 
 
 def summarize(v: Any, depth: int = 0) -> Any:
@@ -350,8 +354,7 @@ class Recorder:
                 r2["call"] = int(rel) + call_id
                 self.inside.records[int(rel) + call_id] = r2
                 # its light values count for the run's budget, as when they were kept
-                self.inside.left -= sum(len(col) for e in (r.get("every") or {}).values()
-                                        for col in e["values"].values())
+                self.inside.left -= light_count(r.get("every") or {})
                 self.inside.cut_by_budget += sum(1 for st in r.get("lines") or [] if st.get("cut") == "budget")
         self.next_id = max(self.next_id, call_id + hit["span"])
         self.step_origin = hit["folder"]
@@ -605,8 +608,9 @@ def _odd_float(f: float) -> dict:
 
 def _light(v: Any) -> Any:
     """A value as kept for every round of a loop: plain values as they are (texts cut), anything else only its kind
-    and size, never its content. Plain ints, floats, texts and None are handled by `Inside._note` itself. Never
-    fails (an odd object is described by its type)."""
+    and size, never its content, except a small container of plain values: its preview too (`_light_list`, `_light_dict`). Plain
+    ints, floats, texts and None are handled by `Inside._note` itself. Never fails (an odd object is described by
+    its type)."""
     try:
         fast = _LIGHT_FAST.get(type(v))
         return fast(v) if fast is not None else _light_of(v)
@@ -614,12 +618,116 @@ def _light(v: Any) -> Any:
         return {"kind": "object", "type": type(v).__name__}
 
 
+def _item_text(x: Any) -> str | None:
+    """A plain value as it reads in a preview (a number, true/false, None, a short text, a date), else None."""
+    t = type(x)
+    if t is int:
+        return str(x)
+    if t is float or t is np.float64:
+        return format(x, ".6g") if x - x == 0 else "NaN" if x != x else "inf" if x > 0 else "-inf"
+    if t is str:
+        return (x or '""') if len(x) <= LIGHT_TEXT else None
+    if x is None:
+        return "None"
+    if t is bool or t is np.bool_:
+        return "True" if x else "False"
+    if isinstance(x, (int, np.integer)):
+        return str(int(x))
+    if isinstance(x, np.floating):
+        return _item_text(float(x))
+    if isinstance(x, (pd.Timestamp, datetime.datetime, datetime.date, datetime.time)):
+        return x.isoformat()
+    return None
+
+
+def _texts(items: Any) -> list[str] | None:
+    """Each item as it reads in a preview, or None when one of them isn't a plain value. Ints and short texts,
+    the commonest, without a call."""
+    out = []
+    for x in items:
+        t = type(x)
+        if t is int:
+            out.append(str(x))
+        elif t is str and 0 < len(x) <= LIGHT_TEXT:
+            out.append(x)
+        else:
+            x = _item_text(x)
+            if x is None:
+                return None
+            out.append(x)
+    return out
+
+
+def _joined(parts: list[str]) -> str:
+    """The parts of a preview as one text of about `PREVIEW_TEXT` characters at most: whole parts, then "…"."""
+    out = ", ".join(parts)
+    if len(out) <= PREVIEW_TEXT:
+        return out
+    kept, size = [], 0
+    for part in parts:
+        size += len(part) + 2
+        if size > PREVIEW_TEXT - 1:  # room for ", …"
+            break
+        kept.append(part)
+    if not kept:
+        return out[:PREVIEW_TEXT - 1] + "…"
+    return ", ".join(kept) + ", …"
+
+
+def _light_list(v: Any) -> dict:
+    """A list, tuple or set as a light value: its length, and when it is small and holds only plain values its
+    preview (`3, 5, 2, 4`)."""
+    n = len(v)
+    if 0 < n <= PREVIEW_ITEMS:
+        texts = _texts(v)
+        if texts is not None:
+            return {"kind": "list", "length": n, "preview": _joined(texts)}
+    return {"kind": "list", "length": n}
+
+
+def _light_dict(v: dict) -> dict:
+    """A dict as a light value: its length, and when it is small and holds only plain keys and values its preview
+    (`respondent=17, q1=3`)."""
+    n = len(v)
+    if 0 < n <= PREVIEW_ITEMS:
+        parts = []
+        for k, x in v.items():
+            if type(k) is not str or not 0 < len(k) <= LIGHT_TEXT:
+                k = _item_text(k)
+                if k is None:
+                    break
+            t = type(x)
+            if t is int:
+                x = str(x)
+            elif t is not str or not 0 < len(x) <= LIGHT_TEXT:
+                x = _item_text(x)
+                if x is None:
+                    break
+            parts.append(f"{k}={x}")
+        else:
+            return {"kind": "dict", "length": n, "preview": _joined(parts)}
+    return {"kind": "dict", "length": n}
+
+
+def light_count(every: dict) -> int:
+    """How many light values a record's `every` counts for against the run's budget (previews count more)."""
+    n = 0
+    for e in every.values():
+        for col in e["values"].values():
+            n += len(col)
+            for x in col:
+                if type(x) is dict and "preview" in x:
+                    n += len(x["preview"]) // PREVIEW_COST
+    return n
+
+
 _LIGHT_FAST = {  # the commonest kinds, by their exact type
     pd.DataFrame: lambda v: {"kind": "table", "rows": int(v.shape[0]), "columns": int(v.shape[1])},
     pd.Series: lambda v: {"kind": "column", "length": len(v)},
     np.ndarray: lambda v: {"kind": "array", "shape": list(v.shape)},
-    list: lambda v: {"kind": "list", "length": len(v)},
-    dict: lambda v: {"kind": "dict", "length": len(v)},
+    list: _light_list,
+    dict: _light_dict,
+    tuple: _light_list,
     bool: bool,
     np.int64: int,
     np.float64: lambda v: f if (f := float(v)) - f == 0 else _odd_float(f),
@@ -643,9 +751,9 @@ def _light_of(v: Any) -> Any:
     if isinstance(v, np.ndarray):
         return {"kind": "array", "shape": list(v.shape)}
     if isinstance(v, dict):
-        return {"kind": "dict", "length": len(v)}
+        return _light_dict(v)
     if isinstance(v, (list, tuple, set, frozenset)):
-        return {"kind": "list", "length": len(v)}
+        return _light_list(v)
     if isinstance(v, (bytes, bytearray)):
         return {"kind": "bytes", "size": len(v)}
     if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date, datetime.time)):
@@ -881,7 +989,10 @@ class Inside:
                     elif t is float:
                         col.append(v if v - v == 0 else _odd_float(v))
                     else:
-                        col.append(_light(v))
+                        lv = _light(v)
+                        col.append(lv)
+                        if type(lv) is dict and "preview" in lv:
+                            self.left -= len(lv["preview"]) // PREVIEW_COST
                 at = rec["at"]
                 if at is not None:
                     head = lines.get(s.loop)
@@ -979,7 +1090,7 @@ class Inside:
     def report(self, calls: list[dict[str, Any]]) -> dict[str, Any]:
         """The record written as inside.json:
 
-        {"version": 2, "rounds": 3, "calls_limit": 50 (calls per function with their values inside: the first
+        {"version": 3, "rounds": 3, "calls_limit": 50 (calls per function with their values inside: the first
          ones; steps always), "values": {dir, tables, bytes, budget, sampled, left_out},
          "every": {"rounds": 10000 (rounds kept per statement and call), "budget": light values per run, "kept":
                    light values kept, "cut": statements cut by the budget},
@@ -988,7 +1099,8 @@ class Inside:
                    innermost loop around it, "all"?: rounds with light values (rounds 1 to all), "cut"?: "rounds" |
                    "budget" (light values stop after round `all`), "failed_at"?: the round of its loop that
                    failed, "rounds": [{"round", "values": {name: summary}, "failed"?}]}],
-                   "every"?: {"<line>": {"values": {name: [light value per round]}, "at"?: [the round of the
+                   "every"?: {"<line>": {"values": {name: [light value per round: a plain value, or {kind,
+                              length | rows, columns | shape, preview?: the content of a small list or dict}]}, "at"?: [the round of the
                               innermost loop (`loop_line`) for each value; left out when value i is round i + 1]}},
                    "returned"?: summary, "error"?: text}}}
 
@@ -999,7 +1111,7 @@ class Inside:
         for cid in sorted(self.records):
             r = self.records[cid]
             out[str(cid)] = {"call": cid, "function": names.get(cid), **{k: v for k, v in r.items() if k != "call"}}
-        return {"version": 2, "rounds": self.rounds, "calls_limit": self.calls_limit, "values": self.values.report(),
+        return {"version": 3, "rounds": self.rounds, "calls_limit": self.calls_limit, "values": self.values.report(),
                 "every": {"rounds": self.all_rounds, "budget": self.all_budget,
                           "kept": self.all_budget - self.left, "cut": self.cut_by_budget},
                 "calls": out, "problems": self.errors}
@@ -1008,7 +1120,7 @@ class Inside:
 # ---------------------------------------------------------------------------------------------------- the cache
 
 
-CACHE_FORMAT = 4
+CACHE_FORMAT = 5
 CACHE_MAX = 2_000_000_000  # bytes on disk for remembered steps; the oldest are dropped past it
 ENTRY_MAX = 50_000_000  # a step whose result is bigger isn't remembered (reading it would cost more than running)
 WARM_MAX = 400_000_000  # bytes of remembered steps' results kept in memory between runs

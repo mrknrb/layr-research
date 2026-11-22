@@ -285,6 +285,12 @@ def test_flow_draws_the_input_and_edits_it(lab):
     item = next(i for i in g["inputs"] if i["id"] == "results")
     assert item["kind"] == "result" and item["value"] == "2 experiments · scores" and item["result"] == "scores"
     assert item["table"]["rows"] == run["sources"]["results"]["rows"] and item["table"]["file"]
+    # the panel shows the table it read, page by page, as any table of the run (value_get)
+    from lab import values
+
+    rows = values.read(store, run["id"], item["table"]["file"], offset=0, limit=5)
+    assert rows["total"] == item["table"]["rows"] and rows["columns"][:2] == ["experiment", "experiment_id"]
+    assert len(rows["rows"]) == 5
     assert item["used_by"] == ["doubled_scores", "counts"] and len(item["read"]) == 2
     port = next(p for p in g["nodes"][0]["ports"] if p["name"] == "results")
     assert port["source"] == "input" and port["type"] == "table" and port["value"]["kind"] == "table"

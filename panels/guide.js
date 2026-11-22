@@ -1,6 +1,6 @@
 // "Python for methods": the handful of Python and pandas patterns the methods use, each with a short example.
-// Shown as a page of the Experiments panel (Methods › Guide); the examples come from one made-up study, growth
-// curves (OD600 of cultures over time), in the shapes every method uses.
+// Shown as a page of the Experiments panel (Python guide, on its home and in a workspace's More menu); the examples
+// come from one made-up study, growth curves (OD600 of cultures over time), in the shapes every method uses.
 
 export const GUIDE = [
   {
@@ -102,7 +102,7 @@ table = rates.merge(strains, on="culture", how="left")`,
     text: [
       "The toolbox has the ready-made parts: read_table, fit_line (slope, intercept, se, r2, s_yx, n), flags, " +
         "ready-made steps and charts; its add-ons bring the parts for one kind of instrument. Read them in the " +
-        "method view's Toolbox list; to change one, copy it into your method.",
+        "Toolbox list beside the code; to change one, copy it into your method.",
     ],
     code: `from toolbox import fit_line
 
@@ -134,6 +134,23 @@ line.slope, line.se, line.r2`,
     table = read_table(table_file)
     relative = relative_to_control(table, value_column, control)
     return {"relative": relative}`,
+  },
+  {
+    title: "Reading another experiment's result",
+    text: [
+      "An input whose line in the docstring ends in [result] reads a table other experiments made instead of a file: " +
+        "the experiment picks which experiments (one or several) and which of their tables. The recipe gets them " +
+        "stacked as one table, with the columns experiment (the source's title) and experiment_id in front. When a " +
+        "source has newer numbers, the experiment says it is out of date; run it again to use them.",
+    ],
+    code: `def compare(results, value_column="rate"):
+    """Means of the experiments picked, side by side.
+
+    Inputs:
+        results: Results to compare [result]
+    """
+    means = mean_per_experiment(results, value_column)   # results has the column "experiment"
+    return {"means": means}`,
   },
   {
     title: "When something goes wrong",

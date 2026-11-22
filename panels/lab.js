@@ -9,7 +9,8 @@ import { createEditor, createMerge, highlight } from "./editor.js";
 import { mountFlow } from "./flow.js";
 import { createPages } from "./pages.js";
 import { resizable } from "./resize.js";
-import { cellKind, cellText, createRounds, roundWords } from "./rounds.js";
+import { cellKind, cellText, cellTitle, createRounds, roundWords } from "./rounds.js";
+import { createSources, tableWord } from "./sources.js";
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -28,6 +29,7 @@ const S = {
   fn: null, // the function the code shows (where the cursor is)
   line: null, // a line of the code to show, once
   result: {}, // what the Results tab shows, per experiment: {experiment: ":numbers" | an output | "step:<function>"}
+  target: null, // {exp, result, row, column, why}: a number (or a single value) the Results tab shows highlighted, once
   setting: null, // a setting to show, once, when the Settings tab opens
   review: {}, // each review card's item, region, filter and zoom (pages.js)
   focus: null, // {item, label} a review card opens at (a link from Checks or Corrections)
@@ -105,7 +107,7 @@ function setStatus(text) {
 }
 
 function save() {
-  const { line, setting, focus, newMethod, preset, ...keep } = S; // what only the next drawing uses isn't kept
+  const { line, setting, focus, newMethod, preset, target, ...keep } = S; // what only the next drawing uses isn't kept
   layr.panel.setState(keep).catch(() => {});
 }
 
@@ -159,8 +161,10 @@ function go(patch) {
  *     neither (on the workspace) keeps the one open.
  *   {view: "home"}, {view: "new", newMethod}, {view: "guide"}
  * tab: "flow" (Flow & code), "page:<n>", "results", "checks", "corrections", "settings". result: what the Results
- * tab shows (":numbers", an output's name, "step:<function>"). fn / line: a function or a line of the method's code
- * (they show the code under the flow). code: true shows the code, false folds it away; else opening an experiment
+ * tab shows (":numbers", an output's name, "step:<function>"; a single value's name shows it among the numbers,
+ * highlighted). cell: {row: {column: value, ...} picking one row, column}: that number of the result's table, scrolled
+ * into view and highlighted (filters cleared); why: true also opens how it was calculated. fn / line: a function or a
+ * line of the method's code (they show the code under the flow). code: true shows the code, false folds it away; else opening an experiment
  * starts with it folded, opening a method without data with it shown, and on the same workspace it stays as it is.
  */
 async function show(target = {}) {
@@ -188,6 +192,7 @@ async function show(target = {}) {
   if (t.line) patch.line = t.line;
   if ("run" in t) patch.run = t.run || null;
   if (t.result && exp) patch.result = { ...S.result, [exp]: t.result };
+  patch.target = t.result && exp && t.cell ? { exp, result: t.result, row: t.cell.row, column: t.cell.column, why: !!t.why } : null;
   if (t.setting) patch.setting = t.setting;
   if (t.focus) patch.focus = t.focus;
   go(patch);
@@ -215,9 +220,15 @@ function flagBadges(counts) {
   return out;
 }
 
-function openDialog({ title, body, buttons, wide = false }) {
+/**
+ * A modal dialog → the id (or `value()`) of the button pressed, null when closed. A button's `value()` may return a
+ * promise (the button waits); undefined keeps the dialog open (invalid, or an error shown in it). `size`: "wide",
+ * "medium" or nothing.
+ */
+function openDialog({ title, body, buttons, wide = false, size = wide ? "wide" : "" }) {
   return new Promise((resolve) => {
-    dialog.classList.toggle("wide", !!wide);
+    dialog.classList.toggle("wide", size === "wide");
+    dialog.classList.toggle("medium", size === "medium");
     put(
       dialog,
       h("h3", {}, title),
@@ -230,8 +241,18 @@ function openDialog({ title, body, buttons, wide = false }) {
             "button",
             {
               class: `layr-button ${b.kind || ""}`,
-              onclick: () => {
-                const v = b.value ? b.value() : b.id;
+              title: b.title || null,
+              onclick: async (e) => {
+                let v = b.value ? b.value() : b.id;
+                if (v && typeof v.then === "function") {
+                  const btn = e.currentTarget;
+                  btn.disabled = true;
+                  try {
+                    v = await v;
+                  } finally {
+                    btn.disabled = false;
+                  }
+                }
                 if (v === undefined) return; // invalid: keep open
                 dialog.close();
                 resolve(v);
@@ -278,9 +299,16 @@ async function askReason(title, hint) {
   });
 }
 
-function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
+/**
+ * A table of row objects. onRow(row) / onCell(row, column): clicks (only numbers are clickable cells); onMenu(row,
+ * column, event): a right-click on a cell that holds something. focus: {row (one of `rows`), column}: that cell is
+ * marked (class cell-focus) and its row is among the rows shown however far down it is.
+ */
+function table(rows, columns, { onRow, onCell, onMenu, focus, limit = 200 } = {}) {
   if (!rows.length) return h("div", { class: "layr-muted pad" }, "No rows.");
   const cols = columns || Object.keys(rows[0]);
+  const at = focus ? rows.indexOf(focus.row) : -1;
+  if (at >= limit) limit = at + 20;
   return h(
     "div",
     { class: "table-wrap" },
@@ -302,14 +330,20 @@ function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
         rows.slice(0, limit).map((r) =>
           h(
             "tr",
-            { class: onRow ? "click" : "", onclick: onRow && (() => onRow(r)) },
+            { class: `${onRow ? "click" : ""}${r === focus?.row ? " row-focus" : ""}`, onclick: onRow && (() => onRow(r)) },
             cols.map((c) =>
               h(
                 "td",
                 {
-                  class: typeof r[c] === "number" ? (onCell ? "num click" : "num") : "",
-                  title: typeof r[c] === "number" && onCell ? "How was this number calculated?" : null,
+                  class:
+                    (typeof r[c] === "number" ? (onCell ? "num click" : "num") : "") +
+                    (r === focus?.row && c === focus.column ? " cell-focus" : ""),
+                  title:
+                    typeof r[c] === "number" && onCell
+                      ? `How was this number calculated?${onMenu ? " (Right-click: copy a link to it)" : ""}`
+                      : null,
                   onclick: typeof r[c] === "number" && onCell ? () => onCell(r, c) : null,
+                  oncontextmenu: onMenu && r[c] != null && r[c] !== "" ? (e) => onMenu(r, c, e) : null,
                 },
                 fmt(r[c]),
               ),
@@ -321,6 +355,15 @@ function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
     rows.length > limit
       ? h("div", { class: "layr-muted pad" }, `${rows.length - limit} more rows (export to Excel for all).`)
       : null,
+  );
+}
+
+/** Whether a row has these values (numbers as numbers, anything else as text: as the backend compares them). */
+function rowHas(r, values) {
+  return Object.entries(values || {}).every(([k, v]) =>
+    typeof v === "number" && typeof r[k] === "number"
+      ? Math.abs(r[k] - v) <= 1e-9 * Math.max(1, Math.abs(v))
+      : String(r[k] ?? "") === String(v ?? ""),
   );
 }
 
@@ -414,6 +457,128 @@ function aiAnswer(text, label = "Written by AI (Claude): check it against the co
   );
 }
 
+// ------------------------------------------------------------------------------------------------ links
+
+// "Copy link" puts a reference to something in Research on the clipboard as a Markdown link (reference_make: its text
+// is readable anywhere, its address is layr://research/open/<ref>); a Wiki page draws it as a card. Such a link opens
+// this panel with the param `ref`, and openRef goes there.
+
+/** Copies the Markdown link of a reference (reference_make's arguments) → true when it is on the clipboard. */
+async function copyLink(args) {
+  let r;
+  try {
+    const { all, ...make } = args;
+    r = await call("reference_make", make);
+  } catch (err) {
+    // one number whose row the columns picked don't tell apart in the whole table: every column of the row then
+    if (args.row && args.all && /give more columns/.test(String(err?.message || err)))
+      return copyLink({ ...args, row: args.all, all: null });
+    layr.ui.notify(cleanError(err), "error");
+    return false;
+  }
+  try {
+    await layr.clipboard.writeText(r.markdown);
+  } catch (err) {
+    fail(err);
+    return false;
+  }
+  layr.ui.notify(
+    S.run && args.experiment ? "Link copied: paste it in a Wiki page (it always shows the latest run)" : "Link copied: paste it in a Wiki page",
+    "success",
+  );
+  return true;
+}
+
+/** A link to one value of a table: its row picked by the columns that tell it apart (rowKeys), more if needed. */
+function copyCellLink(exp, tableName, row, column, rows) {
+  const scalar = (v) => v !== null && v !== "" && typeof v !== "object";
+  const keys = rowKeys(rows || [row], row, column).filter((k) => scalar(row[k]));
+  let left = (rows || [row]).filter((r) => rowHas(r, Object.fromEntries(keys.map((k) => [k, row[k]]))));
+  for (const k of Object.keys(row)) {
+    if (left.length <= 1) break;
+    if (k === column || keys.includes(k) || !scalar(row[k])) continue;
+    const next = left.filter((r) => rowHas(r, { [k]: row[k] }));
+    if (next.length < left.length) {
+      keys.push(k);
+      left = next;
+    }
+  }
+  const pick = (ks) => Object.fromEntries(ks.map((k) => [k, row[k]]));
+  const all = pick(Object.keys(row).filter((k) => k !== column && scalar(row[k])));
+  return copyLink({ experiment: exp.id, result: tableName, row: pick(keys), column, all });
+}
+
+/** Waits until the workspace shows the experiment's flow, drawn (after a show()) → false when it doesn't come. */
+async function flowReady(expId, ms = 30_000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; ) {
+    if (S.view === "work" && ME?.exp === expId && ME.flow?.graph && !ME.els.flow.querySelector(".fl.loading"))
+      return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/**
+ * Opens the panel at a reference (the `ref` of a layr://research/open/… link: experiment, method, result, row,
+ * column, function, …). What no longer exists is gone round: it goes as far as it can and says what is missing in
+ * one notice.
+ */
+async function openRef(text) {
+  let ref = String(text || "").trim();
+  if (ref.startsWith("layr://research/open/")) ref = decodeURIComponent(ref.slice("layr://research/open/".length));
+  const p = Object.fromEntries(new URLSearchParams(ref.replace(/^\?/, "")));
+  let row = null;
+  let got;
+  try {
+    if (p.row) row = JSON.parse(p.row);
+  } catch {
+    layr.ui.notify("This link can't be opened: the row it names can't be read.", "warning");
+    return;
+  }
+  try {
+    got = await call("reference_get", { ref });
+  } catch (err) {
+    layr.ui.notify(`This link can't be opened: ${cleanError(err)}`, "warning");
+    return;
+  }
+  const tell = (text = got.missing) => text && layr.ui.notify(text, "warning");
+  try {
+    [EXPS, METHODS] = await Promise.all([call("experiments"), call("methods")]);
+  } catch (err) {
+    return fail(err);
+  }
+  if (p.experiment) {
+    const e = EXPS.find((x) => x.experiment === p.experiment);
+    if (!e) {
+      await show({ view: "home" });
+      return tell(got.missing || "This experiment no longer exists.");
+    }
+    const at = { method: e.method, exp: e.experiment };
+    if (p.function) {
+      // a step: the flow, its box selected and looked inside (the code stays folded: the flow's side panel shows it)
+      await show({ ...at, tab: "flow", code: false });
+      if (got.ok && (await flowReady(e.experiment))) ME.flow.lookInside(p.function);
+      return tell();
+    }
+    if (p.result) {
+      const number = got.ok && row && p.column;
+      await show({ ...at, result: p.result, ...(number ? { cell: { row, column: p.column } } : {}) });
+      return tell();
+    }
+    await show(at);
+    return tell();
+  }
+  if (p.method) {
+    if (!METHODS.some((m) => m.id === p.method)) {
+      await show({ view: "home" });
+      return tell(got.missing || "This method no longer exists.");
+    }
+    await show(p.function && got.ok ? { method: p.method, fn: p.function, code: true } : { method: p.method });
+    return tell();
+  }
+  tell("This link doesn't say what to open.");
+}
+
 // ------------------------------------------------------------------------------------------------ chrome
 
 /** The path at the top: [{label, go: a show() target}] links, {label} plain, {node} an element (a picker). */
@@ -460,15 +625,57 @@ function stateWord(e) {
 const outOfDate = (e, version) =>
   !!version && e.last_run?.status === "done" && e.last_run.method_version != null && e.last_run.method_version < version;
 
+/** Why the experiment is out of date because of what it reads, one reason per experiment read ("Spring: …"). */
+const sourceReasons = (e) => (e.outdated || []).map((o) => `${o.title}: ${o.reason}`);
+
 function expCard(e) {
+  const open = () => show({ method: e.method, exp: e.experiment });
+  const menu = (ev) => {
+    ev.stopPropagation();
+    layr.ui.contextMenu(
+      [
+        { label: "Open", icon: "open_in_new", run: open },
+        { label: "Copy link to this experiment", icon: "link", run: () => copyLink({ experiment: e.experiment }) },
+      ],
+      ev,
+    );
+  };
+  // the experiments it reads and those that read it, each a link
+  const titled = (ids) =>
+    [...new Set(ids)].map((id, i) => [
+      i ? ", " : "",
+      h(
+        "a",
+        {
+          href: "#",
+          onclick: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            show({ exp: id });
+          },
+        },
+        EXPS.find((x) => x.experiment === id)?.title || "a deleted experiment",
+      ),
+    ]);
+  const reads = (e.reads || []).map((r) => r.experiment);
+  const readBy = (e.read_by || []).map((r) => r.experiment);
+  const files = Object.values(e.files || {});
   return h(
     "div",
-    {
-      class: "layr-card exp-card click",
-      onclick: () => show({ method: e.method, exp: e.experiment }),
-    },
-    h("div", { class: "exp-title" }, e.title),
-    h("div", { class: "layr-muted small" }, Object.values(e.files || {}).join(", ") || "no file yet"),
+    { class: "layr-card exp-card click", onclick: open, oncontextmenu: menu },
+    h(
+      "div",
+      { class: "exp-head" },
+      h("div", { class: "exp-title" }, e.title),
+      h(
+        "button",
+        { class: "layr-button small ghost icon exp-more", title: "More", "aria-label": `More for ${e.title}`, onclick: menu },
+        "⋯",
+      ),
+    ),
+    files.length || !reads.length ? h("div", { class: "layr-muted small" }, files.join(", ") || "no file yet") : null,
+    reads.length ? h("div", { class: "layr-muted small exp-links" }, "Reads ", titled(reads)) : null,
+    readBy.length ? h("div", { class: "layr-muted small exp-links" }, "Read by ", titled(readBy)) : null,
     h(
       "div",
       { class: "exp-meta" },
@@ -478,12 +685,16 @@ function expCard(e) {
           ? [
               badge(stateWord(e), e.last_run.status === "done" ? "success" : "danger"),
               outOfDate(e, METHODS.find((m) => m.id === e.method)?.version) ? badge("older version of the method", "warning") : null,
+              e.outdated?.length ? badge("out of date", "warning") : null,
               ...flagBadges(e.last_run.summary?.flags),
               h("span", { class: "layr-muted small" }, when(e.last_run.finished)),
             ]
           : badge("not run yet", ""),
       e.proposed_corrections ? badge(`${e.proposed_corrections} proposed corrections`, "warning") : null,
     ),
+    e.outdated?.length && !e.running
+      ? h("div", { class: "exp-why small", title: sourceReasons(e).join("\n") }, sourceReasons(e).join(" · "))
+      : null,
   );
 }
 
@@ -650,11 +861,15 @@ async function makeExample(ev) {
 const extOf = (name) => (/\.[^./\\]+$/.exec(String(name || ""))?.[0] || "").toLowerCase();
 const reads = (inp, ext) => (inp.types || []).some((x) => String(x).toLowerCase() === ext);
 
-/** A new experiment: a title, a method, a file for each of its inputs (`preset`: a file the panel was opened with). */
+/**
+ * A new experiment: a title, a method, a file for each of its file inputs and the experiments each of its result
+ * inputs reads (`preset`: a file the panel was opened with).
+ */
 async function renderNew(t, preset) {
-  const methods = await call("methods");
+  const [methods, exps] = await Promise.all([call("methods"), call("experiments")]);
   if (t !== token) return;
   METHODS = methods;
+  EXPS = exps;
   setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: "New experiment" }]);
   setActions([]);
   layr.panel.setTitle("New experiment").catch(() => {});
@@ -666,6 +881,7 @@ async function renderNew(t, preset) {
     (ext && usable.find((m) => (m.inputs || []).some((i) => reads(i, ext)))?.id) ||
     usable[0]?.id;
   const files = {};
+  const picks = {}; // result input → [{experiment, result}]
   const title = h("input", { class: "layr-input", placeholder: "e.g. Attitude survey, spring wave" });
   const methodSel = h(
     "select",
@@ -673,11 +889,47 @@ async function renderNew(t, preset) {
     usable.map((m) => h("option", { value: m.id, selected: m.id === start }, m.name)),
   );
   const about = h("div", { class: "layr-muted small" });
+  const readsLabel = h("label", { class: "layr-label" }, "Raw data");
   const filesBox = h("div", {});
+  const err = h("div", { class: "layr-error", hidden: true });
+  const titleOf = (id) => EXPS.find((e) => e.experiment === id)?.title || id;
+  const resultRow = (inp) => {
+    const items = (picks[inp.id] || []).map((p) => ({ ...p, title: titleOf(p.experiment) }));
+    return h(
+      "div",
+      { class: "file-row src-input" },
+      h("span", {}, inp.label || inp.id),
+      " ",
+      SRC.chips(items, {
+        onRemove: (i) => {
+          picks[inp.id].splice(i, 1);
+          drawFiles();
+        },
+      }),
+      " ",
+      h(
+        "button",
+        {
+          class: "layr-button small",
+          onclick: async () => {
+            const got = await SRC.pick({ input: inp, picked: items, exps: EXPS, methods: METHODS });
+            if (got) {
+              picks[inp.id] = got;
+              drawFiles();
+            }
+          },
+        },
+        items.length ? "Change…" : "Pick experiments…",
+      ),
+    );
+  };
   const drawFiles = () => {
     const m = usable.find((x) => x.id === methodSel.value);
     const inputs = m?.inputs || [];
+    err.hidden = true;
     put(about, m?.description || "");
+    put(readsLabel, inputs.some((i) => i.kind === "result") ? "What it reads" : "Raw data");
+    for (const k of Object.keys(picks)) if (!inputs.some((i) => i.id === k && i.kind === "result")) delete picks[k];
     // the file the panel was opened with goes to the input that reads its kind of file
     for (const k of Object.keys(files)) if (!inputs.some((i) => i.id === k) || files[k] === preset) delete files[k];
     const home = preset ? inputs.find((i) => reads(i, ext)) : null;
@@ -686,7 +938,7 @@ async function renderNew(t, preset) {
       filesBox,
       inputs.length ? null : h("div", { class: "layr-muted" }, "This method reads no file."),
       inputs.map((inp) =>
-        h(
+        inp.kind === "result" ? resultRow(inp) : h(
           "div",
           { class: "file-row" },
           h("span", {}, inp.label || inp.id),
@@ -718,23 +970,36 @@ async function renderNew(t, preset) {
         : null,
     );
   };
-  methodSel.onchange = drawFiles;
+  methodSel.onchange = () => {
+    err.hidden = true;
+    drawFiles();
+  };
   drawFiles();
   const create = async () => {
+    const m = usable.find((x) => x.id === methodSel.value);
+    if (!m) return;
+    const say = (text) => {
+      put(err, text);
+      err.hidden = false;
+    };
+    const missing = (m.inputs || []).filter((i) => !i.optional && (i.kind === "result" ? !picks[i.id]?.length : !files[i.id]));
+    if (missing.length)
+      return say(
+        missing.map((i) => (i.kind === "result" ? `Pick the experiments for: ${i.label || i.id}` : `Choose the file for: ${i.label || i.id}`)).join(". "),
+      );
+    const firstPick = Object.values(picks).flat()[0];
     try {
-      const m = usable.find((x) => x.id === methodSel.value);
-      if (!m) return;
-      const missing = (m.inputs || []).filter((i) => !files[i.id] && !i.optional);
-      if (missing.length)
-        return layr.ui.notify(`Choose the file for: ${missing.map((i) => i.label || i.id).join(", ")}`, "error");
       const e = await call("experiment_create", {
-        title: title.value.trim() || `${m.name}: ${Object.values(files)[0]?.name || "experiment"}`,
+        title:
+          title.value.trim() ||
+          `${m.name}: ${Object.values(files)[0]?.name || (firstPick ? titleOf(firstPick.experiment) : "experiment")}`,
         method: m.id,
         files,
+        ...(Object.keys(picks).length ? { sources: picks } : {}),
       });
       show({ method: m.id, exp: e.experiment, tab: "settings", code: false });
-    } catch (err) {
-      fail(err);
+    } catch (e) {
+      say(cleanError(e)); // e.g. a pick the backend refuses, said in plain words
     }
   };
   put(
@@ -748,8 +1013,9 @@ async function renderNew(t, preset) {
       h("label", { class: "layr-label" }, "Method"),
       methodSel,
       about,
-      h("label", { class: "layr-label" }, "Raw data"),
+      readsLabel,
       filesBox,
+      err,
       h(
         "div",
         { class: "row-end" },
@@ -798,6 +1064,40 @@ const PG = createPages({
   sizeOf: (place) => sizeOf(place), // where a size she drags is remembered (resize.js)
 });
 
+// What an experiment reads of other experiments: the picker and its chips (sources.js); a chip opens that experiment.
+const SRC = createSources({ h, put, openDialog, when, stateWord, onOpen: (id) => show({ exp: id }) });
+
+/** Picks what one of the experiment's result inputs reads, and keeps it (the experiment isn't run by itself). */
+async function pickSources(exp, inputId) {
+  const inp = (exp.method_inputs || []).find((i) => i.id === inputId) || { id: inputId, label: human(inputId) };
+  try {
+    [EXPS, METHODS] = await Promise.all([call("experiments"), call("methods")]);
+  } catch (err) {
+    return fail(err);
+  }
+  const got = await SRC.pick({
+    input: inp,
+    picked: exp.sources?.[inputId] || [],
+    exps: EXPS,
+    methods: METHODS,
+    self: exp.id,
+    save: (list) => saveSources(exp, inputId, list),
+  });
+  if (!got) return;
+  layr.ui.notify("Saved: press Run to calculate with what it reads now", "success");
+  render();
+}
+
+/** Keeps what a result input reads → null, or the backend's sentence when it refuses (a loop, a missing table…). */
+async function saveSources(exp, inputId, list) {
+  try {
+    await call("experiment_update", { experiment: exp.id, sources: { [inputId]: list } });
+    return null;
+  } catch (err) {
+    return cleanError(err);
+  }
+}
+
 /** The run the experiment's tabs show: an earlier one picked in the flow, else its latest (never a trial run). */
 const runArgs = (exp) => (S.run ? { run: S.run } : exp.last_run?.id ? { run: exp.last_run.id } : { experiment: exp.id });
 
@@ -821,7 +1121,7 @@ async function renderWork(t) {
   if (!ME || ME.method !== m.id) openWork(m, docs, mine, S.exp ? exp : null);
   ME.mine = mine;
   ME.expObj = S.exp ? exp : null;
-  if (ME.numbersExp !== S.exp) switchExperiment();
+  if (ME.exp !== S.exp) switchExperiment();
   layr.panel.setTitle(ME.expObj ? ME.expObj.title : m.name).catch(() => {});
   setCrumbs([
     { label: "Experiments", go: { view: "home" } },
@@ -842,7 +1142,7 @@ function expPicker() {
       h(
         "option",
         { value: e.experiment, selected: e.experiment === S.exp },
-        `${e.title} · ${stateWord(e)}${outOfDate(e, ME.m.version) ? " · out of date" : ""}`,
+        `${e.title} · ${stateWord(e)}${outOfDate(e, ME.m.version) || e.outdated?.length ? " · out of date" : ""}`,
       ),
     ),
     ME.mine.length ? h("option", { disabled: true }, "──────────") : null,
@@ -932,6 +1232,9 @@ function moreMenu(ev) {
             run: () => setReference(isRef ? null : exp.id),
           }
         : null,
+      "-",
+      exp ? { label: "Copy link to this experiment", icon: "link", run: () => copyLink({ experiment: exp.id }) } : null,
+      { label: "Copy link to the method", icon: "link", run: () => copyLink({ method: ME.method }) },
       "-",
       exp ? null : { label: "Folder that runs without layr (zip)", icon: "folder_zip", run: () => exportFolder({ method: ME.method }) },
       { label: "Duplicate the method…", icon: "content_copy", run: () => duplicate(ME.m) },
@@ -1063,6 +1366,28 @@ function expBanners(exp, tab) {
       ),
     );
   else if (!last) out.push(h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run."));
+  else if (exp.outdated?.length && !S.run)
+    // what it reads changed since its last run (it isn't run by itself: one click on Run)
+    out.push(
+      h(
+        "div",
+        { class: "banner outdated" },
+        h("b", {}, "Out of date: "),
+        "what it reads changed since its last run. Press Run to calculate it with what they hold now.",
+        h(
+          "ul",
+          { class: "outdated-why" },
+          exp.outdated.map((o) =>
+            h(
+              "li",
+              {},
+              EXPS.some((x) => x.experiment === o.experiment) ? link(o.title, () => show({ exp: o.experiment })) : h("b", {}, o.title),
+              `: ${o.reason}`,
+            ),
+          ),
+        ),
+      ),
+    );
   else if (exp.changed && exp.changed > (last.started || last.finished) && !S.run)
     out.push(h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate."));
   else if (!S.run && !exp.method_version && outOfDate(exp, ME?.m.version))
@@ -1127,6 +1452,14 @@ function boxActions(n) {
   if (n.folded && n.quality)
     return [{ label: "See the checks", title: "Every check with what it found", run: () => go({ tab: "checks" }) }];
   if (n.input?.kind === "corrections") return [{ label: "Open the corrections", run: () => go({ tab: "corrections" }) }];
+  if (n.input?.kind === "result")
+    return [
+      {
+        label: (n.input.sources || []).length ? "Change what it reads" : "Pick experiments",
+        title: "The experiments this experiment reads, and the table of each",
+        run: () => pickSources(exp, n.input.id),
+      },
+    ];
   if (n.input)
     return [
       {
@@ -1162,7 +1495,7 @@ async function settingChanged(id, value) {
 
 /** Another experiment's data (or none) goes through the method: unsaved code stays and is calculated on it. */
 function switchExperiment() {
-  ME.numbersExp = S.exp;
+  ME.exp = S.exp;
   ME.trialRun = null;
   ME.trialSource = ME.dirty ? null : ME.saved;
   ME.trialNote = null;
@@ -1172,7 +1505,7 @@ function switchExperiment() {
   ME.flow.update({ experiment: S.exp, run: S.run || null }).then(() => {
     // its latest run is of an older version of the code: the code as it is now is tried on it (steps reused), so
     // every box has its numbers
-    if (ME === me && !ME.dirty && ME.flow.graph?.stale && S.autoRecalc !== false && ME.numbersExp && !S.run && !ME.busy)
+    if (ME === me && !ME.dirty && ME.flow.graph?.stale && S.autoRecalc !== false && ME.exp && !S.run && !ME.busy)
       recalc(ME.ed.getValue());
   });
   drawValues();
@@ -1284,7 +1617,7 @@ function startRun(expId, { fresh = false } = {}) {
   const mine = (live = { exp: expId, step: null });
   S.run = null;
   setStatus("Calculating…");
-  const flowOf = () => (ME && ME.numbersExp === expId ? ME.flow : null);
+  const flowOf = () => (ME && ME.exp === expId ? ME.flow : null);
   // The run answers when it is done (a remembered run in well under a second); its steps light up from its events.
   // A long one answers "running" after the wait: then it is asked again every half second.
   call("run", { experiment: expId, wait_s: 30, ...(fresh ? { fresh: true } : {}) }).then(
@@ -1473,18 +1806,26 @@ async function tabResults(body, exp, t) {
     return;
   }
   let pick = S.result?.[exp.id];
+  // a number to show highlighted (a link to it, "Open it there"); a single value is shown among the numbers
+  const target = S.target?.exp === exp.id ? S.target : null;
+  S.target = null;
+  let value = null;
+  if (outs[pick]?.kind === "value") {
+    value = pick;
+    pick = ":numbers";
+  }
   if (!entries.some((e) => e.id === pick))
     pick = (entries.find((e) => e.kind === "numbers") || entries.find((e) => e.kind === "table") || entries[0]).id;
   const shown = h("div", { class: "result-shown" });
   const list = h("div", { class: "result-list", role: "listbox", "aria-label": "What the run returned" });
-  const choose = (id) => {
+  const choose = (id, focus = {}) => {
     S.result = { ...S.result, [exp.id]: id };
     save();
     for (const el of list.querySelectorAll(".result-item")) {
       el.classList.toggle("active", el.dataset.id === id);
       el.setAttribute("aria-selected", el.dataset.id === id ? "true" : "false");
     }
-    drawResult(shown, exp, run, entries.find((e) => e.id === id), outs, t);
+    drawResult(shown, exp, run, entries.find((e) => e.id === id), outs, t, focus);
   };
   let group = null;
   for (const e of entries) {
@@ -1518,35 +1859,64 @@ async function tabResults(body, exp, t) {
     apply: (px) => (px == null ? grid.style.removeProperty("--list-w") : grid.style.setProperty("--list-w", `${px}px`)),
     title: "Drag to make the list wider or narrower · double-click for the usual width",
   });
-  choose(pick);
+  choose(pick, { target: target && target.result === pick ? target : null, value });
 }
 
-/** The picked entry of the Results list, drawn into `box`. */
-async function drawResult(box, exp, run, entry, outs, t) {
+/** A short-lived highlight on an element (a linked number), scrolled into the middle of the view. */
+function spotlight(el) {
+  if (!el) return;
+  el.classList.add("cell-focus");
+  requestAnimationFrame(() => el.scrollIntoView({ block: "center", inline: "center" }));
+  setTimeout(() => el.classList.remove("cell-focus"), 6000);
+}
+
+/**
+ * The picked entry of the Results list, drawn into `box`. focus: {target: {row, column, why}} a number of the table
+ * to show highlighted (a link to it), {value: name} a single value to highlight among the numbers.
+ */
+async function drawResult(box, exp, run, entry, outs, t, focus = {}) {
   const mine = (box.dataset.ticket = String(Number(box.dataset.ticket || 0) + 1));
   const stale = () => t !== token || box.dataset.ticket !== mine;
-  const head = (title, sub) =>
-    h("div", { class: "result-head" }, h("h3", {}, title), sub ? h("span", { class: "layr-muted small" }, sub) : null);
-  put(box, head(entry.label, entry.sub), h("span", { class: "layr-spinner" }));
+  const linkButton = (args, what) =>
+    h(
+      "button",
+      {
+        class: "layr-button small ghost result-link",
+        title: `Copy a link to ${what} for a Wiki page (pasted there, it shows it and stays up to date)`,
+        onclick: () => copyLink(args),
+      },
+      "Copy link",
+    );
+  const head = (title, sub, link = true) =>
+    h(
+      "div",
+      { class: "result-head" },
+      h("h3", {}, title),
+      sub ? h("span", { class: "layr-muted small" }, sub) : null,
+      link ? [h("span", { class: "layr-spacer" }), linkButton({ experiment: exp.id, result: entry.id }, "it")] : null,
+    );
+  put(box, head(entry.label, entry.sub, false), h("span", { class: "layr-spinner" }));
   try {
     if (entry.kind === "numbers") {
       const values = Object.keys(outs).filter((n) => outs[n].kind === "value");
-      put(
-        box,
-        head("Numbers", entry.sub),
+      const cards = values.map((n) =>
         h(
           "div",
-          { class: "values" },
-          values.map((n) =>
-            h(
-              "div",
-              { class: "layr-card value-card" },
-              h("div", { class: "layr-muted small" }, outs[n].label || human(n)),
-              h("div", { class: "big-number" }, PG.valueText(outs[n].value)),
-            ),
-          ),
+          {
+            class: "layr-card value-card",
+            "data-name": n,
+            oncontextmenu: (e) =>
+              layr.ui.contextMenu(
+                [{ label: "Copy link to this number", icon: "link", run: () => copyLink({ experiment: exp.id, result: n }) }],
+                e,
+              ),
+          },
+          h("div", { class: "value-top" }, h("div", { class: "layr-muted small" }, outs[n].label || human(n)), linkButton({ experiment: exp.id, result: n }, "this number")),
+          h("div", { class: "big-number" }, PG.valueText(outs[n].value)),
         ),
       );
+      put(box, head("Numbers", entry.sub, false), h("div", { class: "values" }, cards));
+      if (focus.value) spotlight(cards[values.indexOf(focus.value)]);
     } else if (entry.kind === "text") {
       const got = await call("result_value", { run: run.run, output: entry.id });
       if (stale()) return;
@@ -1560,24 +1930,68 @@ async function drawResult(box, exp, run, entry, outs, t) {
         src ? h("img", { src, class: "fig", alt: entry.label }) : h("div", { class: "layr-muted" }, "This figure can't be shown."),
       );
     } else {
-      const data = await call("result_table", { run: run.run, table: entry.id, limit: 2000 });
+      let data = await call("result_table", { run: run.run, table: entry.id, limit: 2000 });
       if (stale()) return;
+      // a linked number: its row, even past the rows read at first
+      const target = focus.target;
+      let cell = null;
+      if (target?.row) {
+        let r = data.rows.find((x) => rowHas(x, target.row));
+        if (!r && data.total > data.rows.length) {
+          const more = await call("result_table", { run: run.run, table: entry.id, where: target.row, limit: 2 }).catch(() => null);
+          if (stale()) return;
+          if (more?.rows?.length === 1) {
+            r = more.rows[0];
+            data = { ...data, rows: [...data.rows, r] };
+          }
+        }
+        if (r) cell = { row: r, column: target.column, why: target.why };
+        else
+          layr.ui.notify(
+            `No row of ${entry.label} has ${Object.entries(target.row).map(([k, v]) => `${k} ${v}`).join(", ")} any more.`,
+            "warning",
+          );
+      }
       const tbox = h("div", {});
       put(
         box,
         head(entry.label, entry.kind === "step" ? "the table this step gave" : null),
-        h("div", { class: "layr-muted small" }, "Click a number to see how it was calculated."),
+        h(
+          "div",
+          { class: "layr-muted small" },
+          "Click a number to see how it was calculated; right-click a cell to copy a link to it (for a Wiki page).",
+        ),
         tbox,
       );
-      filteredTable(tbox, exp, entry.id, data);
+      filteredTable(tbox, exp, entry.id, data, null, cell);
     }
   } catch (err) {
-    if (!stale()) put(box, head(entry.label), h("div", { class: "layr-error" }, cleanError(err)));
+    if (!stale()) put(box, head(entry.label, null, false), h("div", { class: "layr-error" }, cleanError(err)));
   }
 }
 
-/** A table with a filter for each column of a few repeated texts, every number clickable (how was it calculated). */
-function filteredTable(box, exp, tableName, data, only) {
+/** A table cell's right-click menu: how its number was calculated, a link to it. */
+function cellMenu(exp, tableName, row, column, rows, ev) {
+  const number = typeof row[column] === "number";
+  layr.ui.contextMenu(
+    [
+      number ? { label: "How was this number calculated?", icon: "functions", run: () => showProvenance(exp, tableName, row, column, rows) } : null,
+      {
+        label: number ? "Copy link to this number" : "Copy link to this value",
+        icon: "link",
+        run: () => copyCellLink(exp, tableName, row, column, rows),
+      },
+    ].filter(Boolean),
+    ev,
+  );
+}
+
+/**
+ * A table with a filter for each column of a few repeated texts, every number clickable (how was it calculated), a
+ * right-click on a cell for its menu. focus: {row (one of data.rows), column, why}: that cell is scrolled into view and
+ * highlighted for a few seconds, with no filter on (why: its "how was it calculated" opens too).
+ */
+function filteredTable(box, exp, tableName, data, only, focus = null) {
   const filterCols = (
     only ||
     data.columns.filter((c) => {
@@ -1611,10 +2025,19 @@ function filteredTable(box, exp, tableName, data, only) {
         ),
         h("span", { class: "layr-muted small" }, `${rows.length} of ${data.total} rows`),
       ),
-      table(rows, data.columns, { onCell: (r, c) => showProvenance(exp, tableName, r, c, data.rows) }),
+      table(rows, data.columns, {
+        onCell: (r, c) => showProvenance(exp, tableName, r, c, data.rows),
+        onMenu: (r, c, e) => cellMenu(exp, tableName, r, c, data.rows, e),
+        focus: first ? focus : null,
+      }),
     );
   };
+  let first = !!focus;
   draw();
+  if (!first) return;
+  first = false;
+  spotlight(box.querySelector(".cell-focus"));
+  if (focus.why) showProvenance(exp, tableName, focus.row, focus.column, data.rows);
 }
 
 /** The columns that pick out one row, to ask how one of its numbers was calculated: texts first, then whole numbers,
@@ -1643,9 +2066,49 @@ async function showProvenance(exp, tableName, row, column, rows) {
   try {
     const p = await call("provenance", { ...runArgs(exp), table: tableName, where, column });
     const chain = p.chain || [];
+    // the chain's last step can be a number that came in from another experiment: open it there, and how it came
+    const source = (c, i) =>
+      h(
+        "div",
+        { class: "prov-step prov-source" },
+        h(
+          "div",
+          {},
+          h("span", { class: "stepnum" }, i + 1),
+          h("b", {}, "From the experiment ", c.title || c.experiment),
+          " ",
+          kindBadge("source"),
+          " = ",
+          h("b", {}, fmt(c.value)),
+        ),
+        h(
+          "div",
+          { class: "layr-muted small" },
+          c.sentence ||
+            [`its table ${tableWord(c.result)}`, ...Object.entries(c.where || {}).map(([k, v]) => `${k} ${v}`), c.column]
+              .filter(Boolean)
+              .join(" · "),
+        ),
+        h(
+          "button",
+          {
+            class: "layr-button small prov-open",
+            title: "Open that experiment's table at this number, and how it was calculated there",
+            onclick: () => {
+              dialog.close();
+              show({
+                exp: c.experiment,
+                result: c.result,
+                ...(c.where && Object.keys(c.where).length && c.column ? { cell: { row: c.where, column: c.column }, why: true } : {}),
+              });
+            },
+          },
+          "Open it there",
+        ),
+      );
     const body = chain.length
       ? chain.map((c, i) =>
-          h(
+          c.kind === "source" ? source(c, i) : h(
             "div",
             { class: `prov-step level-${Math.min(c.level || 0, 4)}` },
             h(
@@ -1681,7 +2144,18 @@ async function showProvenance(exp, tableName, row, column, rows) {
     await openDialog({
       title: `How ${column} = ${fmt(row[column])} was calculated`,
       body: [h("div", { class: "layr-muted small" }, keys.map((k) => `${k} ${row[k]}`).join(" · ")), body],
-      buttons: [{ label: "Close", id: null }],
+      buttons: [
+        {
+          label: "Copy link to this number",
+          kind: "ghost",
+          title: "For a Wiki page: pasted there, it shows this number and says when it changed",
+          value: () => {
+            copyCellLink(exp, tableName, row, column, rows);
+            return undefined; // the dialog stays open
+          },
+        },
+        { label: "Close", id: null },
+      ],
     });
   } catch (err) {
     fail(err);
@@ -2086,7 +2560,33 @@ async function tabSettings(body, exp) {
       ),
     ),
   );
+  // a result of other experiments: the experiments picked as chips (each opens it, × stops reading it), the picker
+  const resultRow = (inp) => {
+    // a deleted experiment is named by the title its last reading knew (the backend only has its id)
+    const items = (exp.sources?.[inp.id] || []).map((s) => {
+      const known = s.missing && (exp.outdated || []).find((o) => o.experiment === s.experiment)?.title;
+      return known ? { ...s, title: `${known} (deleted)` } : s;
+    });
+    const err = h("div", { class: "layr-error small", hidden: true });
+    return h(
+      "div",
+      { class: "file-row src-input", "data-input": inp.id },
+      h("span", {}, inp.label || inp.id, ": "),
+      SRC.chips(items, {
+        onRemove: async (i) => {
+          const left = items.filter((_, k) => k !== i).map(({ experiment, result }) => ({ experiment, result }));
+          const problem = await saveSources(exp, inp.id, left);
+          if (!problem) return render();
+          put(err, problem);
+          err.hidden = false;
+        },
+      }),
+      h("button", { class: "layr-button small", onclick: () => pickSources(exp, inp.id) }, items.length ? "Change…" : "Pick experiments…"),
+      err,
+    );
+  };
   const files = (exp.method_inputs || []).map((inp) => {
+    if (inp.kind === "result") return resultRow(inp);
     const f = exp.inputs?.[inp.id];
     return h(
       "div",
@@ -2146,7 +2646,7 @@ async function tabSettings(body, exp) {
       title,
       h("label", { class: "layr-label" }, "Notes"),
       notes,
-      h("h4", {}, "Raw data"),
+      h("h4", {}, (exp.method_inputs || []).some((i) => i.kind === "result") ? "What it reads" : "Raw data"),
       files,
       h(
         "p",
@@ -2159,28 +2659,7 @@ async function tabSettings(body, exp) {
         { class: "row-end sticky" },
         h(
           "button",
-          {
-            class: "layr-button danger ghost",
-            onclick: async () => {
-              if (
-                await openDialog({
-                  title: "Delete this experiment?",
-                  body: "Its runs go too. Raw files stay in the store.",
-                  buttons: [
-                    { label: "Cancel", id: false, kind: "ghost" },
-                    { label: "Delete", id: true, kind: "danger" },
-                  ],
-                })
-              ) {
-                try {
-                  await call("experiment_delete", { experiment: exp.id });
-                  go({ view: "home", exp: null });
-                } catch (err) {
-                  fail(err);
-                }
-              }
-            },
-          },
+          { class: "layr-button danger ghost", onclick: () => deleteExperiment(exp) },
           "Delete experiment",
         ),
         h("span", { class: "layr-spacer" }),
@@ -2195,6 +2674,45 @@ async function tabSettings(body, exp) {
   if (S.setting) {
     document.getElementById(`set-${S.setting}`)?.scrollIntoView({ block: "center" });
     S.setting = null;
+  }
+}
+
+/**
+ * Deletes the experiment after asking. When other experiments read its results the backend refuses, naming them:
+ * that sentence is shown, with "Delete anyway" (they then show it as missing).
+ */
+async function deleteExperiment(exp) {
+  const ok = await openDialog({
+    title: "Delete this experiment?",
+    body: "Its runs go too. Raw files stay in the store.",
+    buttons: [
+      { label: "Cancel", id: false, kind: "ghost" },
+      { label: "Delete", id: true, kind: "danger" },
+    ],
+  });
+  if (!ok) return;
+  const gone = () => go({ view: "home", exp: null });
+  try {
+    await call("experiment_delete", { experiment: exp.id });
+    return gone();
+  } catch (err) {
+    const refusal = cleanError(err);
+    if (!/read the results of/.test(refusal)) return fail(err);
+    const anyway = await openDialog({
+      title: "Other experiments read it",
+      body: h("p", {}, refusal.replace(/ \(force\)/, "").replace(/ \(e[0-9a-f]{8}\)/g, "")),
+      buttons: [
+        { label: "Keep it", id: false, kind: "ghost" },
+        { label: "Delete anyway", id: true, kind: "danger" },
+      ],
+    });
+    if (!anyway) return;
+    try {
+      await call("experiment_delete", { experiment: exp.id, force: true });
+      gone();
+    } catch (err2) {
+      fail(err2);
+    }
   }
 }
 
@@ -2408,7 +2926,7 @@ window.__lab = {
       trialRun: ME.trialRun,
       trialNote: ME.trialNote?.text || "",
       busy: !!ME.busy || ME.inspecting > 0,
-      exp: ME.numbersExp,
+      exp: ME.exp,
       fn: ME.fn,
       code: S.code,
       version: ME.m?.version,
@@ -2436,7 +2954,7 @@ function comparisonBlock(c, lead = null) {
       h("b", {}, c.summary || ""),
       c.experiment_title ? h("span", { class: "layr-muted" }, ` on ${c.experiment_title}`) : null,
     ),
-    // folded to one line until she asks: the method screen keeps its room for the flow and the code
+    // folded to one line until she asks: the workspace keeps its room for the flow and the code
     moved.length
       ? h("details", { class: "cmp-tables" }, h("summary", {}, "Which numbers"), moved.map((t) =>
       h(
@@ -2492,7 +3010,7 @@ function openWork(m, docs, mine, expObj) {
     toolbox: docs,
     mine, // the experiments of this method
     expObj, // the open experiment (experiment_get)
-    numbersExp: S.exp, // the experiment whose data the flow and the code show
+    exp: S.exp, // the experiment whose data the flow and the code show
     trialRun: null, // the newest trial run of the code as it is in the editor
     trialRunSource: null, // the code that trial run calculated
     inspecting: 0, // explanations being fetched
@@ -2681,10 +3199,10 @@ function revealTarget() {
  * code they belong to (`source`), so that numbers of other code are not passed off as this code's.
  */
 function dataRef() {
-  if (!ME?.numbersExp) return null;
+  if (!ME?.exp) return null;
   if (ME.trialRun) return { key: ME.trialRun, args: { run: ME.trialRun }, source: ME.trialRunSource };
   if (S.run) return { key: S.run, args: { run: S.run }, source: null };
-  return { key: ME.numbersExp, args: { experiment: ME.numbersExp }, source: ME.saved };
+  return { key: ME.exp, args: { experiment: ME.exp }, source: ME.saved };
 }
 
 /** The code in the editor is being calculated (or will be after the pause): the numbers shown are of other code. */
@@ -2701,7 +3219,7 @@ function mountMethodFlow(host, source) {
     if (!ME || (ME.flow && ME.flow !== flow)) return;
     if (flow.graph && ME.ed) {
       cursorIn(ME.ed.cursor().line);
-      if (flow.graph.stale && S.autoRecalc !== false && ME.numbersExp && !ME.trialRun && !S.run && !ME.busy)
+      if (flow.graph.stale && S.autoRecalc !== false && ME.exp && !ME.trialRun && !S.run && !ME.busy)
         recalc(ME.ed.getValue());
     } else if (tries < 80) setTimeout(() => sync(tries + 1), 250);
   };
@@ -2711,7 +3229,7 @@ function mountMethodFlow(host, source) {
     tex,
     method: ME.method,
     source,
-    experiment: ME.numbersExp,
+    experiment: ME.exp,
     run: S.run || null,
     editable: true,
     inside: S.code ? "host" : "panel",
@@ -2726,6 +3244,7 @@ function mountMethodFlow(host, source) {
     onSelect: (s) => flowSelected(s),
     onOpen: (o) => flowOpened(o),
     boxActions: (n) => boxActions(n),
+    copyLink: ({ fn }) => copyFunctionLink(fn),
   });
   return flow;
 }
@@ -2799,10 +3318,23 @@ function flowOpened(o) {
   }
   if (o.what === "claude") return claudeStep(o);
   if (o.what === "new-experiment") return show({ view: "new", newMethod: ME.method });
+  if (o.what === "experiment") return show({ exp: o.experiment });
+  if (o.what === "sources") {
+    if (!ME.expObj) return layr.ui.notify("Pick an experiment above first: what it reads belongs to it.", "info");
+    return pickSources(ME.expObj, o.input);
+  }
   const tab = { results: "results", settings: "settings", corrections: "corrections", checks: "checks" }[o.what];
   if (!tab) return;
   if (!ME.expObj) return layr.ui.notify("Pick an experiment above first: results and settings belong to it.", "info");
   show({ tab, result: o.table || undefined, setting: o.setting || undefined });
+}
+
+/**
+ * "Copy link" to a function of the method: with an experiment open, the step with that experiment's numbers;
+ * without one (or `codeOnly`), its code in the method.
+ */
+function copyFunctionLink(fn, { codeOnly = false } = {}) {
+  return copyLink(ME.expObj && !codeOnly ? { experiment: ME.expObj.id, function: fn } : { method: ME.method, function: fn });
 }
 
 /** The line of `def name(` in the editor, or null. */
@@ -2995,7 +3527,7 @@ async function settle() {
     ME.busy = false;
     return;
   }
-  const trial = S.autoRecalc !== false && ME.numbersExp && source !== ME.trialSource;
+  const trial = S.autoRecalc !== false && ME.exp && source !== ME.trialSource;
   // the boxes are drawn from the new code at once when the recipe itself changed (a step added, a wire moved);
   // a change inside a step is drawn with the trial run's numbers, a moment later, in one go
   if (source !== ME.flowSource && (!trial || recipeOf(source) !== recipeOf(ME.flowSource))) {
@@ -3019,7 +3551,7 @@ function recipeOf(source) {
 
 /** A trial run of `source` on the picked experiment; only the newest matters. */
 async function recalc(source) {
-  if (!ME?.numbersExp) return;
+  if (!ME?.exp) return;
   const me = ME;
   me.trialSource = source;
   me.busy = true;
@@ -3043,7 +3575,7 @@ async function recalc(source) {
 }
 
 async function trialRun(source) {
-  const exp = ME.numbersExp;
+  const exp = ME.exp;
   const n = ++ME.tickets.trial;
   setTrialNote("calculating…", "run");
   let r;
@@ -3516,12 +4048,12 @@ function paintValues() {
       }
       if (picked.kind === "light")
         for (const [name, v] of Object.entries(picked.values)) {
-          const big = v && typeof v === "object" && v.kind !== "number";
+          const more = cellTitle(v, fmt);
           list.push({
             name,
             text: cellText(v, fmt),
             type: cellKind(v),
-            title: name + of + (big ? " · only its size was kept for this round (whole values are kept for the first and last rounds)" : ""),
+            title: name + of + (more ? ` · ${more}` : "") + (more && v.preview == null ? " (whole values are kept for the first and last rounds)" : ""),
           });
         }
       if (picked.kind === "inner")
@@ -3566,7 +4098,7 @@ function paintValues() {
 // ---------- packages, the status line, the checker's marks
 
 /** The experiments of this method other than the open one: they share its code. */
-const otherExperiments = () => (ME?.mine || []).filter((e) => e.experiment !== ME.numbersExp);
+const otherExperiments = () => (ME?.mine || []).filter((e) => e.experiment !== ME.exp);
 
 /** "Shared with 2 other experiments" in the status line: their names on hover, a click lists them to open one. */
 function sharedNote() {
@@ -3584,7 +4116,7 @@ function sharedNote() {
           e,
         ),
     },
-    ME.numbersExp
+    ME.exp
       ? `Shared with ${others.length} other experiment${others.length === 1 ? "" : "s"}`
       : `Used by ${others.length} experiment${others.length === 1 ? "" : "s"}`,
   );
@@ -3737,6 +4269,20 @@ function drawOutline() {
     ["helper", "Helpers"],
   ];
   const count = (name) => ME.messages.filter((x) => x.function === name).length;
+  // a function's menu (right-click, or its ⋯): links to it for a Wiki page
+  const menu = (e, f) => {
+    e.preventDefault();
+    e.stopPropagation();
+    layr.ui.contextMenu(
+      [
+        ME.expObj
+          ? { label: "Copy link to this step (with this experiment's numbers)", icon: "link", run: () => copyFunctionLink(f.name) }
+          : null,
+        { label: "Copy link to its code", icon: "link", run: () => copyFunctionLink(f.name, { codeOnly: true }) },
+      ].filter(Boolean),
+      e,
+    );
+  };
   put(
     ME.els.outline,
     groups.map(([kind, label]) => {
@@ -3753,11 +4299,17 @@ function drawOutline() {
               class: `ol-item ${f.name === ME.fn ? "active" : ""}`,
               title: f.sentence || "",
               onclick: () => jumpTo(f.line, f.name),
+              oncontextmenu: (e) => menu(e, f),
             },
             h("span", { class: "ol-name" }, f.name),
             count(f.name)
               ? h("span", { class: "lint-dot", title: `${count(f.name)} style notes` }, count(f.name))
               : null,
+            h(
+              "button",
+              { class: "ol-more", title: "Copy a link to it…", "aria-label": `Links to ${f.name}`, onclick: (e) => menu(e, f) },
+              "⋯",
+            ),
           ),
         ),
       );
@@ -4221,8 +4773,8 @@ async function drawInspector() {
       ]
     : [];
   // where the numbers come from (the experiment is picked in the path at the top)
-  const shownExp = (ME.mine || []).find((e) => e.experiment === ME.numbersExp);
-  const picker = ME.numbersExp
+  const shownExp = (ME.mine || []).find((e) => e.experiment === ME.exp);
+  const picker = ME.exp
     ? h(
         "div",
         { class: "numbers-from small" },
@@ -4319,7 +4871,7 @@ async function drawInspector() {
         v.step.inputs,
         v.step.output,
         name,
-        ME.numbersExp ? { id: ME.numbersExp } : null,
+        ME.exp ? { id: ME.exp } : null,
       ),
     );
   if (coming) {
@@ -4389,7 +4941,7 @@ async function drawInspector() {
     }
     const err = (v.sample || []).find((c) => c.error);
     if (err) parts.push(h("div", { class: "banner danger" }, err.error));
-  } else if (ME.numbersExp) {
+  } else if (ME.exp) {
     parts.push(h("div", { class: "layr-muted small" }, "Not called in the last run (or it hasn't run yet)."));
   }
   parts.push(ME.roundsBox); // its loops' rounds (drawValues fills it)
@@ -4630,6 +5182,7 @@ try {
 // A link opens the panel again at a place: its params are a show() target.
 layr.panel.onParams?.(async (p) => {
   if (!p || !Object.keys(p).length) return;
+  if (p.ref) return openRef(p.ref); // a layr://research/open/… link (a reference in a Wiki page)
   if (p.file) {
     if (await openedWith(p.file)) go({ view: "new" });
     return;
@@ -4640,7 +5193,7 @@ layr.events.on("research:lab", (ev) => {
   if (ev.what === "run" && ev.trial) {
     // A trial run (a change of the code being tried): it lights up its step, and it is not the experiment's new
     // latest run, so nothing else is redrawn.
-    if (S.view === "work" && ME && ev.experiment === ME.numbersExp)
+    if (S.view === "work" && ME && ev.experiment === ME.exp)
       ME.flow?.setRunning(!ev.finished && ev.step ? { step: ev.step } : null);
     return;
   }
@@ -4651,14 +5204,14 @@ layr.events.on("research:lab", (ev) => {
       live.step = ev.step;
       setStatus(`Calculating: ${human(ev.step)}`);
     }
-    if (S.view === "work" && ME?.numbersExp === ev.experiment) ME.flow?.setRunning({ step: ev.step });
+    if (S.view === "work" && ME?.exp === ev.experiment) ME.flow?.setRunning({ step: ev.step });
   }
   // while the panel's own run is going, the screen is drawn again when it's done
   if (live && (ev.what === "run" || ev.experiment === live.exp)) return;
   if (ev.what === "run" && !ev.finished) return;
   if (S.view === "work" && ME) {
     if ((ev.method && ev.method === S.method) || ev.what === "comparison") refreshMethodMeta();
-    if (ev.what === "run" && ev.experiment === ME.numbersExp && !ME.trialRun && !S.run) {
+    if (ev.what === "run" && ev.experiment === ME.exp && !ME.trialRun && !S.run) {
       ME.flow?.update({});
       valuesChanged();
     }
@@ -4677,3 +5230,5 @@ window.addEventListener("beforeunload", (e) => {
   if (ME?.dirty) e.preventDefault();
 });
 render();
+// started by a link to a place (a reference in a Wiki page): it goes there
+if (layr.info.params?.ref) openRef(layr.info.params.ref);

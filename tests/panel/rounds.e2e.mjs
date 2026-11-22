@@ -137,6 +137,25 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
   if (!scoreChip || scoreChip.slice(8) !== row40[scoreAt])
     throw new Error(`the code's score (${scoreChip}) isn't the table's (${row40.join(" | ")})`);
   if ((await page.locator(`${side} .rt tr.on`).getAttribute("data-k")) !== "40") throw new Error("row 40 isn't shaded");
+  step("a small dict and list show their content: `row` and `values` previewed in the cell, the length in its title");
+  const rowAt = heads.findIndex((t) => t.trim() === "row");
+  const valuesAt = heads.findIndex((t) => t.trim() === "values");
+  const rowCell = page.locator(`${side} .rt tr[data-k="40"] td`).nth(rowAt);
+  const valuesCell = page.locator(`${side} .rt tr[data-k="40"] td`).nth(valuesAt);
+  const rowText = await rowCell.innerText();
+  const rowTitle = (await rowCell.getAttribute("title")) || "";
+  if (!(await rowCell.evaluate((el) => el.classList.contains("preview"))) || !/^respondent=\d+, /.test(rowText))
+    throw new Error(`the row's cell isn't its preview: "${rowText}"`);
+  if (!/^\d+ entries: /.test(rowTitle) || rowTitle.replace(/^\d+ entries: /, "") !== rowText)
+    throw new Error(`the row's title: "${rowTitle}" (cell "${rowText}")`);
+  const valuesText = await valuesCell.innerText();
+  if (!/^\d+(\.\d+)?(, \d+(\.\d+)?)+$/.test(valuesText)) throw new Error(`the values' cell: "${valuesText}"`);
+  if (!/^\d+ items: /.test((await valuesCell.getAttribute("title")) || "")) throw new Error("the values' title");
+  const cut = await rowCell.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth,
+    font: getComputedStyle(el).fontFamily, overflow: getComputedStyle(el).textOverflow }));
+  if (cut.overflow !== "ellipsis" || !/mono|consol|courier/i.test(cut.font)) throw new Error(`the cell's style: ${JSON.stringify(cut)}`);
+  step(`the row's preview "${rowText}" (${cut.scroll} px in a ${cut.client} px column)`);
+  await until("the row's preview in the code", async () => (await chips(side)).some((t) => t.startsWith("row = respondent=")));
   await stop("51-rounds-flow-side");
 
   step("Copy as CSV: every round, with the names as the header");
@@ -145,6 +164,7 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
   const clip = await until("the clipboard", async () => (await h.log(since, "clipboard"))[0]?.text);
   const lines = clip.split(/\r?\n/);
   if (!lines[0].startsWith("round,row,values,score") || lines.length !== 161) throw new Error(`the CSV: ${lines.slice(0, 3)}`);
+  if (!lines[40].startsWith(`40,"${rowText}",`)) throw new Error(`the CSV's round 40 hasn't the row's preview: ${lines[40]}`);
 
   step("the keyboard: down picks the next round");
   await page.locator(`${side} .rt-scroll`).first().focus();

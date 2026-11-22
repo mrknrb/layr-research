@@ -1,6 +1,6 @@
 // The workspace's code tools: More ▾ (Versions, the reference experiment, Format, Duplicate the method), a change an
 // AI agent proposed (its banner, its review in place of the flow and the code, back, accept), and the flow's
-// "+ Raw file", which offers the readers the backend lists. Screenshots (dark and light) in tests/panel/out/ (or
+// "+ Input", which offers the readers the backend lists. Screenshots (dark and light) in tests/panel/out/ (or
 // $SHOTS). No page errors allowed.
 //   node tests/panel/code.e2e.mjs
 import { bench } from "./lib.mjs";
@@ -78,12 +78,16 @@ await bench("code", async ({ h, open, shot, until, step }) => {
   await page.locator(".actions button", { hasText: "More" }).click();
   await until("Format's answer", async () => (await h.log(0, "notify")).some((n) => /tidy|Tidied/.test(n.text)), 15_000);
 
-  step("the flow's + Raw file offers the backend's readers");
-  await page.locator(".fl-bar button", { hasText: "+ Raw file" }).click();
+  step("the flow's + Input offers the backend's readers and a result of other experiments");
+  await page.locator(".fl-bar button", { hasText: "+ Input" }).click();
+  const readers = (await h.tool("blocks")).readers.map((x) => x.label);
+  const offered = await page.locator(".fl-menu .fl-mi > span").allInnerTexts();
+  if (offered.join("|") !== [...readers, "A result of other experiments"].join("|"))
+    throw new Error(`+ Input offers: ${offered.join(" | ")}`);
+  await page.locator(".fl-menu .fl-mi").first().click();
   const form = page.locator(".fl-form", { hasText: "Add a raw file" });
   await form.waitFor();
   const kinds = await form.locator("select option").allInnerTexts();
-  const readers = (await h.tool("blocks")).readers.map((x) => x.label);
   if (kinds.join("|") !== readers.join("|")) throw new Error(`the kinds of file: ${kinds.join(" | ")}`);
   await form.locator("input.layr-input").first().fill("plate reads");
   await stop("44-add-raw-file");

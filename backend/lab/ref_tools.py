@@ -25,7 +25,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from . import explain, latex, methodfile
+from . import explain, latex, methodfile, sources
 from .errors import LabError
 from .runner import approved_corrections, experiment_inputs, resolve
 from .store import ID as METHOD_ID
@@ -315,8 +315,9 @@ def latest_done_run(store, e: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def is_stale(store, e: dict[str, Any], run: dict[str, Any]) -> bool:
-    """Whether the experiment changed since the run: its method's code, its settings, its raw files or its approved
-    corrections are no longer what the run used."""
+    """Whether the experiment changed since the run: its method's code, its settings, its raw files, its approved
+    corrections or what it reads of other experiments (lab/sources.py: a newer run with other numbers, other picks)
+    are no longer what the run used."""
     try:
         source = store.get_method(e["method"], e.get("method_version"))["source"]
     except LabError:
@@ -334,7 +335,13 @@ def is_stale(store, e: dict[str, Any], run: dict[str, Any]) -> bool:
     used = {k: (v or {}).get("sha256") for k, v in (run.get("inputs") or {}).items()}
     if {k: v.get("sha256") for k, v in files.items()} != used:
         return True
-    return jsonable(approved_corrections(e)) != jsonable(run.get("corrections") or [])
+    if jsonable(approved_corrections(e)) != jsonable(run.get("corrections") or []):
+        return True
+    if not sources.picks(e) and not run.get("sources"):
+        return False
+    # out of date because of its sources, judged against this run (the one the reference shows)
+    by_id = {x["id"]: x for x in store.list_experiments()}
+    return bool(sources.outdated(store, {**e, "last_run": {**(e.get("last_run") or {}), "id": run["id"]}}, by_id))
 
 
 def flag_counts(flags: dict[str, int]) -> str:

@@ -296,16 +296,6 @@ function cardManager() {
   return { open, hide, hideOpen, hideSoon, attach, destroy: () => (hide(), card?.remove(), (card = null)) };
 }
 
-/**
- * Gives any element the editor's hover card: `make()` returns an element, a string or a promise of one.
- * Returns a function that removes the card from the page. For the flow and other places that want the same card.
- */
-export function attachCard(target, make) {
-  const cards = cardManager();
-  cards.attach(target, make);
-  return cards.destroy;
-}
-
 // -------------------------------------------------------------------------------- values at line ends
 
 /** Whether a transaction deleted the whole line `{from, to}` together with a line break next to it. */

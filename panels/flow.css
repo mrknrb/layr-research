@@ -820,13 +820,20 @@ select.fl-field {
   border-left: 0;
 }
 .fl-sh {
+  position: relative;
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 5px 6px 5px 10px;
+  /* the close button keeps the top right corner; the buttons wrap under the title when they don't fit beside it */
+  padding: 5px 38px 5px 10px;
   border-bottom: 1px solid var(--border);
   min-height: 38px;
   flex-wrap: wrap;
+}
+.fl-sh > .fl-close {
+  position: absolute;
+  top: 7px;
+  right: 6px;
 }
 .fl-st {
   font-size: 13px;
@@ -1242,7 +1249,7 @@ img.fl-fig {
 :root[data-theme="light"] .fl-node {
   box-shadow: 0 1px 3px rgb(20 24 33 / 0.12);
 }
-/* a low flow (above the code on the method screen): the overview map would cover the boxes */
+/* a low flow (above the code in the workspace): the overview map would cover the boxes */
 .fl.short .fl-mini {
   display: none;
 }
@@ -1657,4 +1664,43 @@ table.rt-table {
 }
 .rt-dim {
   color: var(--fg-dim);
+}
+
+/* ---------- a result of other experiments: its box and its side panel ---------- */
+
+.fl-node.src.from {
+  width: 204px;
+}
+.fl-node.src.from .fl-file {
+  white-space: normal;
+}
+.fl-srcs {
+  margin: 4px 0;
+  padding-left: 16px;
+}
+.fl-srcpicks {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+.fl-srcchip {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.fl-srcchip:hover,
+.fl-srcchip:focus-visible {
+  border-color: var(--accent);
+}
+.fl-srcchip b {
+  font-weight: 600;
 }

@@ -684,7 +684,7 @@ def index_of(store, run_id: str) -> dict[str, Any]:
 def _safe(store, run_id: str, file: str) -> Path:
     rdir = store.run_dir(run_id).resolve()
     rel = (file or "").replace("\\", "/").lstrip("/")
-    if not rel or ".." in rel.split("/") or not rel.startswith(("values/", "steps/", "outputs/")):
+    if not rel or ".." in rel.split("/") or not rel.startswith(("values/", "steps/", "outputs/", "sources/")):
         raise LabError(f"'{file}' is not a value of run {run_id}: give the `file` of a value summary.")
     p = (rdir / rel).resolve()
     if rdir not in p.parents:
@@ -710,8 +710,8 @@ def _read_table(path: str, mtime: float, dtypes: tuple, offset: int = -1, length
 def read(store, run_id: str, file: str, offset: int = 0, limit: int = 50) -> dict[str, Any]:
     """Rows of a stored value for display: {run, file, kind, total, offset, columns, rows, stored, ...}.
 
-    `file` is a value summary's `file`: values/… (0.4), or a run's steps/….csv and outputs/….csv|png (every run
-    since 0.3). A figure comes back as PNG data (base64)."""
+    `file` is a value summary's `file`: values/… (0.4), a run's steps/….csv and outputs/….csv|png (every run
+    since 0.3), or sources/<input>.csv (the table a result input read). A figure comes back as PNG data (base64)."""
     store.get_run(run_id)  # a clear message for a run that doesn't exist
     p = _safe(store, run_id, file)
     rdir = store.run_dir(run_id)

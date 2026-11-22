@@ -345,6 +345,72 @@ def test_stale_after_a_setting_change_without_a_run(lab):
     assert get(store, **keys)["stale"] is True
 
 
+READER = '''"""Read scores
+
+How many rows each experiment gave.
+"""
+
+import pandas as pd
+
+
+def count_rows(results):
+    """How many rows each experiment gave, and their mean score."""
+    rows = []
+    for name, part in results.groupby("experiment", sort=False):
+        rows.append({"experiment": name, "rows": len(part), "mean_score": part["score"].mean()})
+    return pd.DataFrame(rows)
+
+
+def read_scores(results):
+    """Read scores.
+
+    Inputs:
+        results: Scores of other experiments [result: scores]
+
+    Returns:
+        counts: Rows per experiment
+    """
+    counts = count_rows(results)
+    return {"counts": counts}
+'''
+
+
+def test_stale_when_what_it_reads_changed(lab):
+    from lab import methodfile, sources
+    from lab.store import new_id, now
+
+    store = lab["store"]
+    store.save_method("score-reader", READER, "test", "made")
+    src = lab["make"]("survey", "Source survey")
+    assert lab["run"](src)["status"] == "done"
+    e = {"id": new_id("e"), "title": "Reader", "method": "score-reader", "inputs": {}, "params": {},
+         "corrections": [], "created": now()}
+    e["sources"] = sources.check(store, e, methodfile.inputs(methodfile.parse(READER)),
+                                 {"results": [{"experiment": src["id"]}]})
+    store.save_experiment(e)
+    first = lab["run"](e)
+    assert first["status"] == "done", first.get("error")
+    keys = {"experiment": e["id"], "result": "counts", "row": {"experiment": "Source survey"}, "column": "mean_score"}
+    assert get(store, **keys)["stale"] is False and get(store, experiment=e["id"])["stale"] is False
+    # the source's setting changes: the source is out of date, the reader not yet (its source's latest run is the same)
+    s = store.get_experiment(src["id"])
+    store.save_experiment({**s, "params": {**s["params"], "min_answers": 6}})
+    assert get(store, experiment=src["id"])["stale"] is True and get(store, **keys)["stale"] is False
+    # the source runs again with other numbers: now the reader is out of date
+    assert lab["run"](src)["status"] == "done"
+    got = get(store, **keys)
+    assert got["ok"] and got["stale"] is True and got["run"]["id"] == first["id"]
+    assert get(store, experiment=e["id"])["stale"] is True
+    assert lab["run"](e)["status"] == "done"
+    assert get(store, **keys)["stale"] is False
+    # other picks than its latest run read: out of date too
+    other = lab["make"]("survey", "Other survey")
+    assert lab["run"](other)["status"] == "done"
+    store.save_experiment({**store.get_experiment(e["id"]), "sources": {"results": [
+        {"experiment": src["id"], "result": "scores"}, {"experiment": other["id"], "result": "scores"}]}})
+    assert get(store, **keys)["stale"] is True
+
+
 def test_every_way_a_thing_can_be_gone(lab):
     store = lab["store"]
     survey = lab["survey"]

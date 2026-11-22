@@ -123,7 +123,7 @@ export function createPages(ctx) {
 
   // ------------------------------------------------------------------------------------------ tabs
 
-  /** The page tabs for the experiment's screen: [{id, label}] and whether a page can be added. */
+  /** The page tabs of the experiment in the workspace: [{id, label}] and whether a page can be added. */
   function tabs(exp) {
     return (exp.method_pages || []).map((p, i) => ({ id: `page:${i}`, label: p.title }));
   }

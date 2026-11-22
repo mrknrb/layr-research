@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- A page to try flow.js by itself as a host would use it (plugins/dev/research-flow.test.mjs drives it). Not one of
      the plugin's panels: layr.json doesn't list it, but the core serves it next to them.
-     ?method=gc-activity-assay&experiment=<id>&editable=1&inside=panel&autorun=1 -->
+     ?method=survey-scores&experiment=<id>&editable=1&inside=panel&autorun=1 -->
 <html>
   <head>
     <meta charset="utf-8" />
@@ -76,7 +76,7 @@
         const o = {
           call,
           tex,
-          method: q.get("method") || "gc-activity-assay",
+          method: q.get("method") || "survey-scores",
           experiment: q.get("experiment") || null,
           editable: q.get("editable") === "1",
           inside: q.get("inside") || "panel",
@@ -88,7 +88,7 @@
             note("onSetting", { id, value });
             if (!T.autoRun || !T.experiment) return;
             await call("experiment_update", { experiment: T.experiment, params: { [id]: value } });
-            T.flow.setRunning({ step: "read_gaml" });
+            T.flow.setRunning({ step: "read_table" });
             await call("run", { experiment: T.experiment, wait_s: 55 });
             T.flow.setRunning(null);
             await T.flow.update({});

@@ -1,8 +1,8 @@
 {
   "id": "research",
   "name": "Research",
-  "version": "0.5.0",
-  "description": "Explainable data analysis for any study: methods written as plain Python that explain every number from their own code (surveys, lab measurements, instrument exports...), each experiment's own pages built from cards, corrections with reasons, reports; plus quick charts and tests.",
+  "version": "0.6.0",
+  "description": "Analyse the data of any study (surveys, lab measurements, instrument exports) with methods you can read, where every number can be traced back to the line of code that made it: experiments with their own pages, results, checks, corrections with reasons and reports, plus quick charts and tests.",
   "author": "layr",
   "layr": "^0.1",
   "icon": "science",

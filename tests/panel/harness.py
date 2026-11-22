@@ -1,6 +1,6 @@
 """A stand-in for layr's core, so the Research panels can be opened in a browser and driven by test scripts.
 
-One process serves the plugin's panels/ folder and layr's real panel SDK (/_layr/layr.js, /_layr/layr.css), speaks
+One process serves the plugin's panels/ folder and layr's real panel SDK (/_layr/layr.js, /_layr/layr.css), talks
 the SDK's JSON-RPC over ws://<host>/_layr/ws, starts the plugin's own backend (backend/server.py, MCP on stdio) as
 layr does, and is the hub the backend sends its events to (/mcp, the tool layr__events_emit). What only the app's
 shell draws (context menus, file dialogs, the clipboard: window.__layrShell) is answered from queues a test fills

@@ -159,6 +159,7 @@ section.method-section + section.method-section {
 .exp-card {
   display: grid;
   gap: 6px;
+  align-content: start;
   transition: border-color 0.15s;
 }
 .exp-card:hover {
@@ -1338,11 +1339,6 @@ details.ol-group > summary.ol-head {
   width: auto;
   max-width: 220px;
 }
-.ref-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
 .calls td,
 .calls th {
   font-size: 11.5px;
@@ -1523,4 +1519,300 @@ td.num.click:hover {
   .crumb-pick.layr-select {
     max-width: 200px;
   }
+}
+
+/* ---------- what an experiment reads of other experiments: chips and the picker ---------- */
+
+.src-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+}
+.src-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  border-radius: 12px;
+  padding: 1px 4px 1px 10px;
+  font-size: 12.5px;
+}
+.src-chip a {
+  color: var(--fg);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.src-chip a:hover b,
+.src-chip a:focus-visible b {
+  text-decoration: underline;
+}
+.src-chip b {
+  font-weight: 600;
+}
+.src-chip .src-n {
+  color: var(--fg-dim);
+  margin-right: 4px;
+}
+.src-table {
+  color: var(--fg-dim);
+}
+.src-chip.bad {
+  border-color: color-mix(in srgb, var(--warning) 70%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.src-warn {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--warning);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 4px;
+}
+.src-x {
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 5px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.src-x:hover,
+.src-x:focus-visible {
+  color: var(--fg);
+  background: var(--bg-3);
+}
+.src-input > span:first-child {
+  font-weight: 500;
+}
+.dialog.medium {
+  width: min(760px, 94vw);
+}
+.src-intro {
+  margin: 0 0 4px;
+}
+.src-list {
+  display: grid;
+  gap: 10px;
+  max-height: 44vh;
+  overflow: auto;
+  padding: 2px 2px 4px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.src-group {
+  display: grid;
+  gap: 2px;
+}
+.src-method {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  padding: 8px 4px 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+.src-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(140px, 220px);
+  align-items: center;
+  gap: 4px 10px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+}
+.src-row:hover {
+  background: var(--bg-2);
+}
+.src-row.on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.src-what {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+.src-what input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.src-name {
+  display: grid;
+  min-width: 0;
+}
+.src-name b {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.src-row .src-table-pick {
+  width: 100%;
+}
+.src-summary {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font-size: 13px;
+}
+.src-summary ol {
+  margin: 4px 0 0;
+  padding-left: 22px;
+}
+.src-sum-head {
+  font-weight: 600;
+}
+@media (max-width: 620px) {
+  .src-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .src-row .src-from {
+    display: none;
+  }
+  .src-row .src-table-pick {
+    margin-left: 24px;
+    width: calc(100% - 24px);
+  }
+}
+
+/* ---------- home cards: their menu, what they read, out of date ---------- */
+
+.exp-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.exp-head .exp-title {
+  flex: 1;
+  min-width: 0;
+}
+.exp-more {
+  margin: -4px -6px 0 0;
+  opacity: 0.55;
+}
+.exp-card:hover .exp-more,
+.exp-more:focus-visible {
+  opacity: 1;
+}
+.exp-links a {
+  color: var(--fg);
+}
+.exp-why {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.banner.outdated {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  border-left: 3px solid var(--warning);
+}
+.outdated-why {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.outdated-why a {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* ---------- links: copy one, the place a link opens at ---------- */
+
+.result-head .result-link {
+  align-self: center;
+}
+.value-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.value-top > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.value-top .result-link {
+  margin: -4px -6px 0 0;
+  padding: 1px 6px;
+  font-size: 11.5px;
+  opacity: 0.6;
+}
+.value-card:hover .result-link,
+.value-top .result-link:focus-visible {
+  opacity: 1;
+}
+@keyframes cell-focus {
+  0%,
+  70% {
+    background: color-mix(in srgb, var(--accent) 34%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+  100% {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+}
+.layr-table td.cell-focus,
+.value-card.cell-focus {
+  animation: cell-focus 6s ease-out forwards;
+  font-weight: 700;
+}
+.value-card.cell-focus {
+  border-color: var(--accent);
+}
+.layr-table tr.row-focus td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.prov-source {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+}
+.prov-source .prov-open {
+  margin-top: 6px;
+  justify-self: start;
+}
+.ol-more {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  visibility: hidden;
+}
+.lint-dot + .ol-more {
+  margin-left: 0;
+}
+.ol-item:hover .ol-more,
+.ol-item.active .ol-more,
+.ol-more:focus-visible {
+  visibility: visible;
+}
+.ol-more:hover {
+  color: var(--fg);
+  background: var(--bg-3);
 }

@@ -36,12 +36,16 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
-/** A light value of one round (a number, a text, true/false, or the size of a bigger value) as it reads in a cell. */
+/**
+ * A light value of one round (a number, a text, true/false, the size of a bigger value, or the content of a small
+ * list or dict: its preview) as it reads in a cell.
+ */
 export function cellText(v, fmt = String) {
   if (v === null || v === undefined) return "";
   if (typeof v === "boolean") return v ? "yes" : "no";
   if (typeof v === "number") return fmt(v);
   if (typeof v !== "object") return String(v);
+  if (typeof v.preview === "string") return v.preview;
   const cols = Array.isArray(v.columns) ? v.columns.length : v.columns;
   switch (v.kind) {
     case "table":
@@ -57,6 +61,21 @@ export function cellText(v, fmt = String) {
     default:
       return v.type || v.text || v.kind || "value";
   }
+}
+
+/** The size of a light value in words ("7 entries", "table 3 × 2"), also when it has a preview. */
+export function sizeText(v, fmt = String) {
+  return v && typeof v === "object" && typeof v.preview === "string" ? cellText({ ...v, preview: undefined }, fmt) : cellText(v, fmt);
+}
+
+/**
+ * A light value's longer words, for a title: a preview with its size ("7 entries: respondent=17, q1=3, …"), a bigger
+ * value's size and that only its size was kept for every round. Null for a plain value.
+ */
+export function cellTitle(v, fmt = String) {
+  if (!v || typeof v !== "object" || v.kind === "number" || v.kind === "loop") return null;
+  if (typeof v.preview === "string") return `${sizeText(v, fmt)}: ${v.preview}`;
+  return `${cellText(v, fmt)} (only its size is kept for every round)`;
 }
 
 /** The dot colour of a light value: table, data, or none (numbers and texts have no dot). */
@@ -107,7 +126,8 @@ const csvCell = (x) => {
  *   {kind: "full", round, k, n, of, outer?}: its whole values in that round (`round` is one of the statement's
  *     `rounds`); k counts the loop's rounds over the whole call, n of `of` as she counts them (in a loop inside a
  *     loop: round n of the `of` it made in round `outer` of the loop around it; see roundWords);
- *   {kind: "light", values: {name: light value}, k, n, of, outer?}: the values from the table (a table's size only);
+ *   {kind: "light", values: {name: light value}, k, n, of, outer?}: the values from the table (a table's size only, a small
+ *     list's or dict's preview);
  *   {kind: "inner", rounds, outer, open()}: a loop inside the shown round: how many rounds it made there;
  *   {kind: "none", k?, n?, of?}: the line didn't run in the round shown.
  */
@@ -497,9 +517,11 @@ export function createRounds(opts) {
             return;
           }
           const isNum = typeof x === "number" || x?.kind === "number";
-          const shape = typeof x === "object" && !isNum;
-          tds.push(h("td", { class: isNum ? "num" : shape ? "shape" : "", title: shape ? `${cellText(x, fmt)} (only ` +
-            "its size is kept for every round)" : typeof x === "string" && x.length > 18 ? x : null }, cellText(x, fmt)));
+          const preview = typeof x?.preview === "string";
+          const shape = typeof x === "object" && !isNum && !preview;
+          tds.push(h("td", { class: isNum ? "num" : shape ? "shape" : preview ? "preview" : "",
+            title: shape || preview ? cellTitle(x, fmt) : typeof x === "string" && x.length > 18 ? x : null },
+          cellText(x, fmt)));
         });
         trs.push(h("tr", { "data-k": a + 1, class: (p?.k === a + 1 ? "on" : "") + (bad ? " failed" : ""),
           title: bad ? `The step stopped in this round: ${m.failed.error || ""}` : null }, tds));
