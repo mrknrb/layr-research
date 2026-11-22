@@ -346,12 +346,6 @@ async function storeFileRef(ref) {
   }
 }
 
-async function readText(types) {
-  const ref = await layr.files.open({ types });
-  if (!ref) return null;
-  return { name: ref.name, text: new TextDecoder().decode(await layr.files.read(ref.id)) };
-}
-
 // ------------------------------------------------------------------------------------------------ Claude (optional)
 
 // Explain and the Methods paragraph ask Claude through the claude plugin's `ask` tool, an optional connection
