@@ -67,6 +67,7 @@ export function resizable(target, opts = {}) {
   }
 
   const clamp = (px) => Math.min(max(), Math.max(min(), px));
+  let dragging = false;
   const self = {
     target,
     handle,
@@ -81,6 +82,8 @@ export function resizable(target, opts = {}) {
       handle.classList.toggle("rz-off", !on);
       self.seen = true;
       live.add(self); // back on the page after the host took it away for a while
+      // while she drags, the size being dragged wins: putting the remembered (old) one back here made it jump
+      if (dragging && on) return;
       const px = on ? opts.size?.get?.() : null;
       apply(px != null && Number.isFinite(px) && px >= min() && px <= max() ? px : null);
     },
@@ -106,6 +109,7 @@ export function resizable(target, opts = {}) {
     const from = measure();
     let px = from;
     handle.setPointerCapture(e.pointerId);
+    dragging = true;
     handle.classList.add("dragging");
     document.documentElement.classList.add(wide ? "rz-dragging-x" : "rz-dragging-y");
     const move = (ev) => {
@@ -117,6 +121,7 @@ export function resizable(target, opts = {}) {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
+      dragging = false;
       handle.classList.remove("dragging");
       document.documentElement.classList.remove("rz-dragging-x", "rz-dragging-y");
       if (Math.abs(px - from) < 1) return; // a click, not a drag

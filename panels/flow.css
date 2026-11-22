@@ -807,6 +807,7 @@ select.fl-field {
   display: none;
   flex-direction: column;
   min-width: 0;
+  flex-shrink: 0; /* the width she drags is the width it gets (the flow beside it gives way, see resize.js's max) */
 }
 .fl-side.open {
   display: flex;
