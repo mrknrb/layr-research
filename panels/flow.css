@@ -930,6 +930,20 @@ a.fl-chip:hover {
   max-height: 300px;
   overflow: auto;
 }
+/* in the side panel a long line goes on in the next row instead of scrolling sideways */
+.fl-side .cmx-highlight {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: hidden;
+}
+.fl-side .cmx-highlight.numbered .cmx-hl-line {
+  padding-left: 3.2em; /* a wrapped row starts under the code, not under the line number */
+  text-indent: -3.2em;
+}
+.fl-side .cmx-highlight.numbered .cmx-hl-ln {
+  box-sizing: border-box; /* exactly the 3.2em the row is indented by */
+  text-indent: 0;
+}
 .fl-rounds {
   display: inline-flex;
   gap: 2px;
