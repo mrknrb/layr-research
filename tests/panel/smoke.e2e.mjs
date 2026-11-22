@@ -77,7 +77,8 @@ await bench("smoke", async ({ h, open, shot, until, step }) => {
   await page.locator(".code-toggle").click();
   await page.locator(".mv-grid").waitFor({ state: "visible" });
   await until("the side panel to close", async () => (await page.locator(".fl-side.open").count()) === 0);
-  await until("the code", async () => /import /.test(await page.locator(".cm-content").first().textContent()), 30_000);
+  await until("the code of the box picked while it was folded", async () =>
+    /def scale_scores\(/.test(await page.locator(".cm-content").first().textContent()), 30_000);
   await box("Scale reliability").locator(".fl-nh").click();
   await until("the function at the cursor", async () => (await state())?.fn === "scale_reliability", 10_000);
   await until("its explanation", async () => /Scale reliability/i.test(await page.locator(".mv-inspector").innerText()), 20_000);
@@ -101,7 +102,7 @@ await bench("smoke", async ({ h, open, shot, until, step }) => {
     return null;
   });
   if (!before) throw new Error("the line of cronbach_alpha wasn't found");
-  await until("the trial run", async () => /calculated just now/.test((await state())?.trialNote || ""), 40_000);
+  await until("the trial run", async () => /^calculated/.test((await state())?.trialNote || ""), 40_000);
   await until("alpha halved in the flow", async () => /alpha\s*0\.46/.test(await flowText()), 20_000);
   if (!(await page.locator(".tab-flow .dirty-dot").count())) throw new Error("the tab doesn't say the code is changed");
   if (await page.locator(".save-btn").isDisabled()) throw new Error("Save isn't enabled with changed code");
@@ -139,13 +140,17 @@ await bench("smoke", async ({ h, open, shot, until, step }) => {
   await stop("08-saved-and-run");
 
   step("the experiment picker: the other survey, the same tab, the code as it was");
-  await page.locator(".crumb-pick").selectOption({ label: `${survey2.title} · calculated` });
+  await page.locator(".crumb-pick").selectOption({ label: `${survey2.title} · calculated · out of date` });
   await until("the other experiment", async () => (await state())?.exp === survey2.experiment, 15_000);
   await until("its title in the panel's title", async () => (await h.log(0, "title")).some((t) => t.title === survey2.title));
   if (!(await page.locator(".tabs .tab-results.active").count())) throw new Error("switching experiments left the tab");
+  await page.locator(".banner", { hasText: "Calculated with version 1 of the method" }).waitFor();
+  await page.locator(".big-number", { hasText: "0.92" }).waitFor();
   await page.locator(".tabs .tab-flow").click();
+  await page.locator(".tabs .tab-flow.active").waitFor();
   if (!(await page.locator(".mv-grid").isVisible())) throw new Error("switching experiments folded the code");
-  await until("its old numbers (run with version 1)", async () => /alpha\s*0\.9/.test(await flowText()), 20_000);
+  // its last real run is of version 1 (Results shows it); the flow shows version 2 tried on its data
+  await until("version 2 tried on it in the flow", async () => /alpha\s*0\.46/.test(await flowText()), 30_000);
   await stop("09-picker-other-experiment");
 
   step("No data: just the method");

@@ -443,6 +443,10 @@ function stateWord(e) {
   return !st ? "not run yet" : st === "done" ? "calculated" : st === "stopped" ? "stopped" : "failed";
 }
 
+/** The experiment was last calculated with an older version of its method (`version`: the method's newest). */
+const outOfDate = (e, version) =>
+  !!version && e.last_run?.status === "done" && e.last_run.method_version != null && e.last_run.method_version < version;
+
 function expCard(e) {
   return h(
     "div",
@@ -460,6 +464,7 @@ function expCard(e) {
         : e.last_run
           ? [
               badge(stateWord(e), e.last_run.status === "done" ? "success" : "danger"),
+              outOfDate(e, METHODS.find((m) => m.id === e.method)?.version) ? badge("older version of the method", "warning") : null,
               ...flagBadges(e.last_run.summary?.flags),
               h("span", { class: "layr-muted small" }, when(e.last_run.finished)),
             ]
@@ -794,8 +799,9 @@ async function renderWork(t) {
     S.run = null;
     save();
   }
-  if (!ME || ME.method !== m.id) openWork(m, docs);
-  ME.mine = all.filter((e) => e.method === m.id);
+  const mine = all.filter((e) => e.method === m.id);
+  if (!ME || ME.method !== m.id) openWork(m, docs, mine, S.exp ? exp : null);
+  ME.mine = mine;
   ME.expObj = S.exp ? exp : null;
   if (ME.numbersExp !== S.exp) switchExperiment();
   layr.panel.setTitle(ME.expObj ? ME.expObj.title : m.name).catch(() => {});
@@ -814,7 +820,13 @@ function expPicker() {
   const sel = h(
     "select",
     { class: "layr-select crumb-pick", title: "The experiment whose data goes through the method", "aria-label": "Experiment" },
-    ME.mine.map((e) => h("option", { value: e.experiment, selected: e.experiment === S.exp }, `${e.title} · ${stateWord(e)}`)),
+    ME.mine.map((e) =>
+      h(
+        "option",
+        { value: e.experiment, selected: e.experiment === S.exp },
+        `${e.title} · ${stateWord(e)}${outOfDate(e, ME.m.version) ? " · out of date" : ""}`,
+      ),
+    ),
     ME.mine.length ? h("option", { disabled: true }, "──────────") : null,
     h("option", { value: ":new" }, "New experiment…"),
     h("option", { value: ":none", selected: !S.exp }, "No data: just the method"),
@@ -1034,6 +1046,24 @@ function expBanners(exp, tab) {
   else if (!last) out.push(h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run."));
   else if (exp.changed && exp.changed > (last.started || last.finished) && !S.run)
     out.push(h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate."));
+  else if (!S.run && !exp.method_version && outOfDate(exp, ME?.m.version))
+    out.push(
+      h(
+        "div",
+        { class: "banner" },
+        `Calculated with version ${last.method_version} of the method; it is at version ${ME.m.version} now. ` +
+          "Press Run to bring the results up to date.",
+      ),
+    );
+  if (ME?.m.draft && !ME.m.draft_only && tab !== "flow")
+    out.push(
+      h(
+        "div",
+        { class: "banner quiet" },
+        "Claude proposed a change to the method. ",
+        link("Review it in Flow & code", () => go({ tab: "flow" })),
+      ),
+    );
   if (ME?.dirty && tab !== "flow")
     out.push(
       h(
@@ -1119,7 +1149,13 @@ function switchExperiment() {
   ME.trialNote = null;
   ME.inside = new Map();
   ME.tickets.trial++;
-  ME.flow.update({ experiment: S.exp, run: S.run || null });
+  const me = ME;
+  ME.flow.update({ experiment: S.exp, run: S.run || null }).then(() => {
+    // its latest run is of an older version of the code: the code as it is now is tried on it (steps reused), so
+    // every box has its numbers
+    if (ME === me && !ME.dirty && ME.flow.graph?.stale && S.autoRecalc !== false && ME.numbersExp && !S.run && !ME.busy)
+      recalc(ME.ed.getValue());
+  });
   drawValues();
   drawInspector();
   if (ME.dirty && S.autoRecalc !== false && S.exp) settle();
@@ -1297,7 +1333,7 @@ function kindBadge(kind) {
   return h("span", { class: `kind ${kind || ""}` }, kind || "");
 }
 
-// The step that made a saved table, from its file name (steps/03_integrate_peaks.csv).
+// The step that made a saved table, from its file name (steps/03_scale_scores.csv).
 function stepOfFile(file) {
   const m = /steps\/\d+_(.+?)(_in_.+|_\d+)?\.csv$/.exec(file || "");
   return m ? m[1] : null;
@@ -2061,8 +2097,11 @@ async function tabSettings(body, exp) {
       for (const p of defs)
         if (JSON.stringify(params[p.id]) !== JSON.stringify(exp.resolved_params[p.id])) changed[p.id] = params[p.id];
       await call("experiment_update", { experiment: exp.id, title: title.value, notes: notes.value, params: changed });
-      layr.ui.notify("Saved. Press Run to recalculate.", "success");
-      render();
+      if (Object.keys(changed).length) startRun(exp.id); // calculated again with the new settings
+      else {
+        layr.ui.notify("Saved", "success");
+        render();
+      }
     } catch (err) {
       fail(err);
     }
@@ -2114,7 +2153,11 @@ async function tabSettings(body, exp) {
           "Delete experiment",
         ),
         h("span", { class: "layr-spacer" }),
-        h("button", { class: "layr-button primary", onclick: saveAll }, "Save settings"),
+        h(
+          "button",
+          { class: "layr-button primary", onclick: saveAll, title: "Save, then calculate the experiment with the new settings" },
+          "Save and run",
+        ),
       ),
     ),
   );
@@ -2402,7 +2445,7 @@ function comparisonBlock(c, lead = null) {
 }
 
 /** The workspace's method is opened: the flow and the editor are mounted, the code's parts drawn. */
-function openWork(m, docs) {
+function openWork(m, docs, mine, expObj) {
   closeWork();
   ME = {
     method: m.id,
@@ -2413,8 +2456,8 @@ function openWork(m, docs) {
     summary: m.summary,
     fn: null, // set by revealTarget from S.fn
     toolbox: docs,
-    mine: [], // the experiments of this method
-    expObj: null, // the open experiment (experiment_get)
+    mine, // the experiments of this method
+    expObj, // the open experiment (experiment_get)
     numbersExp: S.exp, // the experiment whose data the flow and the code show
     trialRun: null, // the newest trial run of the code as it is in the editor
     trialRunSource: null, // the code that trial run calculated
@@ -2987,7 +3030,7 @@ async function trialRun(source) {
   const total = (r.cache?.hits || 0) + (r.cache?.misses || 0);
   if (r.status === "done")
     setTrialNote(
-      `calculated just now${r.cache?.hits ? ` · ${r.cache.hits} of ${total} reused` : ""}`,
+      `calculated${r.cache?.hits ? ` · ${r.cache.hits} of ${total} reused` : ""}`,
       "ok",
     );
   else {
@@ -3407,7 +3450,9 @@ function sharedNote() {
           e,
         ),
     },
-    `Shared with ${others.length} other experiment${others.length === 1 ? "" : "s"}`,
+    ME.numbersExp
+      ? `Shared with ${others.length} other experiment${others.length === 1 ? "" : "s"}`
+      : `Used by ${others.length} experiment${others.length === 1 ? "" : "s"}`,
   );
 }
 

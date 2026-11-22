@@ -140,7 +140,7 @@ async def test_drafts_and_acceptance(tmp_path: Path):
     moved on the reference experiment, and only the user accepts it. The user's own saves count at once."""
     async with server(tmp_path) as s:
         eid = value(await s.call_tool("lab_sample", {"which": "gc"}))["experiment"]
-        assert value(await s.call_tool("methods", {}))[0]["reference"] == eid
+        assert {m["id"]: m for m in value(await s.call_tool("methods", {}))}["gc-activity-assay"]["reference"] == eid
         first = value(await s.call_tool("run", {"experiment": eid}))
         assert first["status"] == "done"
         code = ('def specific_activity(rate_mM_per_min, biomass_gCDW_per_L):\n'
