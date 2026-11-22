@@ -53,6 +53,8 @@ await bench("code", async ({ h, open, shot, until, step }) => {
   await until("the accepted line in the code", async () =>
     page.evaluate(() => window.__lab.editor().getValue().includes("(sd over the root of n)")), 10_000);
   await until("the banner gone", async () => (await banner.count()) === 0);
+  await until("the experiment run with version 2", async () =>
+    (await h.tool("run_get", { experiment: survey.experiment })).method?.version === 2, 30_000);
 
   step("More ▾ › Versions…");
   await h.answer("menu", "Versions…");
@@ -81,7 +83,8 @@ await bench("code", async ({ h, open, shot, until, step }) => {
   const form = page.locator(".fl-form", { hasText: "Add a raw file" });
   await form.waitFor();
   const kinds = await form.locator("select option").allInnerTexts();
-  if (!kinds.some((k) => /\.csv/.test(k))) throw new Error(`the kinds of file: ${kinds.join(" | ")}`);
+  const readers = (await h.tool("blocks")).readers.map((x) => x.label);
+  if (kinds.join("|") !== readers.join("|")) throw new Error(`the kinds of file: ${kinds.join(" | ")}`);
   await form.locator("input.layr-input").first().fill("plate reads");
   await stop("44-add-raw-file");
   await form.locator("button", { hasText: "Add it" }).click();

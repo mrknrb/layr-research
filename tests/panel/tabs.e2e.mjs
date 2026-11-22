@@ -128,6 +128,10 @@ await bench("tabs", async ({ h, open, shot, until, step }) => {
   if (!mine || mine.method !== "survey-scores") throw new Error("the new experiment wasn't made with the survey's method");
   await stop("31-new-experiment-made");
 
+  // the first page is done: closed, so that it doesn't take the next params itself (one token per panel here)
+  await errors.check();
+  await page.context().close();
+
   step("the panel opened with a file: New experiment, the file under the input that reads it");
   const ref = await h.addFile({ path: answers.path, name: "answers.csv" });
   await h.setPanelState(null);
@@ -160,6 +164,4 @@ await bench("tabs", async ({ h, open, shot, until, step }) => {
   await np.locator(".exp-card").first().waitFor();
   await stop("36-narrow-home", np);
   await narrow.errors.check();
-
-  await errors.check();
 });

@@ -3788,7 +3788,8 @@ async function decideDraft(decision, source) {
     closeReview();
     await refreshMethodMeta();
     endReview();
-    render();
+    if (decision === "accept") newVersionSaved();
+    else render();
   } catch (err) {
     fail(err);
   }
@@ -3940,12 +3941,19 @@ async function saveMethod() {
     );
     await refreshMethodMeta();
     dirtyChanged();
-    if (ME?.expObj && !ME.dirty) startRun(ME.expObj.id);
+    newVersionSaved();
     return true;
   } catch (err) {
     fail(err);
     return false;
   }
+}
+
+/** A new version of the method was saved here (Save, an accepted draft, a version gone back to): the open
+ * experiment is calculated with it, for real (its steps are remembered from the trial runs, so it is quick). */
+function newVersionSaved() {
+  if (ME?.expObj && !ME.dirty) startRun(ME.expObj.id);
+  else render();
 }
 
 // After a save or an event: new versions, drafts and comparisons. Unsaved code stays; else the editor and the flow
@@ -4036,6 +4044,7 @@ async function showVersions() {
                         ME.dirty = false;
                         await refreshMethodMeta();
                         dirtyChanged();
+                        newVersionSaved();
                       } catch (err) {
                         fail(err);
                       }
@@ -4460,16 +4469,22 @@ try {
   );
   throw err;
 }
-const opened = layr.files.current?.();
-if (opened && !(layr.info.state || {}).openedFile) {
+/** A file the panel was opened with: stored, and a new experiment started from it (once per file). */
+async function openedWith(file) {
+  if (!file?.id || file.id === S.openedFile) return false;
   try {
-    S.preset = await storeFileRef(opened);
-    S.view = "new";
-    S.openedFile = opened.id;
-    save();
+    S.preset = await storeFileRef(file);
+    S.openedFile = file.id;
+    S.newMethod = null;
+    return true;
   } catch (err) {
     fail(err);
+    return false;
   }
+}
+if (await openedWith(layr.files.current?.())) {
+  S.view = "new";
+  save();
 }
 checkAi();
 try {
@@ -4478,7 +4493,14 @@ try {
   // an older layr: checked once
 }
 // A link opens the panel again at a place: its params are a show() target.
-layr.panel.onParams?.((p) => p && Object.keys(p).length && !p.file && show(p));
+layr.panel.onParams?.(async (p) => {
+  if (!p || !Object.keys(p).length) return;
+  if (p.file) {
+    if (await openedWith(p.file)) go({ view: "new" });
+    return;
+  }
+  show(p);
+});
 layr.events.on("research:lab", (ev) => {
   if (ev.what === "run" && ev.trial) {
     // A trial run (a change of the code being tried): it lights up its step, and it is not the experiment's new

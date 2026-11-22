@@ -2633,7 +2633,7 @@ export function mountFlow(container, options = {}) {
       text: "The file your instrument or spreadsheet gives you. A step that reads it is added with it.",
       fields: [
         { name: "kind", label: "Kind of file", kind: "select", value: READERS[0].function,
-          options: READERS.map((r) => [r.function, `${r.label} (${r.extensions.join(", ")})`]) },
+          options: READERS.map((r) => [r.function, r.label]) },
         { name: "name", label: "What it holds (optional)", value: "", placeholder: "e.g. plate reads", help: "A short " +
           "name: it becomes plate_reads_file in the code. Empty: the reader's usual name." },
       ],
