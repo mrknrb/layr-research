@@ -1,5 +1,5 @@
-// Every resizable place of the Experiments panel (panels/resize.js): the flow's side panel and the boxes in it (its
-// code, a whole table, the rounds table), the outline and the explanation beside the code, the flow / code divider,
+// Every resizable place of the Experiments panel (panels/resize.js): a box read under the flow (the right side, a
+// whole table, the rounds table), the outline and the explanation beside the code, the flow / code divider,
 // the Results list, a review card's list. Each is dragged, remembered after a reload, put back by a double click,
 // and sane at 700 px. Screenshots (dark and light) in tests/panel/out/ (or $SHOTS). No page errors allowed.
 //   node tests/panel/resize.e2e.mjs
@@ -58,47 +58,36 @@ await bench("resize", async ({ h, open, shot, until, step }) => {
     const id = await until(`the ${fn} box`, () =>
       page.evaluate((f) => window.__lab.flow()?.graph?.nodes.find((n) => n.fn === f)?.id, fn));
     await page.locator(`.fl-node[data-id="${id}"] .fl-nh .fl-nt`).click();
-    await page.locator(".fl-side.open .fl-editor").waitFor({ timeout: 20_000 });
+    await page.locator(".mv-grid.reading .mv-read-code .fl-editor").waitFor({ timeout: 20_000 });
     return id;
   }
   await page.locator(".exp-card").first().waitFor({ timeout: 180_000 });
 
-  // ------------------------------------------------------------------ the flow's side panel
-  step("the flow's side panel: wider by dragging its left edge, double-click for the usual width");
+  // ------------------------------------------------------------------ a box read under the flow
+  step("a box read under the flow: the right side wider by its left edge, the rounds table, a whole table");
   await page.evaluate((exp) => window.__lab.show({ exp, code: false }), survey.experiment);
   await until("the flow", async () => (await page.locator(".fl-node").count()) > 3, 30_000);
   await until("the code folded", async () => (await page.locator(".mv-split.folded").count()) === 1);
   const nodeId = await lookInside("scale_scores");
-  const side = ".fl-side.open";
-  const w0 = await width(side);
-  near(w0, 470, "the side panel's usual width");
-  await onEdge(`${side} > .rz-left`, side, "left");
-  await page.hover(`${side} > .rz-left`);
-  await shot(page, "61-resize-hover-side-edge");
-  await drag(`${side} > .rz-left`, -150, 0);
-  near(await width(side), 620, "the side panel after the drag");
-  near((await sizes())["flow.side"], 620, "the remembered width");
-  await page.dblclick(`${side} > .rz-left`);
-  near(await width(side), 470, "the side panel after a double click");
-  if ((await sizes())["flow.side"] != null) throw new Error("the double click didn't forget the width");
-  await drag(`${side} > .rz-left`, -130, 0);
-
-  step("the boxes in it: the code, the rounds table, a whole table");
-  const c0 = await height(`${side} .fl-editor`);
-  await drag(`${side} .fl-editor + .rz-bar`, 0, 110);
-  near(await height(`${side} .fl-editor`), c0 + 110, "the code's height");
-  near((await sizes())["flow.code"], c0 + 110, "the code's remembered height");
-  await page.locator(`${side} .rt tbody tr[data-k]`).first().waitFor({ timeout: 20_000 });
-  const r0 = await height(`${side} .rt-scroll`);
-  await drag(`${side} .rt-scroll + .rz-bar`, 0, -80);
-  near(await height(`${side} .rt-scroll`), r0 - 80, "the rounds table's height");
+  const info = ".mv-grid.reading .mv-read-info";
+  const code = ".mv-grid.reading .mv-read-code";
+  await onEdge(".mv-col > .rz-left", ".mv-col:last-child", "left");
+  const w0 = await width(info);
+  await drag(".mv-col > .rz-left", -100, 0);
+  near(await width(info), w0 + 100, "the right side after the drag");
+  await page.dblclick(".mv-col > .rz-left");
+  near(await width(info), w0, "the right side after a double click");
+  await page.locator(`${info} .rt tbody tr[data-k]`).first().waitFor({ timeout: 20_000 });
+  const r0 = await height(`${info} .rt-scroll`);
+  await drag(`${info} .rt-scroll + .rz-bar`, 0, -80);
+  near(await height(`${info} .rt-scroll`), r0 - 80, "the rounds table's height");
   near((await sizes())["flow.rounds"], r0 - 80, "the rounds table's remembered height");
-  await page.hover(`${side} .rt-scroll + .rz-bar`);
-  await stop("62-resize-side");
+  await page.hover(`${info} .rt-scroll + .rz-bar`);
+  await stop("62-resize-reading");
   await page.locator(`.fl-node[data-id="${nodeId}"] .fl-out[data-out="scores"] .fl-on`).click();
-  await page.locator(`${side} .fl-scroll.big`).waitFor({ timeout: 20_000 });
-  await drag(`${side} .fl-scroll.big + .rz-bar`, 0, -120);
-  const t1 = await height(`${side} .fl-scroll.big`);
+  await page.locator(`${code} .fl-scroll.big`).waitFor({ timeout: 20_000 });
+  await drag(`${code} .fl-scroll.big + .rz-bar`, 0, -120);
+  const t1 = await height(`${code} .fl-scroll.big`);
   near((await sizes())["flow.table"], t1, "the whole table's remembered height");
 
   // ------------------------------------------------------------------ beside the code
@@ -171,16 +160,16 @@ await bench("resize", async ({ h, open, shot, until, step }) => {
   await page.evaluate(() => window.__lab.show({ code: false }));
   await until("the code folded", async () => (await page.locator(".mv-split.folded").count()) === 1);
   await lookInside("scale_scores");
-  near(await width(side), before["flow.side"], "the side panel after a reload");
-  near(await height(`${side} .fl-editor`), before["flow.code"], "its code after a reload");
+  await page.locator(`${info} .rt tbody tr[data-k]`).first().waitFor({ timeout: 20_000 });
+  near(await height(`${info} .rt-scroll`), before["flow.rounds"], "the rounds table read after a reload");
 
   // ------------------------------------------------------------------ 700 px
   step("700 px: remembered sizes that don't fit are left aside, nothing is cut off");
   await page.setViewportSize({ width: 700, height: 800 });
   await page.waitForTimeout(400);
-  const sw = await width(side);
-  if (sw > 700 * 0.6) throw new Error(`the side panel is ${sw} px wide at 700 px`);
-  await stop("66-resize-700-side");
+  const cw = await width(code);
+  if (cw > 700) throw new Error(`the code read is ${cw} px wide at 700 px`);
+  await stop("66-resize-700-reading");
   await page.keyboard.press("Escape");
   await page.evaluate(() => window.__lab.show({ fn: "scale_scores" }));
   await until("the code shown", async () => (await page.locator(".mv-split:not(.folded) .mv-grid").count()) === 1);

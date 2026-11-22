@@ -152,7 +152,7 @@ await bench("links", async ({ h, open, shot, until, step }) => {
     await page.locator('[data-test="cell"]').click({ button: "right" });
   }, { experiment: spring, result: "step:group_means", column: "mean_score", row: { group: "rural" } });
 
-  step("a step: its box's menu and the look-inside panel; a function: the outline beside the code");
+  step("a step: its box's menu and reading it under the flow; a function: the outline beside the code");
   await go({ exp: spring, tab: "flow", code: false });
   await until("the flow", async () => (await page.locator(".fl-node").count()) > 3, 30_000);
   const boxOf = (fn) => until(`the ${fn} box`, () =>
@@ -164,8 +164,8 @@ await bench("links", async ({ h, open, shot, until, step }) => {
   }, { experiment: spring, function: "scale_scores" });
   const meansBox = await boxOf("group_means");
   await page.locator(`.fl-node[data-id="${meansBox}"] .fl-nh .fl-nt`).click();
-  await page.locator(".fl-side.open .fl-copylink").waitFor({ timeout: 20_000 });
-  await copied("step", () => page.locator(".fl-side.open .fl-copylink").click(), { experiment: spring, function: "group_means" });
+  await page.locator(".mv-grid.reading .mv-read-info .fl-copylink").waitFor({ timeout: 20_000 });
+  await copied("step", () => page.locator(".mv-grid.reading .mv-read-info .fl-copylink").click(), { experiment: spring, function: "group_means" });
   await stop("85-copy-step-inside");
   await page.keyboard.press("Escape");
   await go({ fn: "cronbach_alpha" });
@@ -234,11 +234,11 @@ await bench("links", async ({ h, open, shot, until, step }) => {
   await openRef(links.step.ref);
   await until("the step looked inside", async () => {
     const p = await panel();
-    return p.exp === spring && p.tab === "flow" && p.code === false && (await page.locator(".fl-side.open .fl-copylink").count()) > 0;
+    return p.exp === spring && p.tab === "flow" && p.code === true && p.codeMode === "read" && (await page.locator(".mv-grid.reading .mv-read-info .fl-copylink").count()) > 0;
   }, 30_000);
   await page.locator(`.fl-node.sel[data-id="${meansBox}"]`).waitFor({ timeout: 20_000 });
-  const sideTitle = await page.locator(".fl-side.open .fl-st").innerText();
-  if (!/group means/i.test(sideTitle)) throw new Error(`the side panel shows ${sideTitle}`);
+  const sideTitle = await page.locator(".mv-grid.reading .mv-read-info .fl-st").innerText();
+  if (!/group means/i.test(sideTitle)) throw new Error(`reading shows ${sideTitle}`);
   await stop("88-open-step");
   await openRef(links["step (box menu)"].ref);
   await page.locator(`.fl-node.sel[data-id="${scaleBox}"]`).waitFor({ timeout: 30_000 });

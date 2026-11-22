@@ -155,14 +155,14 @@ await bench("sources", async ({ h, open, shot, until, step }) => {
   await stop("77-home-outdated");
 
   // ------------------------------------------------------------------ the flow's input box
-  step("the flow: the input box shows what it reads; its side panel lists the sources and the table read");
+  step("the flow: the input box shows what it reads; read under the flow, it lists the sources and the table read");
   await page.evaluate((exp) => window.__lab.show({ exp, tab: "flow", code: false }), cmp.experiment);
   const inBox = page.locator('.fl-node.src.from[data-id="in:results"]');
   await inBox.waitFor({ timeout: 30_000 });
   const inText = await inBox.innerText();
   if (!/2 experiments · scores/.test(inText)) throw new Error(`the input box says: ${inText}`);
   await inBox.locator(".fl-nh").click();
-  const side = page.locator(".fl-side.open");
+  const side = page.locator(".mv-grid.reading .mv-read-code"); // a box without code: read in the middle
   await side.locator(".fl-srcchip").nth(1).waitFor({ timeout: 20_000 });
   await side.locator(".fl-tv tbody tr").first().waitFor({ timeout: 20_000 });
   await stop("78-flow-input");

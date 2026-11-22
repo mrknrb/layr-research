@@ -1211,6 +1211,80 @@ section.page-card + section.page-card {
 .mv-status > * {
   white-space: nowrap;
 }
+/* reading (S.codeMode "read"): the box picked in the flow, its code in the middle and the rest on the right; the
+   editor and its explanation wait hidden until ✎ Edit the code */
+.mv-grid .mv-read-code,
+.mv-grid .mv-read-info {
+  display: none;
+}
+.mv-grid.reading .mv-editor,
+.mv-grid.reading .mv-status,
+.mv-grid.reading .mv-inspector {
+  display: none;
+}
+.mv-grid.reading .mv-middle {
+  grid-template-rows: minmax(0, 1fr);
+}
+.mv-grid.reading .mv-read-code,
+.mv-grid.reading .mv-read-info {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  height: auto;
+}
+.mv-grid.reading .mv-read-code {
+  padding: 0 10px 8px;
+  overflow: auto;
+}
+.mv-read-code > .fl-h4 {
+  margin: 8px 0 6px;
+}
+.mv-read-code > .fl-editor {
+  flex: 1;
+  height: auto;
+  min-height: 160px;
+}
+.mv-read-code > .fl-snippet {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mv-read-code > .fl-snippet .cmx-highlight {
+  flex: 1;
+  max-height: none;
+  overflow: auto;
+}
+/* a box without code (a table, a raw file): its title and what it holds fill the middle */
+.mv-read-code > .fl-sh {
+  margin: 0 -10px;
+}
+.mv-grid.reading .mv-read-info {
+  border-left: 1px solid var(--border);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.mv-read-info .fl-sb {
+  background: var(--bg-2);
+}
+.fl-sh.fl-place-head {
+  padding-right: 10px; /* no close button here */
+}
+.fl-place-body .fl-err {
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  margin: 6px 0;
+}
+.read-empty,
+.mv-read-info .fl-place-note {
+  margin: 0;
+  padding: 14px 12px;
+  color: var(--fg-dim);
+}
+.code-bar .code-mode {
+  margin-left: 6px;
+}
 .mv-status .dirty {
   color: var(--warning);
   font-weight: 600;

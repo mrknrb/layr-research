@@ -26,6 +26,8 @@ const S = {
   tab: "flow", // flow ("Flow & code") | page:<n> | results | checks | corrections | settings
   run: null, // an earlier run of the experiment picked in the flow (null: its latest)
   code: false, // the Flow & code tab shows the code under the flow (false: folded away, the flow fills the tab)
+  codeMode: "read", // the code under the flow: "read" (the box picked in the flow, its code with this run's values and
+  // what went in and came out) or "edit" (the whole method in the editor)
   fn: null, // the function the code shows (where the cursor is)
   line: null, // a line of the code to show, once
   result: {}, // what the Results tab shows, per experiment: {experiment: ":numbers" | an output | "step:<function>"}
@@ -188,6 +190,8 @@ async function show(target = {}) {
   const patch = { view: "work", method: t.method, exp };
   patch.tab = t.tab || (t.result ? "results" : t.fn || t.line ? "flow" : same ? S.tab : "flow");
   patch.code = t.fn || t.line ? true : "code" in t ? !!t.code : same ? S.code : !exp;
+  // a link to a line of the code, or a method without data: the code to edit; else it is read
+  if (t.fn || t.line || (!same && !exp)) patch.codeMode = "edit";
   if (t.fn !== undefined || !same) patch.fn = t.fn || null;
   if (t.line) patch.line = t.line;
   if ("run" in t) patch.run = t.run || null;
@@ -555,7 +559,7 @@ async function openRef(text) {
     }
     const at = { method: e.method, exp: e.experiment };
     if (p.function) {
-      // a step: the flow, its box selected and looked inside (the code stays folded: the flow's side panel shows it)
+      // a step: the flow, its box selected and looked inside (read under the flow: see onInside in mountMethodFlow)
       await show({ ...at, tab: "flow", code: false });
       if (got.ok && (await flowReady(e.experiment))) ME.flow.lookInside(p.function);
       return tell();
@@ -1271,7 +1275,9 @@ async function drawWork(t) {
       put(els.body, els.main);
       ME.ed.view.requestMeasure();
     }
-    if (els.split.classList.contains("folded") === !!S.code) codeShown(); // a link showed or folded the code
+    // a link showed or folded the code, or asked for the code to edit (a line of it) while it was read
+    if (els.split.classList.contains("folded") === !!S.code ||
+      els.grid.classList.contains("reading") === (S.codeMode === "edit")) codeShown();
     revealTarget();
     return;
   }
@@ -2929,6 +2935,7 @@ window.__lab = {
       exp: ME.exp,
       fn: ME.fn,
       code: S.code,
+      codeMode: S.codeMode,
       version: ME.m?.version,
     },
 };
@@ -3033,6 +3040,7 @@ function openWork(m, docs, mine, expObj) {
   layoutCode();
   ME.ed = mountMethodEditor(ME.els.editor, m.source);
   ME.flow = mountMethodFlow(ME.els.flow, m.source);
+  emptyReading();
   drawBanners();
   drawOutline();
   drawLint();
@@ -3068,12 +3076,15 @@ function workParts() {
     editor: h("div", { class: "mv-editor" }),
     status: h("div", { class: "mv-status small" }),
     inspector: h("div", { class: "mv-inspector" }),
+    // reading: the box picked in the flow, its code (with this run's values) and the rest beside it (flow.js draws them)
+    readCode: h("div", { class: "mv-read-code fl" }),
+    readInfo: h("div", { class: "mv-read-info fl" }),
   };
   els.ws.append(els.tabs, els.wsBanners, els.body);
-  els.middle = h("div", { class: "mv-middle" }, els.editor, els.status);
+  els.middle = h("div", { class: "mv-middle" }, els.editor, els.status, els.readCode);
   // the outline and the explanation scroll inside a frame that holds their resize strip
   els.outlineCol = h("div", { class: "mv-col" }, els.outline);
-  els.inspectorCol = h("div", { class: "mv-col" }, els.inspector);
+  els.inspectorCol = h("div", { class: "mv-col" }, els.inspector, els.readInfo);
   els.grid = h("div", { class: "mv-grid" }, els.outlineCol, els.middle, els.inspectorCol);
   els.split = h("div", { class: "mv-split" }, els.flow, els.bar, els.grid);
   // their widths: the outline's right edge and the explanation's left edge are dragged; the code takes the rest
@@ -3129,9 +3140,11 @@ function layoutCode() {
  * side panel (unfolded, a box shows its function in the code). */
 function applyFold() {
   const els = ME.els;
+  const editing = S.codeMode === "edit";
   els.split.classList.toggle("folded", !S.code);
   els.split.style.gridTemplateRows = S.code ? "minmax(120px, 42%) auto minmax(160px, 1fr)" : "minmax(0, 1fr) auto";
   els.grid.hidden = !S.code;
+  els.grid.classList.toggle("reading", !editing);
   if (S.code) for (const r of [els.flowRz, els.outlineRz, els.inspectorRz]) r.refresh(); // the sizes she gave them
   put(
     els.bar,
@@ -3146,11 +3159,58 @@ function applyFold() {
       S.code ? "▾ Hide the code" : "▴ Show the code",
     ),
     S.code
+      ? h(
+          "button",
+          {
+            class: "layr-button small code-mode" + (editing ? " primary" : ""),
+            title: editing
+              ? "Back to reading: the box picked in the flow, its code with this run's values and what went in and came out"
+              : "Edit the method's code: the whole file in the editor",
+            onclick: () => setCodeMode(editing ? "read" : "edit"),
+          },
+          editing ? "✓ Back to reading" : "✎ Edit the code",
+        )
+      : null,
+    S.code
       ? h("span", { class: "code-grip", title: "Drag to give the flow or the code more room" })
-      : h("span", { class: "layr-muted small code-hint" }, "the outline, the code and what each function does"),
-    !S.code && ME.dirty ? h("span", { class: "dirty small" }, "Unsaved changes") : null,
+      : h("span", { class: "layr-muted small code-hint" }, "click a box to read its code, or edit the method's code"),
+    ME.dirty && (!S.code || !editing) ? h("span", { class: "dirty small" }, "Unsaved changes") : null,
   );
-  ME.flow?.setInside(S.code ? "host" : "panel");
+  // reading: a box clicked in the flow is shown in the code's place; editing: its function is shown in the editor
+  ME.flow?.setInside(S.code && editing ? "host" : "panel");
+}
+
+/** Reading the picked box or editing the whole code ("read" | "edit"); the code is shown if it was folded. */
+function setCodeMode(mode) {
+  if (!ME) return;
+  const was = S.codeMode;
+  S.codeMode = mode;
+  if (!S.code) return setCode(true);
+  save();
+  codeShown();
+  if (was === mode) return;
+  if (mode === "read") {
+    // what the editor was on is read
+    if (!(ME.fn && ME.flow?.lookInside(ME.fn))) emptyReading();
+  } else {
+    const line = (ME.summary?.outline || []).find((x) => x.name === ME.fn)?.line;
+    if (line) setTimeout(() => ME?.ed.reveal(line, { select: false }), 30);
+  }
+}
+
+/** Nothing picked to read: what to do to see something here. */
+function emptyReading() {
+  if (!ME) return;
+  put(
+    ME.els.readCode,
+    h(
+      "div",
+      { class: "read-empty" },
+      h("p", {}, "Click a box in the flow, or a step on the left, to read its code here with this run's values."),
+      h("p", { class: "layr-muted small" }, "To change the code, press ✎ Edit the code on the bar above."),
+    ),
+  );
+  put(ME.els.readInfo, h("p", { class: "layr-muted small read-empty" }, "What went in and came out shows here."));
 }
 
 function setCode(on) {
@@ -3232,7 +3292,15 @@ function mountMethodFlow(host, source) {
     experiment: ME.exp,
     run: S.run || null,
     editable: true,
-    inside: S.code ? "host" : "panel",
+    inside: S.code && S.codeMode === "edit" ? "host" : "panel",
+    // looking inside a box: under the flow, its code beside the outline and the rest on the right (reading)
+    place: { code: ME.els.readCode, info: ME.els.readInfo, empty: () => emptyReading() },
+    onInside: () => {
+      if (!S.code) {
+        S.codeMode = "read";
+        setCode(true);
+      }
+    },
     picker: "runs", // the experiment is picked in the path at the top; the flow offers its earlier runs
     claude: AI.claude,
     runNote: false, // the screen's banner says when the last run failed, with a link to the line
@@ -3309,7 +3377,7 @@ function flowSelected({ node, fn, line }) {
 function flowOpened(o) {
   if (!ME) return;
   if (o.what === "function") {
-    setCode(true);
+    setCodeMode("edit");
     if (o.created && o.fn) return cursorInFunction(o.fn);
     const own = o.fn && (ME.summary?.outline || []).find((f) => f.name === o.fn);
     const line = own?.line || (o.fn ? defLine(o.fn) : null) || o.line;
@@ -4298,7 +4366,13 @@ function drawOutline() {
             {
               class: `ol-item ${f.name === ME.fn ? "active" : ""}`,
               title: f.sentence || "",
-              onclick: () => jumpTo(f.line, f.name),
+              onclick: () => {
+                // reading: the step is opened beside the outline (its box picked in the flow)
+                if (S.codeMode !== "edit") {
+                  jumpTo(f.line, f.name, { focus: false });
+                  ME.flow?.lookInside(f.name);
+                } else jumpTo(f.line, f.name);
+              },
               oncontextmenu: (e) => menu(e, f),
             },
             h("span", { class: "ol-name" }, f.name),
@@ -4331,6 +4405,7 @@ function drawOutline() {
               drawOutline();
               drawInspector();
               drawValues();
+              if (S.codeMode !== "edit") ME.flow?.lookInside(t.name);
             },
           },
           h("span", { class: "ol-name" }, t.name),

@@ -237,6 +237,8 @@ function tableEl(columns, rows, maxCols = 99) {
  * tables "rounds"; without it they last while the flow is open), `copyLink({fn})` (a box's menu and the look-inside
  * panel offer "Copy link" to a step of the method). `onOpen` also gets `{what: "sources", input}` (pick what a result
  * input reads) and `{what: "experiment", experiment}` (open an experiment it reads).
+ * `place: {code, info, empty()}`: looking inside a box happens there instead of the side panel (its code in `code`,
+ * the rest in `info`; `empty()` when nothing is shown), with `onInside()` when she opens a box (the host shows them).
  * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now),
  * `setInside("panel" | "host")`, `lookInside(fn)` (a link to a step) and `fit()`.
  * Keys: Escape closes the newest thing open, Delete removes the selected box (editable), Enter or Space on a box's
@@ -1624,6 +1626,7 @@ export function mountFlow(container, options = {}) {
     if (n) O.onSelect?.({ node: n.id, fn: n.fn || null, line: n.line });
     if (!open) return;
     if (O.inside !== "panel") return;
+    if (O.place) O.onInside?.(); // the host shows its place (e.g. unfolds the code under the flow)
     if (n) {
       if (n.kind === "call" && n.fn) openInside(n.fn, { node: n });
       else openCodeBox(n);
@@ -1744,8 +1747,32 @@ export function mountFlow(container, options = {}) {
 
   // ---------------------------------------------------------------- side panel
   let sideOpener = null; // the box that opened the inside panel: it gets the focus back when the panel closes
-  function openSide(title, { crumbs, buttons } = {}) {
+  /**
+   * The host gave its own place to look inside (O.place = {code, info, empty()}): a step's code goes to `code`, the
+   * rest (what went in, its loops, what came out…) to `info`; a box without code (a table, a raw file) fills `code`
+   * and `info` says so. `code: true` when this view has code.
+   */
+  function openPlace(title, { crumbs, buttons, code = false } = {}) {
+    S.placeCode = code;
+    const head = h("div", { class: "fl-sh fl-place-head" }, h("span", { class: "fl-st", title }, title), buttons);
+    const body = h("div", { class: "fl-sb fl-place-body" }, crumbs);
+    if (code) {
+      put(O.place.info, head, body);
+      put(O.place.code);
+    } else {
+      put(O.place.code, head, body);
+      put(O.place.info, h("p", { class: "fl-dim fl-place-note" }, "This box has no code of its own: what it holds " +
+        "is shown in the middle."));
+    }
+    O.place.code.scrollTop = 0;
+    O.place.info.scrollTop = 0;
+    return body;
+  }
+  /** Where a view's code goes: the host's code place, or the side panel's body with the rest. */
+  const codeHost = (body) => (O.place && S.placeCode ? O.place.code : body);
+  function openSide(title, { crumbs, buttons, code = false } = {}) {
     destroyEditor();
+    if (O.place) return openPlace(title, { crumbs, buttons, code });
     if (!side.classList.contains("open")) sideOpener = root.contains(document.activeElement) &&
       !side.contains(document.activeElement) ? document.activeElement : null;
     side.classList.add("open");
@@ -1762,6 +1789,7 @@ export function mountFlow(container, options = {}) {
   function closeSide(restore = false) {
     const had = side.contains(document.activeElement);
     destroyEditor();
+    if (O.place) O.place.empty?.();
     side.classList.remove("open");
     root.classList.remove("side-open");
     S.side = null;
@@ -1829,6 +1857,7 @@ export function mountFlow(container, options = {}) {
     const toolbox = node && (node.fn_kind === "toolbox" || node.fn_kind === "class" || node.fn_kind === "builtin");
     const ownFn = !toolbox;
     const body = openSide(top && node?.fn === fn ? boxTitle(node) : human(fn), {
+      code: true,
       crumbs: crumbsEl(),
       buttons: [top ? traceButton() : null, top && node ? actionsOf(node).map((a) => h("button", { class:
         "layr-button small", title: a.title || null, onclick: (e) => a.run(e) }, a.label)) : null,
@@ -1880,10 +1909,11 @@ export function mountFlow(container, options = {}) {
     }
     if (ex.formulas?.length) add(body, sec("Formulas"), ex.formulas.map((f) => formulaBox(f.latex, f.code)));
     if (ex.code) {
-      add(body, sec(toolbox ? "Its code (read only; copy it into the method to change it)" : "The code"));
+      const host = codeHost(body);
+      add(host, sec(toolbox ? "Its code (read only; copy it into the method to change it)" : "The code"));
       const box = h("div", { class: "fl-editor" });
-      body.append(box);
-      tallBox(box, "code");
+      host.append(box);
+      if (host === body) tallBox(box, "code");
       editor = createEditor(box, { doc: ex.code, readOnly: true, chipsBelow: true,
         firstLine: !toolbox && ex.line ? ex.line : 1 });
     }
@@ -1937,10 +1967,11 @@ export function mountFlow(container, options = {}) {
     const guards = (f.guards || []).filter((g) => !(stopped && g.line <= stopped.line && stopped.line <= g.end_line));
     const guardsBtn = guards.length ? h("a", { class: "fl-link", onclick: () => editor && editor.toggleFolds() },
       `${plural(guards.length, "check")} folded`) : null;
-    add(body, sec("The code, with this run's values", " ", nav, " ", guardsBtn));
+    const host = codeHost(body);
+    add(host, sec("The code, with this run's values", " ", nav, " ", guardsBtn));
     const box = h("div", { class: "fl-editor" });
-    body.append(box);
-    tallBox(box, "code");
+    host.append(box);
+    if (host === body) tallBox(box, "code");
     editor = createEditor(box, { doc: f.code || "", readOnly: true, firstLine: base, chipsBelow: true });
     if (R) add(body, sec(R.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), R.el);
     const lineOf = (n) => n - base + 1;
@@ -2066,13 +2097,14 @@ export function mountFlow(container, options = {}) {
 
   function openCodeBox(n) {
     S.side = { kind: "code", node: n.id };
-    const body = openSide(n.title, { buttons: [traceButton(), h("button", { class: "layr-button small", onclick: () =>
-      O.onOpen?.({ what: "function", fn: null, line: n.line }) }, "Edit in the code")] });
+    const body = openSide(n.title, { code: true, buttons: [traceButton(), h("button", { class: "layr-button small",
+      onclick: () => O.onOpen?.({ what: "function", fn: null, line: n.line }) }, "Edit in the code")] });
     add(body, h("div", { class: "fl-chips" }, badge("code"), h("span", { class: "fl-dim" }, `line ${n.line}`)),
-      h("p", { class: "fl-dim" }, "Lines of the recipe that aren't one step: they are shown as they are."),
-      h("div", { class: "fl-snippet" }, highlight(n.code, { lineNumbers: true, firstLine: n.line })));
-    const snippet = body.querySelector(".fl-snippet .cmx-highlight");
-    if (snippet) tallBox(snippet, "snippet", { scrolls: true });
+      h("p", { class: "fl-dim" }, "Lines of the recipe that aren't one step: they are shown as they are."));
+    const host = codeHost(body);
+    host.append(h("div", { class: "fl-snippet" }, highlight(n.code, { lineNumbers: true, firstLine: n.line })));
+    const snippet = host.querySelector(".fl-snippet .cmx-highlight");
+    if (snippet && host === body) tallBox(snippet, "snippet", { scrolls: true });
     const ins = {};
     for (const p of n.ports) if (p.source === "wire") ins[p.wire] = wireValue(p.from, p.wire);
     if (Object.keys(ins).length) add(body, sec("What it reads"), valueChips(ins));
@@ -3138,6 +3170,7 @@ export function mountFlow(container, options = {}) {
       if (O.inside !== "panel") return false;
       S.sel = null;
       classes();
+      if (O.place) O.onInside?.();
       openInside(fn);
       return true;
     },

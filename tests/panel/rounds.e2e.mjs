@@ -107,14 +107,15 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
   }
   await page.locator(".exp-card").first().waitFor({ timeout: 180_000 });
 
-  // ------------------------------------------------------------------ the flow's side panel
+  // ------------------------------------------------------------------ a box read under the flow
   step("the survey's scale scores, looked inside in the flow: its loop of 160 rounds as a table");
   await page.evaluate((exp) => window.__lab.show({ exp, code: false }), survey.experiment);
   await until("the flow", async () => (await page.locator(".fl-node").count()) > 3, 30_000);
   const nodeId = await until("the scale scores box", () =>
     page.evaluate(() => window.__lab.flow()?.graph?.nodes.find((n) => n.fn === "scale_scores")?.id));
   await page.locator(`.fl-node[data-id="${nodeId}"] .fl-nh .fl-nt`).click();
-  const side = ".fl-side.open";
+  // read under the flow: its code (with the chips) in the middle, its loops' tables on the right
+  const side = ":is(.mv-grid.reading .mv-read-code, .mv-grid.reading .mv-read-info)";
   await page.locator(`${side} .rt`).first().waitFor({ timeout: 20_000 });
   await until("its rows", async () => (await rowsOnPage(side)) > 5, 20_000);
   const heads = await page.locator(`${side} .rt thead th`).allInnerTexts();
@@ -173,7 +174,6 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
 
   // ------------------------------------------------------------------ beside the code editor
   step("the code shown: answer_checks' loops beside it, the `if` column with blanks");
-  await page.locator(`${side} button[aria-label="Close"]`).click();
   await page.evaluate(() => window.__lab.show({ fn: "answer_checks" }));
   const insp = ".mv-inspector";
   await until("its two loops", async () => (await page.locator(`${insp} .rt`).count()) === 2, 30_000);
@@ -255,7 +255,7 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
   if (lag > 500) throw new Error(`the panel hangs (${lag} ms for a frame)`);
   await stop("54-rounds-10500");
 
-  step("the same in the flow's side panel, folded, and at 700 px");
+  step("the same read under the flow (a box clicked while folded), and at 700 px");
   await page.evaluate(() => window.__lab.show({ code: false }));
   await until("the code folded", async () => (await page.locator(".mv-split.folded").count()) === 1);
   const sumId = await until("the long sum box", () =>
@@ -265,7 +265,6 @@ await bench("rounds", async ({ h, open, shot, until, step }) => {
   await page.setViewportSize({ width: 700, height: 800 });
   await page.waitForTimeout(400);
   await stop("55-rounds-flow-700");
-  await page.locator(`${side} button[aria-label="Close"]`).click();
   await page.evaluate((exp) => window.__lab.show({ exp, fn: "scale_scores" }), survey.experiment);
   await until("the table beside the code", async () => (await page.locator(`${insp} .rt tbody tr[data-k]`).count()) > 5, 30_000);
   await until("the table in view", async () => {
