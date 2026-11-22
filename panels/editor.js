@@ -746,10 +746,19 @@ function placeChips(view) {
       }
       return out;
     },
-    write(list) {
+    write(list, v) {
+      let moved = false;
       for (const { w, below, indent } of list) {
+        moved ||= w.classList.contains("below") !== below;
         w.classList.toggle("below", below);
         w.style.paddingLeft = below ? `calc(${indent}ch + 2px)` : "";
+      }
+      // lines got taller or shorter (the editor became narrower or wider): their heights are measured again, so the
+      // line numbers in the gutter stay beside their lines (CodeMirror skips a size change right after an update,
+      // and this one always is: its own flag for "measure the lines" is set)
+      if (moved) {
+        if (v.viewState) v.viewState.mustMeasureContent = true;
+        v.requestMeasure();
       }
     },
   });

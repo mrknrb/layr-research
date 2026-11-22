@@ -8,6 +8,8 @@
 import { createEditor, createMerge, highlight } from "./editor.js";
 import { mountFlow } from "./flow.js";
 import { createPages } from "./pages.js";
+import { resizable } from "./resize.js";
+import { cellKind, cellText, createRounds, roundWords } from "./rounds.js";
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -30,7 +32,8 @@ const S = {
   review: {}, // each review card's item, region, filter and zoom (pages.js)
   focus: null, // {item, label} a review card opens at (a link from Checks or Corrections)
   newMethod: null, // the method a new experiment starts with
-  flowFrac: 0.42, // how much of the Flow & code tab's height the flow takes while the code shows
+  flowFrac: null, // how much of the Flow & code tab's height the flow takes while the code shows (null: the usual)
+  sizes: {}, // the sizes she dragged, in px, per place (resize.js): "work.outline", "flow.side", "results.list" …
   autoRecalc: true, // after a change of the code, a trial run on the experiment by itself
   seenComparison: null, // "method:version" whose comparison banner was closed
 };
@@ -105,6 +108,22 @@ function save() {
   const { line, setting, focus, newMethod, preset, ...keep } = S; // what only the next drawing uses isn't kept
   layr.panel.setState(keep).catch(() => {});
 }
+
+/** Where a size she drags at `place` is remembered (S.sizes, saved with the panel's state): resizable's `size`. */
+function sizeOf(place) {
+  return {
+    get: () => S.sizes?.[place] ?? null,
+    set: (px) => {
+      S.sizes = { ...S.sizes };
+      if (px == null) delete S.sizes[place];
+      else S.sizes[place] = px;
+      save();
+    },
+  };
+}
+
+/** Wide enough for boxes side by side (narrower, the CSS stacks them and nothing is resized sideways). */
+const sideBySide = (px = 760) => innerWidth > px;
 
 /** Changes the state and draws the panel again. Leaving the workspace with unsaved code asks first. */
 function go(patch) {
@@ -776,6 +795,7 @@ const PG = createPages({
   kv: (k, v) => kv(k, v),
   filteredTable: (...a) => filteredTable(...a),
   token: () => token,
+  sizeOf: (place) => sizeOf(place), // where a size she drags is remembered (resize.js)
 });
 
 /** The run the experiment's tabs show: an earlier one picked in the flow, else its latest (never a trial run). */
@@ -948,6 +968,7 @@ async function drawWork(t) {
       put(els.body, els.main);
       ME.ed.view.requestMeasure();
     }
+    if (els.split.classList.contains("folded") === !!S.code) codeShown(); // a link showed or folded the code
     revealTarget();
     return;
   }
@@ -1484,7 +1505,19 @@ async function tabResults(body, exp, t) {
       ),
     );
   }
-  put(body, h("div", { class: "results" }, list, shown));
+  // the list's right edge is dragged to make it wider (the list scrolls inside a frame that holds the strip)
+  const side = h("div", { class: "result-side" }, list);
+  const grid = h("div", { class: "results" }, side, shown);
+  put(body, grid);
+  resizable(side, {
+    edge: "right",
+    min: 150,
+    max: () => Math.max(150, grid.clientWidth - 320),
+    enabled: () => sideBySide(),
+    size: sizeOf("results.list"),
+    apply: (px) => (px == null ? grid.style.removeProperty("--list-w") : grid.style.setProperty("--list-w", `${px}px`)),
+    title: "Drag to make the list wider or narrower · double-click for the usual width",
+  });
   choose(pick);
 }
 
@@ -2350,6 +2383,8 @@ function closeWork() {
   ME.review?.merge?.destroy();
   ME.flow?.destroy();
   ME.ed?.destroy();
+  ME.rounds?.destroy();
+  for (const r of [ME.els?.flowRz, ME.els?.outlineRz, ME.els?.inspectorRz]) r?.destroy();
   clearTimeout(ME.checkTimer);
   clearTimeout(ME.cursorTimer);
   clearTimeout(ME.metaTimer);
@@ -2362,6 +2397,7 @@ window.__lab = {
   editor: () => ME?.ed || null,
   merge: () => ME?.review?.merge || null,
   flow: () => ME?.flow || null,
+  rounds: () => ME?.rounds || null,
   format: () => formatCode(),
   claudeStep: (o) => claudeStep(o),
   show: (target) => show(target),
@@ -2467,6 +2503,10 @@ function openWork(m, docs, mine, expObj) {
     aiStep: null, // {fn}: a step Claude wrote, not saved yet
     ai: null,
     inside: new Map(), // "run or experiment|function" → {promise, value} of function_inside
+    shownInside: null, // function_inside of the function whose values the code shows
+    rounds: null, // the rounds tables of its loops (rounds.js), in roundsBox beside the code
+    roundsKey: null,
+    roundsBox: h("div", { class: "rounds-box" }),
     tickets: { hover: 0, values: 0, check: 0, trial: 0 },
     review: null,
     busy: false,
@@ -2513,34 +2553,50 @@ function workParts() {
   };
   els.ws.append(els.tabs, els.wsBanners, els.body);
   els.middle = h("div", { class: "mv-middle" }, els.editor, els.status);
-  els.grid = h("div", { class: "mv-grid" }, els.outline, els.middle, els.inspector);
+  // the outline and the explanation scroll inside a frame that holds their resize strip
+  els.outlineCol = h("div", { class: "mv-col" }, els.outline);
+  els.inspectorCol = h("div", { class: "mv-col" }, els.inspector);
+  els.grid = h("div", { class: "mv-grid" }, els.outlineCol, els.middle, els.inspectorCol);
   els.split = h("div", { class: "mv-split" }, els.flow, els.bar, els.grid);
+  // their widths: the outline's right edge and the explanation's left edge are dragged; the code takes the rest
+  const codeRoom = 320;
+  const col = (el, edge, place, other, min) =>
+    resizable(el, {
+      edge,
+      min,
+      max: () => els.grid.clientWidth - other().offsetWidth - codeRoom,
+      enabled: () => S.code && sideBySide(),
+      size: sizeOf(place),
+      apply: (px) =>
+        px == null ? els.grid.style.removeProperty(`--${place.slice(5)}-w`) : els.grid.style.setProperty(`--${place.slice(5)}-w`, `${px}px`),
+      title: "Drag to make it wider or narrower · double-click for the usual width",
+    });
+  els.outlineRz = col(els.outlineCol, "right", "work.outline", () => els.inspectorCol, 130);
+  els.inspectorRz = col(els.inspectorCol, "left", "work.inspector", () => els.outlineCol, 220);
   // the bar between the flow and the code: its button folds the code away or brings it back; dragged (while the code
-  // shows) it gives the flow or the code more room (remembered), a double click puts it back in the middle
-  els.bar.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0 || !S.code || e.target.closest("button")) return;
-    e.preventDefault();
-    els.bar.setPointerCapture(e.pointerId);
-    els.bar.classList.add("dragging");
-    const box = els.split.getBoundingClientRect();
-    const move = (ev) => {
-      S.flowFrac = (ev.clientY - box.top) / Math.max(1, box.height);
-      applyFold();
-    };
-    const up = () => {
-      els.bar.removeEventListener("pointermove", move);
-      els.bar.removeEventListener("pointerup", up);
-      els.bar.classList.remove("dragging");
-      save();
-    };
-    els.bar.addEventListener("pointermove", move);
-    els.bar.addEventListener("pointerup", up);
-  });
-  els.bar.addEventListener("dblclick", (e) => {
-    if (!S.code || e.target.closest("button")) return;
-    S.flowFrac = 0.42;
-    applyFold();
-    save();
+  // shows) it gives the flow or the code more room (remembered as a share of the tab), a double click puts it back
+  const splitH = () => Math.max(1, els.split.clientHeight);
+  els.flowRz = resizable(els.flow, {
+    edge: "bottom",
+    handle: els.bar,
+    ignore: (e) => !!e.target.closest("button"),
+    enabled: () => S.code && sideBySide(),
+    min: 120,
+    max: () => splitH() - els.bar.offsetHeight - 160,
+    size: {
+      get: () => (S.flowFrac == null ? null : S.flowFrac * splitH()),
+      set: (px) => {
+        S.flowFrac = px == null ? null : +(px / splitH()).toFixed(4);
+        save();
+      },
+    },
+    measure: () => els.flow.offsetHeight,
+    apply: (px) => {
+      if (!S.code) return;
+      const f = px == null ? 0.42 : px / splitH();
+      els.split.style.gridTemplateRows = `minmax(120px, ${(f * 100).toFixed(1)}%) auto minmax(160px, 1fr)`;
+    },
+    title: "Drag to give the flow or the code more room · double-click to put it back in the middle",
   });
   return els;
 }
@@ -2555,12 +2611,10 @@ function layoutCode() {
  * side panel (unfolded, a box shows its function in the code). */
 function applyFold() {
   const els = ME.els;
-  const f = Math.min(0.8, Math.max(0.15, Number(S.flowFrac) || 0.42));
   els.split.classList.toggle("folded", !S.code);
-  els.split.style.gridTemplateRows = S.code
-    ? `minmax(120px, ${(f * 100).toFixed(1)}%) auto minmax(160px, 1fr)`
-    : "minmax(0, 1fr) auto";
+  els.split.style.gridTemplateRows = S.code ? "minmax(120px, 42%) auto minmax(160px, 1fr)" : "minmax(0, 1fr) auto";
   els.grid.hidden = !S.code;
+  if (S.code) for (const r of [els.flowRz, els.outlineRz, els.inspectorRz]) r.refresh(); // the sizes she gave them
   put(
     els.bar,
     h(
@@ -2585,6 +2639,11 @@ function setCode(on) {
   if (!ME || S.code === !!on) return;
   S.code = !!on;
   save();
+  codeShown();
+}
+
+/** The code is shown or folded as S.code says (after setCode, or a link that changed S.code: see drawWork). */
+function codeShown() {
   applyFold();
   if (S.code) {
     ME.ed.view.requestMeasure();
@@ -2660,6 +2719,7 @@ function mountMethodFlow(host, source) {
     claude: AI.claude,
     runNote: false, // the screen's banner says when the last run failed, with a link to the line
     figure: figureOf,
+    sizes: { get: (place) => sizeOf(`flow.${place}`).get(), set: (place, px) => sizeOf(`flow.${place}`).set(px) },
     onSource: (src, info) => flowEdited(src, info),
     onSetting: (id, value) => settingChanged(id, value),
     onPick: (p) => flowPicked(p),
@@ -3377,11 +3437,43 @@ async function drawValues() {
     ME.ed.setValues({});
     ME.ed.setFolds([]);
     ME.folds = 0;
+    ME.shownInside = null;
+    setRounds(null, null);
     drawStatus();
     return;
   }
   const got = await insideOf(ref, fn);
   if (!ME || ME.tickets.values !== n) return;
+  ME.shownInside = got;
+  setRounds(got, fn);
+  paintValues();
+}
+
+/**
+ * The rounds tables of the shown function's loops, in the explanation beside the code (rounds.js); a row picked there
+ * is the round the code shows. Kept while the same call of the same function in the same run is shown.
+ */
+function setRounds(got, fn) {
+  const key = got?.run ? `${got.run}|${fn}|${got.call?.id ?? ""}` : null;
+  if (ME.roundsKey === key) return;
+  ME.rounds?.destroy();
+  ME.roundsKey = key;
+  ME.rounds = key
+    ? createRounds({ call, args: { run: got.run }, f: got, fmt, height: sizeOf("work.rounds"), onChange: () => paintValues() })
+    : null;
+  put(
+    ME.roundsBox,
+    ME.rounds ? [h("h4", {}, ME.rounds.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), ME.rounds.el] : null,
+  );
+}
+
+/** The values of the function at the cursor at the ends of its lines (see drawValues), for the rounds picked. */
+function paintValues() {
+  if (!ME) return;
+  const got = ME.shownInside;
+  const fn = ME.fn;
+  const f = (ME.summary?.outline || []).find((x) => x.name === fn);
+  if (!f) return;
   const doc = ME.ed.getValue().split("\n");
   const ranLines = (got?.code || "").split("\n");
   // The function's place in the editor now (from the checker's outline) against its place in the run's copy.
@@ -3399,6 +3491,50 @@ async function drawValues() {
   for (const st of got?.statements || []) {
     const at = place(st.line);
     if (!at) continue;
+    const picked = ME.rounds?.at(st);
+    if (picked) {
+      // a line of a `for` loop: the round picked in its table beside the code
+      const list = [];
+      const words = roundWords(picked);
+      const of = words ? ` · ${words.title}` : "";
+      if (st.loop && words)
+        list.push({
+          name: "",
+          text: words.chip,
+          type: "none",
+          title: `The code shows ${words.title}: pick another round in the table beside the code`,
+          onClick: () => ME?.rounds?.reveal(st.line),
+        });
+      if (picked.kind === "full") {
+        for (const name of st.names)
+          if (name in (picked.round.values || {})) {
+            const chip = valueChip(name, picked.round.values[name], got.run);
+            list.push({ ...chip, title: (chip.title || name) + of });
+          }
+        if (picked.round.failed || picked.round.error)
+          list.push({ name: "", text: "stopped here", type: "none", title: cleanError(picked.round.error || got.error || "The step stopped at this line.") });
+      }
+      if (picked.kind === "light")
+        for (const [name, v] of Object.entries(picked.values)) {
+          const big = v && typeof v === "object" && v.kind !== "number";
+          list.push({
+            name,
+            text: cellText(v, fmt),
+            type: cellKind(v),
+            title: name + of + (big ? " · only its size was kept for this round (whole values are kept for the first and last rounds)" : ""),
+          });
+        }
+      if (picked.kind === "inner")
+        list.push({
+          name: "",
+          text: `${picked.rounds} round${picked.rounds === 1 ? "" : "s"} in round ${picked.outer}`,
+          type: "none",
+          title: "This loop's rounds in that round: click to see them in its table",
+          onClick: picked.open,
+        });
+      if (list.length) values[at] = list;
+      continue;
+    }
     const first = (st.rounds || []).find((r) => !r.failed) || (st.rounds || [])[0];
     if (!first) continue;
     const extra = st.loop || st.n > 1 ? ` · round 1 of ${st.n}` : "";
@@ -4256,6 +4392,7 @@ async function drawInspector() {
   } else if (ME.numbersExp) {
     parts.push(h("div", { class: "layr-muted small" }, "Not called in the last run (or it hasn't run yet)."));
   }
+  parts.push(ME.roundsBox); // its loops' rounds (drawValues fills it)
   if (mine.length)
     parts.push(
       h("h4", {}, "Style notes"),

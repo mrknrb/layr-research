@@ -14,7 +14,8 @@ export PYTHONDONTWRITEBYTECODE=1
 node tests/panel/smoke.e2e.mjs
 ```
 
-Screenshots go to `tests/panel/out/` (or `$SHOTS`), with the harness's stderr in `out/harness.log`. Playwright is not
+The scripts: `smoke`, `tabs`, `code` (the workspace and its tabs), `rounds` (the rounds tables of loops) and `resize`
+(every resizable place), each `tests/panel/<name>.e2e.mjs`. Screenshots go to `tests/panel/out/` (or `$SHOTS`), with the harness's stderr in `out/harness.log`. Playwright is not
 in the plugin: it is loaded from `$PWTOOLS` (default `C:/Users/mrknr/pwtools`, a folder whose `node_modules` has
 `playwright` and its Chromium). `UV_PROJECT_ENVIRONMENT` defaults to the venv above when it isn't set. The exit code
 says pass (0) or fail (1); the last lines say how long it took and that every process it started is gone.

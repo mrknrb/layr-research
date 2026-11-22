@@ -8,19 +8,12 @@
 //
 // The container needs a height (the flow fills it). See docs/proposals/research-flow/build-contract.md › Phase 2.
 import { createEditor, highlight } from "./editor.js";
+import { resizable } from "./resize.js";
+import { cellKind, cellText, createRounds, roundWords } from "./rounds.js";
+import { splitUnit } from "./units.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
 const BOX_TYPES = new Set(["table", "flags", "data", "figure"]);
-// The units a name can end in (rate_mM_per_min → rate [mM/min]): the same list as the backend's (lab/latex.py UNITS),
-// so a column is labelled as the formulas label it.
-const UNITS = {
-  mM: "mM", uM: "µM", nM: "nM", M: "M", mol: "mol", mmol: "mmol", umol: "µmol", nmol: "nmol",
-  min: "min", s: "s", h: "h", ms: "ms", d: "d",
-  L: "L", l: "L", mL: "mL", ml: "mL", uL: "µL", ul: "µL",
-  g: "g", mg: "mg", ug: "µg", kg: "kg", gCDW: "gCDW", gcdw: "gCDW", gDW: "gDW",
-  U: "U", pA: "pA", mAU: "mAU", pct: "%", percent: "%", nm: "nm", um: "µm", mm: "mm",
-  degC: "°C", K: "K", rpm: "rpm", OD: "OD", Da: "Da", kDa: "kDa", bar: "bar",
-};
 
 // -------------------------------------------------------------------------------- small helpers
 
@@ -72,21 +65,6 @@ function fmtNum(x) {
   const a = Math.abs(x);
   if (a >= 1e5 || a < 1e-3) return x.toPrecision(3);
   return String(+x.toPrecision(4));
-}
-/** A name's words and its unit, read from the end of the name: rate_mM_per_min → ["rate", "mM/min"]; growth_per_h →
- * ["growth", "1/h"]; [name, null] when it ends in no unit. */
-function splitUnit(name) {
-  const tokens = String(name).split("_");
-  for (let i = 1; i < tokens.length; i++) {
-    let tail = tokens.slice(i);
-    const inverse = tail[0] === "per" && tail.length > 1;
-    if (inverse) tail = tail.slice(1);
-    if (tail[tail.length - 1] === "per" || !(tail[0] in UNITS)) continue;
-    if (!tail.every((t) => t in UNITS || t === "per")) continue;
-    const unit = tail.map((t) => (t === "per" ? "/" : UNITS[t])).join("");
-    return [tokens.slice(0, i).join("_"), inverse ? `1/${unit}` : unit];
-  }
-  return [name, null];
 }
 function colName(c) {
   const [words, unit] = splitUnit(c);
@@ -252,7 +230,10 @@ function tableEl(columns, rows, maxCols = 99) {
  * The options are the contract's (build-contract.md › The flow component), and a few more a host may give:
  * `picker: "runs"` (the host picks the experiment: the bar offers only its runs), `boxActions(node)` →
  * [{label, run, title?}] (links at a box's foot), `runNote: false` (the host says itself that the
- * shown run failed), `figure({run, output})` → an image's src (a returned figure in cards and the inside panel).
+ * shown run failed), `figure({run, output})` → an image's src (a returned figure in cards and the inside panel),
+ * `sizes: {get(place) → px | null, set(place, px | null)}` (where the sizes she drags are remembered: the side panel's
+ * width "side", the heights of its code "code", a recipe line's code "snippet", a whole table "table" and the rounds
+ * tables "rounds"; without it they last while the flow is open).
  * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now),
  * `setInside("panel" | "host")` and `fit()`.
  * Keys: Escape closes the newest thing open, Delete removes the selected box (editable), Enter or Space on a box's
@@ -297,6 +278,32 @@ export function mountFlow(container, options = {}) {
   let editor = null; // the inside panel's code
   let destroyed = false;
   const rowsCache = new Map();
+  const roundsCache = new Map(); // "run|function|call" → the rounds tables of its loops (rounds.js), kept while open
+  // the sizes she gave the side panel and its boxes: the host remembers them (O.sizes), else they last while open
+  const memSizes = {};
+  const sizeOf = (place) => ({
+    get: () => (O.sizes ? O.sizes.get(place) : memSizes[place]) ?? null,
+    set: (px) => {
+      if (O.sizes) O.sizes.set(place, px);
+      else if (px == null) delete memSizes[place];
+      else memSizes[place] = px;
+    },
+  });
+  const tallest = () => Math.max(220, innerHeight - 90);
+  /** A box of the side panel that she can make taller (its bar under it); `place` names its remembered height. */
+  function tallBox(el, place, { scrolls = false } = {}) {
+    return resizable(el, {
+      edge: "bottom",
+      min: 90,
+      max: tallest,
+      size: sizeOf(place),
+      apply: (px) => {
+        el.style.height = px == null ? "" : `${px}px`;
+        if (scrolls) el.style.maxHeight = px == null ? "" : "none";
+      },
+      title: "Drag to make it taller or shorter · double-click for the usual height",
+    });
+  }
 
   // ---------------------------------------------------------------- the frame
   const root = h("div", { class: "fl" });
@@ -327,6 +334,20 @@ export function mountFlow(container, options = {}) {
   const sideBody = h("div", { class: "fl-sb" });
   const side = h("div", { class: "fl-side" }, sideHead, sideBody);
   const main = h("div", { class: "fl-main" }, canvas, side);
+  // its left edge is dragged to make it wider (not on a narrow screen, where it covers the flow)
+  const sideRz = resizable(side, {
+    edge: "left",
+    min: 300,
+    max: () => Math.max(300, main.clientWidth - 220),
+    enabled: () => !root.classList.contains("narrow"),
+    size: sizeOf("side"),
+    apply: (px) => {
+      side.style.width = px == null ? "" : `${px}px`;
+      side.style.maxWidth = px == null ? "" : "none";
+    },
+    onDone: () => requestAnimationFrame(() => drawMini()),
+    title: "Drag to make the side panel wider or narrower · double-click for the usual width",
+  });
   const pyHead = h("div", { class: "fl-ph" }, "The same recipe as Python. Click a line to find its box.");
   const pyBody = h("div", { class: "fl-pb" });
   const py = h("div", { class: "fl-py" }, pyHead, pyBody);
@@ -1703,6 +1724,7 @@ export function mountFlow(container, options = {}) {
       !side.contains(document.activeElement) ? document.activeElement : null;
     side.classList.add("open");
     root.classList.add("side-open");
+    sideRz.refresh();
     side.setAttribute("aria-label", title);
     put(sideHead, h("span", { class: "fl-st", title }, title), buttons,
       h("button", { class: "layr-button small ghost icon", title: "Close", "aria-label": "Close",
@@ -1728,6 +1750,15 @@ export function mountFlow(container, options = {}) {
   function destroyEditor() {
     if (editor) editor.destroy();
     editor = null;
+    S.roundsRedraw = null;
+  }
+  /** The rounds tables of a function's loops in this run (rounds.js), made once per call and kept with their pages. */
+  function roundsOf(fn, f) {
+    const key = `${f.run}|${fn}|${f.call?.id ?? ""}`;
+    if (!roundsCache.has(key))
+      roundsCache.set(key, createRounds({ call: read, args: { run: f.run }, f, fmt: fmtNum, height: sizeOf("rounds"),
+        onChange: () => S.roundsRedraw?.() }));
+    return roundsCache.get(key);
   }
   function traceButton() {
     if (!S.sel) return null;
@@ -1823,6 +1854,7 @@ export function mountFlow(container, options = {}) {
       add(body, sec(toolbox ? "Its code (read only; copy it into the method to change it)" : "The code"));
       const box = h("div", { class: "fl-editor" });
       body.append(box);
+      tallBox(box, "code");
       editor = createEditor(box, { doc: ex.code, readOnly: true, chipsBelow: true,
         firstLine: !toolbox && ex.line ? ex.line : 1 });
     }
@@ -1862,9 +1894,11 @@ export function mountFlow(container, options = {}) {
     const args = f.call?.args || {};
     if (Object.keys(args).length) add(body, sec("What went in"), valueChips(args));
 
-    // the code with its values
+    // the code with its values; each `for` loop's rounds in a table under it (a row picked there is shown in the code)
     const base = f.line;
-    const loops = (f.statements || []).filter((s) => s.loop || s.n > 1);
+    const R = roundsOf(fn, f);
+    // lines that ran more than once outside a `for` (a `while`): their kept rounds are stepped through as before
+    const loops = (f.statements || []).filter((s) => (s.loop || s.n > 1) && !R?.at(s));
     const kept = [...new Set(loops.flatMap((s) => (s.rounds || []).map((r) => r.round)))].sort((a, b) => a - b);
     const total = Math.max(0, ...loops.map((s) => s.n || 0));
     let round = S.round[fn] && kept.includes(S.round[fn]) ? S.round[fn] : kept[0] || 1;
@@ -1877,7 +1911,9 @@ export function mountFlow(container, options = {}) {
     add(body, sec("The code, with this run's values", " ", nav, " ", guardsBtn));
     const box = h("div", { class: "fl-editor" });
     body.append(box);
+    tallBox(box, "code");
     editor = createEditor(box, { doc: f.code || "", readOnly: true, firstLine: base, chipsBelow: true });
+    if (R) add(body, sec(R.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), R.el);
     const lineOf = (n) => n - base + 1;
     const step = (dir) => {
       const i = kept.indexOf(round);
@@ -1885,22 +1921,46 @@ export function mountFlow(container, options = {}) {
       S.round[fn] = round;
       chips();
     };
+    const fullChips = (list, st, r, roundNote) => {
+      for (const [name, v] of Object.entries(r.values || {})) {
+        const t = kindOf(v);
+        list.push({ name, text: shape(v), type: dotOf(t), title: `${name} · ${longShape(v)}${roundNote}`,
+          card: v && typeof v === "object" ? () => valueBody(v) : undefined,
+          onClick: v && v.kind === "table" && v.file ? () => openValue(name, v) : undefined });
+      }
+      if (r.error || r.failed) list.push({ name: "", text: "stopped here", type: "none", title:
+        stepError(r.error || f.error || f.call?.error) || "The step stopped at this line." });
+    };
     const chips = () => {
       const map = {};
       for (const st of f.statements || []) {
+        const list = (map[lineOf(st.end_line || st.line)] ||= []);
+        const now = R?.at(st);
+        if (now) {
+          // a line of a `for` loop: the round picked in its table
+          const words = roundWords(now);
+          const roundNote = words ? ` · ${words.title}` : "";
+          if (st.loop && words)
+            list.push({ name: "", text: words.chip, type: "none", title: `The code shows ${words.title}: pick ` +
+              "another round in the table under the code", onClick: () => R.reveal(st.line) });
+          if (now.kind === "full") fullChips(list, st, now.round, roundNote);
+          else if (now.kind === "light")
+            for (const [name, v] of Object.entries(now.values)) {
+              const big = v && typeof v === "object" && v.kind !== "number";
+              list.push({ name, text: cellText(v, fmtNum), type: dotOf(cellKind(v)), title: `${name}${roundNote}` +
+                (big ? ` · only its size was kept for this round (whole values are kept for the first and last ` +
+                  "rounds)" : "") });
+            }
+          else if (now.kind === "inner")
+            list.push({ name: "", text: `${plural(now.rounds, "round")} in round ${now.outer}`, type: "none",
+              title: "This loop's rounds in that round: click to see them in its table", onClick: now.open });
+          continue;
+        }
         const rs = st.rounds || [];
         const r = rs.find((x) => x.round === round) || (st.loop || st.n > 1 ? rs.filter((x) => x.round <= round).pop() :
           null) || rs[0];
         if (!r) continue;
-        const list = (map[lineOf(st.end_line || st.line)] ||= []);
-        for (const [name, v] of Object.entries(r.values || {})) {
-          const t = kindOf(v);
-          list.push({ name, text: shape(v), type: dotOf(t), title: `${name} · ${longShape(v)}` + (st.n > 1 ?
-            ` · round ${r.round} of ${st.n}` : ""), card: v && typeof v === "object" ? () => valueBody(v) : undefined,
-          onClick: v && v.kind === "table" && v.file ? () => openValue(name, v) : undefined });
-        }
-        if (r.error || r.failed) list.push({ name: "", text: "stopped here", type: "none", title:
-          stepError(r.error || f.error || f.call?.error) || "The step stopped at this line." });
+        fullChips(list, st, r, st.n > 1 ? ` · round ${r.round} of ${st.n}` : "");
         if (st.loop && st.n > 1) list.push({ name: "", text: `${ord(r.round)} of ${st.n}`, type: "none",
           title: "Click for the next round that was kept", onClick: () => step(kept.indexOf(round) >= kept.length - 1 ?
             -kept.length : 1) });
@@ -1912,12 +1972,13 @@ export function mountFlow(container, options = {}) {
         if (at > 0) (map[at] ||= []).push({ name: "return", text: shape(f.returned), type: dotOf(kindOf(f.returned)),
           card: f.returned && typeof f.returned === "object" ? () => valueBody(f.returned) : undefined });
       }
-      editor.setValues(map);
+      editor?.setValues(map);
       put(nav, kept.length > 1 ? [h("button", { class: "layr-button small icon ghost", title: "Previous round",
         onclick: () => step(-1) }, "‹"), h("span", { class: "fl-dim" }, `round ${round} of ${total}`),
       h("button", { class: "layr-button small icon ghost", title: "Next round", onclick: () => step(1) }, "›")]
         : null);
     };
+    S.roundsRedraw = chips;
     chips();
     const folds = [];
     if (f.docstring)
@@ -1981,6 +2042,8 @@ export function mountFlow(container, options = {}) {
     add(body, h("div", { class: "fl-chips" }, badge("code"), h("span", { class: "fl-dim" }, `line ${n.line}`)),
       h("p", { class: "fl-dim" }, "Lines of the recipe that aren't one step: they are shown as they are."),
       h("div", { class: "fl-snippet" }, highlight(n.code, { lineNumbers: true, firstLine: n.line })));
+    const snippet = body.querySelector(".fl-snippet .cmx-highlight");
+    if (snippet) tallBox(snippet, "snippet", { scrolls: true });
     const ins = {};
     for (const p of n.ports) if (p.source === "wire") ins[p.wire] = wireValue(p.from, p.wire);
     if (Object.keys(ins).length) add(body, sec("What it reads"), valueChips(ins));
@@ -2047,7 +2110,9 @@ export function mountFlow(container, options = {}) {
       h("button", { class: "layr-button small", title: "Later rows", disabled: offset + LIMIT >= total,
         onclick: () => go(offset + LIMIT) }, "›"),
       r.stored === "sampled" ? h("span", { class: "fl-dim" }, "· only the first rows were kept") : null);
-    wait.replaceWith(pager, h("div", { class: "fl-scroll big" }, tableEl(r.columns || v.columns, r.rows || [])));
+    const scroller = h("div", { class: "fl-scroll big" }, tableEl(r.columns || v.columns, r.rows || []));
+    wait.replaceWith(pager, scroller);
+    tallBox(scroller, "table", { scrolls: true });
   }
 
   // ---------------------------------------------------------------- the Python strip
@@ -2811,6 +2876,12 @@ export function mountFlow(container, options = {}) {
     if (S.source != null) FUNCS = functionsOf(S.source);
     S.pending = {};
     rowsCache.clear();
+    if (runId() !== S.roundsRun) {
+      // another run: its loops' rounds are other ones (the same run drawn again keeps the rounds picked)
+      for (const r of roundsCache.values()) r?.destroy();
+      roundsCache.clear();
+      S.roundsRun = runId();
+    }
     figures.clear();
     draw();
     if (S.side?.kind === "inside" && S.stack.length) {
@@ -2851,7 +2922,11 @@ export function mountFlow(container, options = {}) {
 
   // ---------------------------------------------------------------- size changes
   const ro = new ResizeObserver(() => {
+    const wasNarrow = root.classList.contains("narrow");
     root.classList.toggle("narrow", root.clientWidth < 700);
+    // the side panel's width again, once this round of size changes is over (a change in here would loop)
+    if (wasNarrow !== root.classList.contains("narrow") || side.classList.contains("open"))
+      requestAnimationFrame(() => !destroyed && sideRz.refresh());
     root.classList.toggle("short", root.clientHeight < 360);
     root.classList.toggle("tight", canvas.clientHeight < 440 || canvas.clientWidth < 560);
     if (G && S.drawLater && root.clientWidth > 0) draw();
@@ -2938,6 +3013,8 @@ export function mountFlow(container, options = {}) {
       destroyed = true;
       ro.disconnect();
       destroyEditor();
+      sideRz.destroy();
+      for (const r of roundsCache.values()) r?.destroy();
       closePop();
       root.remove();
     },

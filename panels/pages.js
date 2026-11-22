@@ -5,6 +5,7 @@
 // Cards: text, number, table, figure, chart (drawn here from a table) and review (a curve per item with regions whose
 // boundaries can be dragged and saved as a correction; the curves come from a table of the run or from a raw file).
 // lab.js gives the helpers it shares (createPages(ctx)).
+import { resizable } from "./resize.js";
 
 const CARD_KINDS = [
   ["text", "Text", "Your own words, or a text the method returns (a model's report)"],
@@ -1021,15 +1022,26 @@ export function createPages(ctx) {
           statuses.map((v) => [h("i", { class: `dot ${statusClass(card, v)}` }), ` ${(card.status_labels || {})[v] || v}  `]),
         )
       : null;
-    put(
-      box,
-      h(
-        "div",
-        { class: "review-grid" },
-        h("div", { class: "inj-col" }, filterSel, list),
-        h("div", { class: "plot-col" }, h("div", { class: "plot-head" }, chips, h("span", { class: "layr-spacer" }), nav), plotBox, legend),
-      ),
+    const listCol = h("div", { class: "inj-col" }, filterSel, list);
+    const grid = h(
+      "div",
+      { class: "review-grid" },
+      listCol,
+      h("div", { class: "plot-col" }, h("div", { class: "plot-head" }, chips, h("span", { class: "layr-spacer" }), nav), plotBox, legend),
     );
+    put(box, grid);
+    // the list's right edge is dragged to make it wider (remembered for every review card); the curve is drawn again
+    // for its new width
+    resizable(listCol, {
+      edge: "right",
+      min: 160,
+      max: () => Math.max(160, grid.clientWidth - 360),
+      enabled: () => innerWidth > 700,
+      size: ctx.sizeOf("review.list"),
+      apply: (px) => (px == null ? grid.style.removeProperty("--list-w") : grid.style.setProperty("--list-w", `${px}px`)),
+      onDone: () => reviewCard(box, exp, card, key, ctx.token()),
+      title: "Drag to make the list wider or narrower · double-click for the usual width",
+    });
     const it = items.get(String(st.item));
     if (!it) return put(plotBox, h("div", { class: "layr-empty" }, `No ${itemWord} to show.`));
     drawReview(plotBox, exp, card, it, label, flagged.get(String(it.item)) || [], st, key, t).catch((err) =>

@@ -336,11 +336,12 @@ section.method-section + section.method-section {
 
 .review-grid {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: var(--list-w, 280px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
 .inj-col {
+  position: relative;
   border-right: 1px solid var(--border);
   display: grid;
   grid-template-rows: auto 1fr;
@@ -780,9 +781,17 @@ section.page-card + section.page-card {
 
 .results {
   display: grid;
-  grid-template-columns: minmax(180px, 250px) minmax(0, 1fr);
+  grid-template-columns: var(--list-w, minmax(180px, 250px)) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
+}
+.result-side {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
 }
 .result-list {
   min-height: 0;
@@ -879,6 +888,15 @@ section.page-card + section.page-card {
   .result-shown {
     overflow: visible;
   }
+  .result-side {
+    grid-template-rows: auto;
+  }
+}
+.rounds-box:empty {
+  display: none;
+}
+.rounds-box .rt-all {
+  margin-bottom: 6px;
 }
 
 /* ---------- results, checks ---------- */
@@ -1031,10 +1049,19 @@ section.page-card + section.page-card {
   gap: 6px;
   align-items: center;
 }
+/* the outline, the code and the explanation; the widths she drags come in as --outline-w and --inspector-w */
 .mv-grid {
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr) minmax(300px, 0.8fr);
+  grid-template-columns: var(--outline-w, 210px) minmax(0, 1fr) var(--inspector-w, minmax(300px, 0.8fr));
   min-height: 0;
+}
+.mv-col {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
 }
 .mv-grid[hidden] {
   display: none;
@@ -1198,7 +1225,7 @@ section.page-card + section.page-card {
 }
 @media (max-width: 1100px) {
   .mv-grid {
-    grid-template-columns: 170px minmax(0, 1fr) minmax(240px, 0.7fr);
+    grid-template-columns: var(--outline-w, 170px) minmax(0, 1fr) var(--inspector-w, minmax(240px, 0.7fr));
   }
 }
 @media (max-width: 760px) {
@@ -1215,6 +1242,9 @@ section.page-card + section.page-card {
   .mv-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 60vh auto;
+  }
+  .mv-col {
+    grid-template-rows: auto;
   }
   .mv-status {
     flex-wrap: wrap;
