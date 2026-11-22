@@ -84,7 +84,7 @@ def described(exp: dict, source: str | None) -> list[dict]:
 
     try:
         parsed = methodfile.parse(source or "")
-        kinds = correction_kinds(parsed.constants, methodfile.takes_corrections(parsed))
+        kinds = correction_kinds(parsed.constants)
     except SyntaxError:
         kinds = {}
     return [{**c, "what": describe(kinds, c)} for c in exp.get("corrections") or []]
@@ -253,8 +253,8 @@ def to_html(m: dict) -> str:
         out.append(f"<h2>Quality checks ({len(flags)})</h2>{_table_html(flags, 400)}")
     v = run.get("versions") or {}
     out.append(f"<h2>Appendix: the method's code</h2><p class='muted'>{e(meth.get('name') or '')}, version "
-               f"{meth.get('version')}, exactly as this run ran it. It imports the plugin's toolbox (reading GAML, "
-               "tables, peaks, straight lines, quality flags).</p>")
+               f"{meth.get('version')}, exactly as this run ran it. The functions it imports from `toolbox` are the "
+               "plugin's ready-made ones (reading files, straight lines, quality flags, ready-made steps).</p>")
     out.append(f"<pre>{e(m['source'])}</pre>")
     out.append(f"<p class='muted'>Python {e(str(v.get('python')))}, pandas {e(str(v.get('pandas')))}, NumPy "
                f"{e(str(v.get('numpy')))}, SciPy {e(str(v.get('scipy')))}, matplotlib {e(str(v.get('matplotlib')))}. "

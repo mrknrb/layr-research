@@ -1,6 +1,6 @@
 // "Python for methods": the handful of Python and pandas patterns the methods use, each with a short example.
-// Shown as a page of the Experiments panel (Methods › Guide); the examples are the same shapes as the built-in
-// GC-FID method's code.
+// Shown as a page of the Experiments panel (Methods › Guide); the examples come from one made-up study, growth
+// curves (OD600 of cultures over time), in the shapes every method uses.
 
 export const GUIDE = [
   {
@@ -10,32 +10,32 @@ export const GUIDE = [
         "order and returns the results. layr draws every formula as math, shows each step's tables, and finds the " +
         "formula behind any number you click.",
     ],
-    code: `def specific_activity(rate_mM_per_min, biomass_gCDW_per_L):
-    """Specific activity in U/gCDW."""                       # formula
-    return rate_mM_per_min * 1000 / biomass_gCDW_per_L
+    code: `def doubling_time_h(growth_rate_per_h):
+    """The time a culture takes to double."""                # formula
+    return log(2) / growth_rate_per_h
 
 
-def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l):
-    """Fit a line through the early time points."""          # step
+def growth_rates(od, window_h):
+    """Fit a line through the exponential phase."""          # step
     ...
 
 
-def activity_assay(gaml_file, corrections, compounds, rate_window_min=(0, 30)):
-    """Whole-cell activity assay measured by GC-FID."""       # recipe (the last function)
-    injections = read_gaml(gaml_file)
+def growth(plate_file, window_h=(2, 6)):
+    """Growth rates from OD600."""                           # recipe (the last function)
+    od = read_table(plate_file)
     ...
-    return {"activities": activities}`,
+    return {"rates": rates}`,
   },
   {
     title: "Functions and docstrings",
     text: [
       "def starts a function; the indented lines below are its body; return gives the result back. The first line of " +
         "the docstring (in triple quotes) is the sentence layr shows everywhere: say plainly what the function does.",
-      "Put units into names: conc_mM, time_min, rate_mM_per_min. layr shows them as units in the formulas.",
+      "Put units into names: od600, time_h, growth_rate_per_h. layr shows them as units in the formulas.",
     ],
-    code: `def area_ratio(area, is_area):
-    """A compound's peak area divided by the internal standard's area."""
-    return area / is_area`,
+    code: `def blank_corrected(od600, blank_od600):
+    """A culture's OD600 minus the medium's own OD600."""
+    return od600 - blank_od600`,
   },
   {
     title: "Formulas work on single numbers and on whole columns",
@@ -43,8 +43,8 @@ def activity_assay(gaml_file, corrections, compounds, rate_window_min=(0, 30)):
       "Keep formulas to + - * / ** and maths functions (abs, sqrt, log). Then the same formula works for one number " +
         "and for a whole column at once: pandas does it row by row.",
     ],
-    code: `area_ratio(12.5, 25.0)                       # 0.5
-ratios["ratio"] = area_ratio(ratios.area, ratios.is_area)   # every row`,
+    code: `blank_corrected(0.45, 0.05)                         # 0.4
+od["od_net"] = blank_corrected(od.od600, blank_od600)   # every row`,
   },
   {
     title: "Picking rows",
@@ -52,9 +52,9 @@ ratios["ratio"] = area_ratio(ratios.area, ratios.is_area)   # every row`,
       "table[condition] keeps the rows where the condition is true. Combine conditions with & (and) or | (or), each " +
         'in brackets. table.column (or table["column"]) is one column.',
     ],
-    code: `samples = concentrations[concentrations.role == "sample"]
-early = group[group.time_min.between(0, 30)]
-found = peaks[(peaks.compound == "HAME") & (peaks.status == "ok")]`,
+    code: `samples = od[od.role == "sample"]
+early = group[group.time_h.between(2, 6)]
+wild_type = od[(od.strain == "WT") & (od.od600 > 0.05)]`,
   },
   {
     title: "For each group: calculate, add a row, make a table",
@@ -63,9 +63,9 @@ found = peaks[(peaks.compound == "HAME") & (peaks.status == "ok")]`,
         "rows. Build one dict per result, collect them in a list, and turn the list into a table at the end.",
     ],
     code: `rows = []
-for (strain, substrate), group in samples.groupby(["strain", "substrate"]):
-    line = fit_line(group.time_min, group.conc_mM)
-    rows.append({"strain": strain, "substrate": substrate, "rate_mM_per_min": line.slope})
+for (strain, culture), group in samples.groupby(["strain", "culture"]):
+    line = fit_line(group.time_h, np.log(group.od600))
+    rows.append({"strain": strain, "culture": culture, "growth_rate_per_h": line.slope})
 rates = pd.DataFrame(rows)`,
   },
   {
@@ -75,9 +75,9 @@ rates = pd.DataFrame(rows)`,
         "write one message per row.",
     ],
     code: `flags = []
-for row in balance.to_dict("records"):
-    if row["pct_of_t0"] < 80:
-        flags.append(flag("warning", "mass balance", f"{row['pct_of_t0']:.0f}% of t0"))`,
+for row in rates.to_dict("records"):
+    if row["r2"] < 0.98:
+        flags.append(flag("warning", "fit", f"R² {row['r2']:.3f}", culture=row["culture"]))`,
   },
   {
     title: "Adding a column, and never changing a table you were given",
@@ -85,8 +85,8 @@ for row in balance.to_dict("records"):
       "A step gets tables from earlier steps. Changing them would change the earlier step's result too, so make a " +
         "copy first (or build a new table, as merge does). The checker warns when a step changes a table it was given.",
     ],
-    code: `standards = ratios[ratios.role == "standard"].copy()
-standards["used"] = standards.std_conc_mM.between(low, high)`,
+    code: `blanks = od[od.role == "blank"].copy()
+blanks["used"] = blanks.time_h.between(low, high)`,
   },
   {
     title: "Joining two tables",
@@ -94,18 +94,19 @@ standards["used"] = standards.std_conc_mM.between(low, high)`,
       'merge puts the matching rows of two tables side by side, matched by a column both have. how="left" keeps ' +
         "every row of the first table.",
     ],
-    code: `lines = calibration[["compound", "slope", "intercept"]]
-table = ratios.merge(lines, on="compound", how="left")`,
+    code: `strains = layout[["culture", "strain", "medium"]]
+table = rates.merge(strains, on="culture", how="left")`,
   },
   {
     title: "Straight lines and other toolbox functions",
     text: [
-      "The toolbox has the ready-made parts: read_gaml, integrate_peak, fit_line (slope, intercept, se, r2, s_yx, " +
-        "n), flags and figures. Read them in the method view's Toolbox list; to change one, copy it into your method.",
+      "The toolbox has the ready-made parts: read_table, fit_line (slope, intercept, se, r2, s_yx, n), flags, " +
+        "ready-made steps and charts; its add-ons bring the parts for one kind of instrument. Read them in the " +
+        "method view's Toolbox list; to change one, copy it into your method.",
     ],
     code: `from toolbox import fit_line
 
-line = fit_line(early.time_min, early.conc_mM)
+line = fit_line(early.time_h, np.log(early.od600))
 line.slope, line.se, line.r2`,
   },
   {
@@ -114,7 +115,7 @@ line.slope, line.se, line.r2`,
       'An f-string puts values into text: {value} inside f"...". After a colon comes the format: .3f is three ' +
         "decimals, .0f none, +.0f with a sign, g the shortest form.",
     ],
-    code: `message = f"{row['conc_mM']:.3f} mM is above the calibrated range"`,
+    code: `message = f"{row['od600']:.3f} is above the reader's linear range"`,
   },
   {
     title: "The recipe and its settings",

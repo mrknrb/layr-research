@@ -58,13 +58,14 @@ mcp = FastMCP(
     "research",
     instructions=(
         "Explainable data analysis for a researcher learning Python: any study whose data fits in tables (surveys, "
-        "lab measurements, GC-FID activity assays...). Two parts. (1) Methods and experiments: a method is one plain Python file (methods, method_get "
-        "show the source and its outline; toolbox_docs the ready-made functions it imports from `toolbox`); an "
+        "lab measurements, instrument exports...). Two parts. (1) Methods and experiments: a method is one plain "
+        "Python file (methods, method_get show the source and its outline; toolbox_docs the ready-made functions it "
+        "imports from `toolbox` and its add-ons `toolbox.<add-on>`); an "
         "experiment applies a method's recipe to raw files with settings and corrections (experiments, "
         "experiment_create, experiment_update); run computes it in a separate process; result_table, figure, explain "
         "(each step, its formulas drawn from the code, this run's numbers), explain_function and provenance read the "
-        "results; database_query compares results across all experiments; compare_runs lists numbers that moved. "
-        "Rules: every number you tell the user comes from result_table / provenance / database_query, with the run "
+        "results; compare_runs lists numbers that moved. "
+        "Rules: every number you tell the user comes from result_table / provenance, with the run "
         "id; never compute statistics yourself. Change a method only with method_write (the whole file, or one "
         "function): your change is a DRAFT that counts only when the user accepts it in the panel; method_write "
         "returns the style checker's warnings: fix them (write again) before you tell the user it is ready; "
@@ -87,7 +88,7 @@ mcp = FastMCP(
         "CSV, Excel, SPSS, Stata; results go out by returning them: tables, figures, single values, texts such as a "
         "model's summary). Quality checks: return a table named flags (toolbox flag(level, category, message, "
         "respondent=17) names any item). Corrections are of the kinds the method declares in CORRECTIONS "
-        "(correction_kinds lists them; the GC assay's: rename, exclude, manual_integration); each needs a reason and "
+        "(correction_kinds lists them; a method that declares none takes none); each needs a reason and "
         "stays proposed until the user approves it; don't call correction_decide yourself unless the user asks. "
         "Each experiment has pages the method declares in PAGES, made of cards (text, number, table, figure, chart, "
         "review: a curve per item with regions to correct); change them, the kinds of correction or the packages "
@@ -918,13 +919,15 @@ LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
 
 
 def _warm() -> None:
-    """Read the slow parts once in the background (Jedi's pandas, the GC method's flow): the first completion and
-    the first flow otherwise take seconds."""
+    """Read the slow parts once in the background (Jedi's pandas, the first built-in method's flow): the first
+    completion and the first flow otherwise take seconds."""
     from lab import codeintel, flow
 
     try:
         codeintel.warm()
-        flow.graph(LAB.get_method("gc-activity-assay")["source"])
+        first = next((m for m in LAB.list_methods() if m.get("builtin")), None)
+        if first:
+            flow.graph(LAB.get_method(first["id"])["source"])
     except Exception as e:  # only a head start; the tools do the same work when asked
         log.info("warming up failed: %s", e)
 

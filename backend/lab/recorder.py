@@ -14,10 +14,17 @@ functions go through them too.
 of the method file's own functions only, so pandas and the toolbox run at full speed. For every kept call, each
 statement that gives names a value (`x = …`, `x += …`, `table[col] = …`, `rows.append(…)`, a loop's variables,
 `with … as x`) keeps those names' values after it ran. A statement written over several lines is one statement. In
-a loop the first 3 and the last 3 rounds are kept, and the round that failed; all rounds are counted. A function
+a loop the first 3 and the last 3 rounds are kept in full, and the round that failed; all rounds are counted. A function
 called many times keeps the values inside its first `INSIDE_LIMIT` calls (a step always); its later calls run at
 full speed (their calls are still in calls.json, as far as `LIMIT`). The record is `inside.json` in the run's folder
 (its shape: `Inside.report`), joined to `calls.json` by call id.
+
+**Every round** (light values): a statement inside a loop, or one that runs more than once in a call, also keeps a
+light value of each name for every round, up to `ALL_ROUNDS` rounds: numbers, booleans, None, short texts and dates
+as they are; anything else (tables, lists, arrays, objects) only as its kind and size, with nothing copied, hashed or
+stored. Kept column-wise, one list per name, with the round of the statement's innermost loop beside each value, so
+a loop's rounds can be laid out as a table (one row per round, one column per name). A run keeps at most
+`ALL_BUDGET` light values; past it, statements keep only their full rounds, and the record says where it cut.
 
 **Remembered steps** (`StepCache`): a step whose code and inputs are the same as in an earlier run isn't run again:
 its result and its whole record (calls, values inside, tables) come back from the cache.
@@ -26,6 +33,7 @@ its result and its whole record (calls, values inside, tables) come back from th
 from __future__ import annotations
 
 import ast
+import datetime
 import functools
 import hashlib
 import inspect
@@ -50,6 +58,9 @@ MAX_VALUES = 5000  # values kept of a column or array
 MAX_ITEMS = 30  # items kept of a list or dict
 ROUNDS = 3  # rounds of a loop kept at its start, and as many at its end
 INSIDE_LIMIT = 50  # calls per function whose values inside are recorded (the first ones; steps always)
+ALL_ROUNDS = 10_000  # rounds per statement and call whose light values are kept (every round, see `Inside`)
+ALL_BUDGET = 2_000_000  # light values kept per run, all statements together (a job's "all_budget" changes it)
+LIGHT_TEXT = 80  # characters of a text kept as a light value
 
 
 def summarize(v: Any, depth: int = 0) -> Any:
@@ -338,6 +349,10 @@ class Recorder:
                 r2 = self.inside.moved(r, names.get(int(rel)), 1)
                 r2["call"] = int(rel) + call_id
                 self.inside.records[int(rel) + call_id] = r2
+                # its light values count for the run's budget, as when they were kept
+                self.inside.left -= sum(len(col) for e in (r.get("every") or {}).values()
+                                        for col in e["values"].values())
+                self.inside.cut_by_budget += sum(1 for st in r.get("lines") or [] if st.get("cut") == "budget")
         self.next_id = max(self.next_id, call_id + hit["span"])
         self.step_origin = hit["folder"]
 
@@ -433,6 +448,7 @@ class Statement:
     end: int
     names: tuple[str, ...]
     body: tuple[int, int] | None = None  # a for loop: its body's lines (a round is counted when the body follows)
+    loop: int | None = None  # the first line of the innermost for loop whose body holds it (a loop: the one around it)
 
 
 def targets_of(stmt: ast.stmt) -> list[str]:
@@ -483,20 +499,20 @@ def statement_map(fn: ast.FunctionDef) -> dict[int, Statement]:
             if old is None or (not old.names and s.names):
                 by_line[line] = s
 
-    def visit(body: list) -> None:
+    def visit(body: list, loop: int | None) -> None:
         for stmt in body:
             if isinstance(stmt, ast.ExceptHandler):
                 end = stmt.body[0].lineno - 1 if stmt.body else stmt.lineno
-                add(Statement(stmt.lineno, max(stmt.lineno, end), (stmt.name,) if stmt.name else ()))
-                visit(stmt.body)
+                add(Statement(stmt.lineno, max(stmt.lineno, end), (stmt.name,) if stmt.name else (), None, loop))
+                visit(stmt.body, loop)
                 continue
             if isinstance(stmt, ast.match_case):
-                visit(stmt.body)
+                visit(stmt.body, loop)
                 continue
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 first = stmt.decorator_list[0].lineno if stmt.decorator_list else stmt.lineno
                 inner = stmt.body[0].lineno - 1 if stmt.body else stmt.lineno
-                add(Statement(first, max(stmt.lineno, inner), (stmt.name,)))
+                add(Statement(first, max(stmt.lineno, inner), (stmt.name,), None, loop))
                 continue
             children = [c for f in _BODIES for c in (getattr(stmt, f, None) or [])]
             if children:
@@ -504,13 +520,13 @@ def statement_map(fn: ast.FunctionDef) -> dict[int, Statement]:
                 body = None
                 if isinstance(stmt, (ast.For, ast.AsyncFor)) and stmt.body:
                     body = (stmt.body[0].lineno, max((c.end_lineno or c.lineno) for c in stmt.body))
-                add(Statement(stmt.lineno, header_end, tuple(targets_of(stmt)), body))
-                for f in _BODIES:
-                    visit(getattr(stmt, f, None) or [])
+                add(Statement(stmt.lineno, header_end, tuple(targets_of(stmt)), body, loop))
+                for f in _BODIES:  # a for loop's body is inside it; its `else:` is not
+                    visit(getattr(stmt, f, None) or [], stmt.lineno if body is not None and f == "body" else loop)
             else:
-                add(Statement(stmt.lineno, stmt.end_lineno or stmt.lineno, tuple(targets_of(stmt))))
+                add(Statement(stmt.lineno, stmt.end_lineno or stmt.lineno, tuple(targets_of(stmt)), None, loop))
 
-    visit(fn.body)
+    visit(fn.body, None)
     return by_line
 
 
@@ -583,14 +599,80 @@ def _hold(v: Any) -> Any:
     return v
 
 
+def _odd_float(f: float) -> dict:
+    return {"kind": "number", "value": None, "text": "NaN" if f != f else "inf" if f > 0 else "-inf"}
+
+
+def _light(v: Any) -> Any:
+    """A value as kept for every round of a loop: plain values as they are (texts cut), anything else only its kind
+    and size, never its content. Plain ints, floats, texts and None are handled by `Inside._note` itself. Never
+    fails (an odd object is described by its type)."""
+    try:
+        fast = _LIGHT_FAST.get(type(v))
+        return fast(v) if fast is not None else _light_of(v)
+    except Exception:
+        return {"kind": "object", "type": type(v).__name__}
+
+
+_LIGHT_FAST = {  # the commonest kinds, by their exact type
+    pd.DataFrame: lambda v: {"kind": "table", "rows": int(v.shape[0]), "columns": int(v.shape[1])},
+    pd.Series: lambda v: {"kind": "column", "length": len(v)},
+    np.ndarray: lambda v: {"kind": "array", "shape": list(v.shape)},
+    list: lambda v: {"kind": "list", "length": len(v)},
+    dict: lambda v: {"kind": "dict", "length": len(v)},
+    bool: bool,
+    np.int64: int,
+    np.float64: lambda v: f if (f := float(v)) - f == 0 else _odd_float(f),
+}
+
+
+def _light_of(v: Any) -> Any:
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        f = float(v)
+        return f if f - f == 0 else _odd_float(f)
+    if isinstance(v, str):
+        return v if len(v) <= LIGHT_TEXT else v[:LIGHT_TEXT] + "…"
+    if isinstance(v, pd.DataFrame):
+        return {"kind": "table", "rows": int(v.shape[0]), "columns": int(v.shape[1])}
+    if isinstance(v, pd.Series):
+        return {"kind": "column", "length": len(v)}
+    if isinstance(v, np.ndarray):
+        return {"kind": "array", "shape": list(v.shape)}
+    if isinstance(v, dict):
+        return {"kind": "dict", "length": len(v)}
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return {"kind": "list", "length": len(v)}
+    if isinstance(v, (bytes, bytearray)):
+        return {"kind": "bytes", "size": len(v)}
+    if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date, datetime.time)):
+        try:
+            return v.isoformat()
+        except ValueError:  # NaT
+            return None
+    if type(v).__name__ == "Figure":
+        return {"kind": "figure"}
+    if isinstance(v, (types.FunctionType, types.BuiltinFunctionType)) or hasattr(v, "__layr_original__"):
+        return {"kind": "function", "name": getattr(v, "__name__", None) or type(v).__name__}
+    return {"kind": "object", "type": type(v).__name__}
+
+
 class Inside:
     """What every statement of the method's own functions gave its names, per kept call (see the module's
     docstring). Uses `sys.monitoring` tool id 4 (or the next free one) while a run lasts."""
 
-    def __init__(self, source: str, filename: str, values: Any, rounds: int = ROUNDS):
+    def __init__(self, source: str, filename: str, values: Any, rounds: int = ROUNDS, all_rounds: int = ALL_ROUNDS,
+                 all_budget: int = ALL_BUDGET):
         self.filename = filename
         self.values = values  # lab.values.ValueStore
         self.rounds = rounds
+        self.all_rounds = all_rounds
+        self.all_budget = all_budget
+        self.left = all_budget  # light values the run may still keep
+        self.cut_by_budget = 0  # statements (per call) that stopped keeping light values for the budget
         # function's first line → its statements; function → the line of its `def`
         self.maps, self.firsts = _statement_maps(source)
         self.codes: dict[types.CodeType, dict[int, Statement]] = {}
@@ -762,9 +844,12 @@ class Inside:
     # --------------------------------------------------------------- values
 
     def _note(self, st: dict, s: Statement, frame, failed: bool = False) -> None:
-        rec = st["lines"].get(s.start)
+        lines = st["lines"]
+        rec = lines.get(s.start)
         if rec is None:
-            rec = st["lines"][s.start] = {"n": 0, "first": [], "last": deque(maxlen=self.rounds), "s": s}
+            rec = lines[s.start] = {"n": 0, "first": [], "last": deque(maxlen=self.rounds), "s": s,
+                                    "cols": [(n, []) for n in s.names], "at": [] if s.loop is not None else None,
+                                    "cut": None}
         rec["n"] += 1
         k = rec["n"]
         if not s.names and not failed:
@@ -772,6 +857,36 @@ class Inside:
         try:
             loc = frame.f_locals if frame is not None else {}
             got = {n: loc[n] for n in s.names if n in loc}
+        except Exception:
+            self.errors += 1
+            return
+        if failed:
+            if s.loop is not None and s.loop in lines:
+                rec["failed_at"] = lines[s.loop]["n"]  # the round of its loop that failed
+        elif rec["cut"] is None:
+            # Every round's light values: kept first, never failing, so a statement's lists stay aligned by round.
+            cols = rec["cols"]
+            if k > self.all_rounds:
+                rec["cut"] = "rounds"
+            elif self.left < len(cols):
+                rec["cut"] = "budget"
+                self.cut_by_budget += 1
+            else:
+                self.left -= len(cols)
+                for n, col in cols:
+                    v = got.get(n)
+                    t = type(v)
+                    if t is int or v is None or (t is str and len(v) <= LIGHT_TEXT):
+                        col.append(v)
+                    elif t is float:
+                        col.append(v if v - v == 0 else _odd_float(v))
+                    else:
+                        col.append(_light(v))
+                at = rec["at"]
+                if at is not None:
+                    head = lines.get(s.loop)
+                    at.append(head["n"] if head is not None else None)
+        try:
             if failed:
                 rec["failed"] = {"round": k, "values": {n: self._summary(st, v) for n, v in got.items()}}
             elif k <= self.rounds:
@@ -788,8 +903,16 @@ class Inside:
         if not first or not record.get("lines"):
             return dict(record)
         shift = sign * first
-        lines = [{**st, "line": st["line"] + shift, "end_line": st["end_line"] + shift} for st in record["lines"]]
-        return {**record, "lines": lines}
+        lines = []
+        for st in record["lines"]:
+            item = {**st, "line": st["line"] + shift, "end_line": st["end_line"] + shift}
+            if st.get("loop_line") is not None:
+                item["loop_line"] = st["loop_line"] + shift
+            lines.append(item)
+        out = {**record, "lines": lines}
+        if record.get("every"):  # the light values are counted by round, not by line: only their keys move
+            out["every"] = {int(line) + shift: e for line, e in record["every"].items()}
+        return out
 
     def _held(self, v: Any) -> Any:
         if not isinstance(v, _Held):
@@ -808,11 +931,21 @@ class Inside:
 
     def _finish(self, st: dict) -> None:
         lines = []
+        every: dict[int, dict[str, Any]] = {}
         for start in sorted(st["lines"]):
             rec = st["lines"][start]
             s = rec["s"]
             if not s.names and "failed" not in rec:
                 continue
+            light = None
+            cols = rec["cols"]
+            kept = len(cols[0][1]) if cols else 0
+            if kept and (s.loop is not None or s.body is not None or rec["n"] > 1):  # else its full round says all
+                light = {"values": {n: col for n, col in cols}}
+                at = rec["at"]
+                if at is not None and at != list(range(1, len(at) + 1)):  # else round i is simply the i-th value
+                    light["at"] = at
+                every[s.start] = light
             rounds = list(rec["first"])
             for k, held in rec["last"]:
                 if k > self.rounds:
@@ -825,8 +958,18 @@ class Inside:
             item = {"line": s.start, "end_line": s.end, "names": list(s.names), "n": rec["n"], "rounds": rounds}
             if s.body is not None:
                 item["loop"] = True
+            if s.loop is not None:
+                item["loop_line"] = s.loop
+            if light is not None:
+                item["all"] = kept
+            if rec["cut"] is not None and (light is not None or s.loop is not None or s.body is not None):
+                item["cut"] = rec["cut"]
+            if "failed_at" in rec:
+                item["failed_at"] = rec["failed_at"]
             lines.append(item)
         out = {"call": st["call"], "args": st.get("args") or {}, "lines": lines}
+        if every:
+            out["every"] = every
         if "returned" in st:
             out["returned"] = st["returned"]
         if "error" in st:
@@ -836,25 +979,36 @@ class Inside:
     def report(self, calls: list[dict[str, Any]]) -> dict[str, Any]:
         """The record written as inside.json:
 
-        {"version": 1, "rounds": 3, "calls_limit": 50 (calls per function with their values inside: the first
+        {"version": 2, "rounds": 3, "calls_limit": 50 (calls per function with their values inside: the first
          ones; steps always), "values": {dir, tables, bytes, budget, sampled, left_out},
+         "every": {"rounds": 10000 (rounds kept per statement and call), "budget": light values per run, "kept":
+                   light values kept, "cut": statements cut by the budget},
          "calls": {"<call id>": {"call", "function", "args": {name: summary}, "lines": [{"line", "end_line",
-                   "names", "n": rounds counted, "loop"?, "rounds": [{"round", "values": {name: summary},
-                   "failed"?}]}], "returned"?: summary, "error"?: text}}}
+                   "names", "n": rounds counted, "loop"?: a for loop's header, "loop_line"?: the first line of the
+                   innermost loop around it, "all"?: rounds with light values (rounds 1 to all), "cut"?: "rounds" |
+                   "budget" (light values stop after round `all`), "failed_at"?: the round of its loop that
+                   failed, "rounds": [{"round", "values": {name: summary}, "failed"?}]}],
+                   "every"?: {"<line>": {"values": {name: [light value per round]}, "at"?: [the round of the
+                              innermost loop (`loop_line`) for each value; left out when value i is round i + 1]}},
+                   "returned"?: summary, "error"?: text}}}
+
+        A loop header's own "at" is the round of the loop around it; its values are its rounds 1, 2, ... in order.
         """
         names = {c["id"]: c["function"] for c in calls}
         out = {}
         for cid in sorted(self.records):
             r = self.records[cid]
             out[str(cid)] = {"call": cid, "function": names.get(cid), **{k: v for k, v in r.items() if k != "call"}}
-        return {"version": 1, "rounds": self.rounds, "calls_limit": self.calls_limit, "values": self.values.report(),
+        return {"version": 2, "rounds": self.rounds, "calls_limit": self.calls_limit, "values": self.values.report(),
+                "every": {"rounds": self.all_rounds, "budget": self.all_budget,
+                          "kept": self.all_budget - self.left, "cut": self.cut_by_budget},
                 "calls": out, "problems": self.errors}
 
 
 # ---------------------------------------------------------------------------------------------------- the cache
 
 
-CACHE_FORMAT = 3
+CACHE_FORMAT = 4
 CACHE_MAX = 2_000_000_000  # bytes on disk for remembered steps; the oldest are dropped past it
 ENTRY_MAX = 50_000_000  # a step whose result is bigger isn't remembered (reading it would cost more than running)
 WARM_MAX = 400_000_000  # bytes of remembered steps' results kept in memory between runs

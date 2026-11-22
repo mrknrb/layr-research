@@ -59,7 +59,7 @@ def pick_rows(table: pd.DataFrame, column: str, equals=None, *, one_of: list | N
               between: list | None = None, contains: str | None = None, leave_out: bool = False) -> pd.DataFrame:
     """Keep the rows whose value in one column equals a value, is one of several, lies between two, or contains a text.
 
-    Give one of the four: `pick_rows(peaks, "role", "sample")`, `pick_rows(od, "strain", one_of=["WT", "dpta"])`,
+    Give one of the four: `pick_rows(cultures, "role", "sample")`, `pick_rows(od, "strain", one_of=["WT", "dpta"])`,
     `pick_rows(od, "time_h", between=[2, 6])` (both ends count) or `pick_rows(runs, "name", contains="blank")`.
     With `leave_out=True` those rows are left out and the others kept.
     """
@@ -311,15 +311,12 @@ FORMS: dict[str, dict] = {
         "table_file": {"kind": "file", "label": "Table file (CSV, TSV or Excel)"},
         "sheet": {"label": "Excel sheet"}, "separator": {"label": "Separator"}, "decimal": {"label": "Decimal mark"}},
         "example": 'od = read_table(plate_file)'},
-    "read_gaml": {"title": "Read a GC sequence", "takes": ["file"], "gives": "injections", "fields": {
-        "gaml_file": {"kind": "file", "label": "GAML export"}, "channel": {"label": "Channel"}},
-        "example": "injections = read_gaml(gaml_file)"},
     "pick_rows": {"title": "Pick rows", "fields": {
         "column": {"kind": "column", "label": "Column"}, "equals": {"label": "Equals"},
         "one_of": {"kind": "list", "label": "Is one of"}, "between": {"kind": "range", "label": "Lies between"},
         "contains": {"label": "Contains"}, "leave_out": {"label": "Leave these rows out instead"}},
         "choose_one": ["equals", "one_of", "between", "contains"],
-        "example": 'samples = pick_rows(peaks, "role", "sample")'},
+        "example": 'samples = pick_rows(cultures, "role", "sample")'},
     "pick_columns": {"title": "Pick columns", "fields": {"columns": {"kind": "columns", "label": "Columns"}},
                      "example": 'small = pick_columns(rates, ["culture", "slope"])'},
     "rename_column": {"title": "Rename a column", "fields": {
@@ -394,43 +391,55 @@ FIELD_KINDS = {"table": "table", "formula": "formula", "number": "number", "text
 
 def blocks() -> list[dict]:
     """The palette of ready-made steps, read from the functions themselves: {function, title, sentence, takes,
-    gives, fields: [{name, kind, label, default, choices, optional, keyword, of}], example, import, choose_one (fields
-    of which exactly one is given), constants (what extra keyword arguments mean)}."""
+    gives, fields: [{name, kind, label, default, choices, optional, keyword, of}], example, import, module (where it
+    is imported from: toolbox or an add-on), choose_one (fields of which exactly one is given), constants (what extra
+    keyword arguments mean)}. Add-ons add their own (their FORMS)."""
     import toolbox
 
+    from .registry import load_addons
+
     out = []
-    for name, form in FORMS.items():
-        fn = getattr(toolbox, name)
-        hints = typing.get_type_hints(fn)
-        sig = inspect.signature(fn)
-        doc = inspect.getdoc(fn) or ""
-        tables = [p for p in sig.parameters if _type_word(hints.get(p, inspect.Parameter.empty)) == "table"]
-        fields = []
-        for p in sig.parameters.values():
-            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-                continue
-            declared = form["fields"].get(p.name, {})
-            kind = declared.get("kind") or FIELD_KINDS[_type_word(hints.get(p.name, inspect.Parameter.empty))]
-            field = {"name": p.name, "kind": kind,
-                     "label": declared.get("label") or p.name.replace("_", " ").capitalize(),
-                     "optional": p.default is not p.empty,
-                     "default": None if p.default is p.empty else
-                     (list(p.default) if isinstance(p.default, tuple) else p.default),
-                     "keyword": p.kind == p.KEYWORD_ONLY}
-            if kind in ("column", "columns"):
-                field["of"] = declared.get("of") or (tables[:1] if tables else [])
-            if declared.get("choices"):
-                field["choices"] = declared["choices"]
-            if declared.get("multiple"):
-                field["multiple"] = True
-            fields.append(field)
-        item = {"function": name, "title": form["title"], "sentence": doc.splitlines()[0] if doc else "",
-                "takes": form.get("takes") or ["table" for _ in tables],
-                "gives": form.get("gives") or _type_word(hints.get("return", inspect.Parameter.empty)),
-                "fields": fields, "example": form.get("example", ""), "import": f"from toolbox import {name}"}
-        if form.get("choose_one"):
-            item["choose_one"] = form["choose_one"]
-        if form.get("constants"):
-            item["constants"] = form["constants"]
-        out.append(item)
+    sources = [(toolbox, FORMS)] + [(m, getattr(m, "FORMS", {})) for m in load_addons()]
+    for module, forms in sources:
+        for name, form in forms.items():
+            fn = getattr(module, name, None)
+            if fn is not None:
+                out.append(_block(name, form, fn, module.__name__))
     return out
+
+
+def _block(name: str, form: dict, fn: Callable, module: str) -> dict:
+    """One palette entry (see `blocks`)."""
+    hints = typing.get_type_hints(fn)
+    sig = inspect.signature(fn)
+    doc = inspect.getdoc(fn) or ""
+    tables = [p for p in sig.parameters if _type_word(hints.get(p, inspect.Parameter.empty)) == "table"]
+    fields = []
+    for p in sig.parameters.values():
+        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+            continue
+        declared = form["fields"].get(p.name, {})
+        kind = declared.get("kind") or FIELD_KINDS[_type_word(hints.get(p.name, inspect.Parameter.empty))]
+        field = {"name": p.name, "kind": kind,
+                 "label": declared.get("label") or p.name.replace("_", " ").capitalize(),
+                 "optional": p.default is not p.empty,
+                 "default": None if p.default is p.empty else
+                 (list(p.default) if isinstance(p.default, tuple) else p.default),
+                 "keyword": p.kind == p.KEYWORD_ONLY}
+        if kind in ("column", "columns"):
+            field["of"] = declared.get("of") or (tables[:1] if tables else [])
+        if declared.get("choices"):
+            field["choices"] = declared["choices"]
+        if declared.get("multiple"):
+            field["multiple"] = True
+        fields.append(field)
+    item = {"function": name, "title": form["title"], "sentence": doc.splitlines()[0] if doc else "",
+            "takes": form.get("takes") or ["table" for _ in tables],
+            "gives": form.get("gives") or _type_word(hints.get("return", inspect.Parameter.empty)),
+            "fields": fields, "example": form.get("example", ""), "import": f"from {module} import {name}",
+            "module": module}
+    if form.get("choose_one"):
+        item["choose_one"] = form["choose_one"]
+    if form.get("constants"):
+        item["constants"] = form["constants"]
+    return item

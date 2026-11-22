@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-from lab.gcassay_import import corrections_from, params_from_config, parse_yaml  # noqa: E402
+from gcassay_config import corrections_from, params_from_config, parse_yaml  # noqa: E402
 from lab.runner import Runner  # noqa: E402
 from lab.store import Store, new_id, now  # noqa: E402
 
@@ -28,10 +28,10 @@ TOL = 1e-9
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory):
     cfg_path = PROJECT / os.environ.get("GCASSAY_CONFIG", "config/activity_assay_05.yaml")
-    cfg = parse_yaml(cfg_path.read_text("utf-8"), "config")
+    cfg = parse_yaml(cfg_path.read_text("utf-8"))
     params, info = params_from_config(cfg)
     corr_path = (cfg_path.parent / info["corrections"]).resolve()
-    corr = corrections_from(parse_yaml(corr_path.read_text("utf-8"), "corrections")) if corr_path.exists() else []
+    corr = corrections_from(parse_yaml(corr_path.read_text("utf-8"))) if corr_path.exists() else []
     raw = (cfg_path.parent / info["raw_file"]).resolve()
     out = (cfg_path.parent / cfg["experiment"]["output_dir"]).resolve()
     if not raw.exists() or not (out / "results.xlsx").exists():

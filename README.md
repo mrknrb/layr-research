@@ -1,14 +1,15 @@
 # Research
 
 Explainable data analysis for a researcher who is learning Python, for any study whose data fits in tables (a
-survey, lab measurements, a GC-FID assay...). Two panels:
+survey, lab measurements, an instrument's export...). Nothing in the plugin's core knows one kind of study: what
+belongs to one method lives in its method file, its example and, when it needs its own readers, a toolbox add-on.
+Two panels:
 
 - **Experiments** (`panels/lab.*`, `panels/flow.*`, `panels/pages.js`): an experiment's main screen is its method
   drawn as a **flow** (boxes for steps, wires for the tables between them, each with this run's values); beside it
   the experiment's **own pages**, made of cards the user puts together (numbers, tables, charts, texts, curves to
   review); from a box open its code with its values, its tables, the checks, corrections; methods are edited in a
-  code editor (CodeMirror 6, `panels/editor.*`) or in the flow; the results database; a guide to the Python the
-  methods use.
+  code editor (CodeMirror 6, `panels/editor.*`) or in the flow; a guide to the Python the methods use.
 - **Quick analysis** (`panels/main.*`): load a CSV, describe it, chart it, t-test and ANOVA (the 0.1 plugin).
 
 What 0.4 is and why: `docs/proposals/research-flow.md`; how its parts fit: `docs/proposals/research-flow/
@@ -22,15 +23,18 @@ of step types) is described, as history, in `docs/proposals/analysis-workflows.m
   returns the results). Built-in methods ship in `backend/lab/methods/<id>.py`; every save is a new version in
   `LAYR_DATA_DIR/lab/methods/<id>/<n>.py`.
 - **Toolbox** (`backend/toolbox/`): ready-made functions a method imports (`from toolbox import fit_line`): reading
-  GAML and tables, finding and integrating peaks, straight lines, quality flags, figures. Readable, not editable in
-  layr: to change one, copy it into the method (the panel does it).
-- **Experiment**: a method's recipe applied to raw files, with settings and **corrections** (rename, exclude, manual
-  peak boundaries), each with a written reason. Raw files are copied into the store by checksum and never changed.
+  tables, straight lines, quality flags, ready-made steps and charts. Its **add-ons** are its sub-packages
+  (`backend/toolbox/<add-on>/`, imported as `from toolbox.<add-on> import ...`) with the functions for one kind of
+  data or instrument; the GC add-on (`toolbox/gc/`) reads GAML files and finds and measures peaks. Readable, not
+  editable in layr: to change one, copy it into the method (the panel does it).
+- **Experiment**: a method's recipe applied to raw files, with settings and **corrections** of the kinds its method
+  declares (leave out a respondent, recode an answer, a region's ends set by hand...), each with a written reason.
+  Raw files are copied into the store by checksum and never changed.
 - **Run**: one calculation of an experiment, in a separate process. It records the raw files' SHA-256, the settings,
   the approved corrections, the library versions, a copy of the exact source it ran, every step's tables, every
   returned table and figure, every call of the method's functions (`calls.json`) and the values inside them
   (`inside.json`, see below). A **trial run** (while she edits, or the comparison after a change) is kept apart: it
-  isn't the experiment's latest run and doesn't go to the results database.
+  isn't the experiment's latest run.
 - **Flow**: the recipe drawn as boxes and wires, computed from the file every time (nothing of it is stored). Every
   change made in the flow is a small edit of the code.
 - **Block**: a ready-made step from the toolbox (pick rows, add a column from a formula, summarize by group, join,
@@ -39,8 +43,7 @@ of step types) is described, as history, in `docs/proposals/analysis-workflows.m
   numbers moved.
 - **Draft**: a change an AI agent wrote. It doesn't count until the user accepts it in the panel, where she sees the
   changed lines and the numbers that moved on the reference experiment. Her own saves count at once.
-- **Results database**: `LAYR_DATA_DIR/lab/results.sqlite`; every experiment's latest results, one table per output,
-  to compare strains and conditions across the PhD.
+- **Example**: an experiment with made-up raw files to try a method (`backend/lab/examples/<id>.py`, see below).
 
 ## Writing a method
 
@@ -100,32 +103,41 @@ The conventions (`backend/lab/methodfile.py` has them in full):
   steps, keeps their results and returns a dict of named results (tables, figures, values).
 - **Its parameters** are the experiment's inputs and settings: a name ending in `_file` is a raw file; `corrections`
   gets the approved corrections (a list of dicts); every other parameter is a setting. A setting's default is a plain
-  value or a module-level constant holding one (`sample_patterns=SAMPLE_PATTERNS`); a setting without a default must
-  be set by the experiment. Keep the names of settings stored experiments use.
+  value or a module-level constant holding one (`strains=STRAINS`); a setting without a default must be set by the
+  experiment. Keep the names of settings stored experiments use.
 - **Its docstring** documents them: `Inputs:` (`name: label [.ext, ...]`), `Settings:` (`name: Label. Help text`,
-  optionally under group lines like `Integration:`; `(type)` after the name picks the form's editor: text, number,
-  integer, boolean, list, object, patterns, compounds, biomass; `[unit]` overrides the unit read from the name) and
-  `Returns:` (`name: label`). Without `(type)` the default's type decides; a setting without a default whose name ends
-  in a unit is a number.
+  optionally under group lines like `Fitting:`; `(type)` after the name picks the form's editor: text, number,
+  integer, boolean, list, object, rows; `[unit]` overrides the unit read from the name) and `Returns:` (`name:
+  label`). Without `(type)` the default's type decides; a setting without a default whose name ends in a unit is a
+  number.
+- **A small table as a setting**: `strains (rows: strain text, dilution number, optional note text): Strains.` Its
+  value is a list of row dicts (`[{"strain": "WT", "dilution": 2.0}]`); each column has a type (text, number,
+  integer, boolean), may be `optional`, and gets its label and unit from its name (`rt_min` → rt [min]). The form
+  edits it as a table; values are checked row by row when an experiment's settings are saved (`methodfile.columns`,
+  `methodfile.check_value`), and the checker warns about a default that doesn't fit the columns.
 - **Every function starts with a docstring** whose first line is one plain sentence: it is shown everywhere. A
   `Formula:` block holds formulas that aren't one expression, one per line, in Python (drawn as math) or as `$LaTeX$`.
 - **Formulas** use only arithmetic (+ - * / ** and abs, sqrt, log, exp, min, max): they work on single numbers and
   on whole columns, and their body is drawn as math, once with names and once with a run's numbers.
 - **Units go in names** (`conc_mM`, `time_min`, `rate_mM_per_min`): they are shown as units; there is no unit check.
-- `DATABASE = ["table", ...]` names the returned tables kept in the results database (default: all of them). A
-  returned table named `flags` (level, category, what it is about, message; toolbox `flag(level, category,
-  message, respondent=17)`, the GC method's name an injection and a compound) is the run's quality summary.
+- A returned table named `flags` (level, category, what it is about, message; toolbox `flag(level, category,
+  message, respondent=17)` names any item by keyword) is the run's quality summary.
 - The recipe returns tables, figures, single values (a number, a dict) and texts; a long text or a report object
   (a statsmodels summary) is kept as text and shown whole.
 - Three plain values at the top of the file declare what isn't code (`lab/pages.py`; the panel edits them, each
   edit is a new version that rewrites only that assignment):
   - `PAGES`: the experiment's own pages, each `{"title", "cards": [...]}`. Cards: text, number, table, figure,
-    chart (drawn by the panel from a table: lines, points, bars) and review (one curve per item from a table of the
-    run or a raw GC file, with regions whose ends are dragged and saved as a correction; the GC peak review is one).
+    chart (drawn by the panel from a table: lines, points, bars) and review (one curve per item, with regions whose
+    ends are dragged and saved as a correction). A review card's curves come from a table of the run (`{"table",
+    "item", "x", "y"}`) or from a raw file of the experiment (`{"file": "<input>"}`): a table file (CSV, Excel...)
+    with the same item, x and y columns, any other kind through the **curve reader** the toolbox or an add-on
+    registers for its extension (`toolbox/registry.py`: `register_curve_reader(".ext", fn)`, `fn(path, settings)`
+    gives `[{"item", "name"?, "x", "y"}]`; the GC add-on registers `.gaml`). The curves are thinned and kept in memory
+    for the last few files, so dragging a region stays fast.
   - `CORRECTIONS`: the kinds of correction an experiment records, `{kind: {"label", "help", "fields": {name:
     "text" | "number" | "integer" | "boolean", "optional ..."}, "key"}}`; approved ones reach the recipe's
-    `corrections` as `{"kind", field: value, ..., "reason"}`. A method that takes `corrections` but declares none
-    gets the GC kinds (rename, exclude, manual_integration).
+    `corrections` as `{"kind", field: value, ..., "reason"}`. A method that declares none has none (proposing one
+    says so).
   - `REQUIREMENTS`: extra packages from PyPI (`["pingouin>=0.5"]`), installed once per set into
     `LAYR_DATA_DIR/lab/packages/<hash>/` with the plugin's own packages as constraints (`lab/packages.py`), and put
     after them on the calculation process's path. The plugin itself has pandas, numpy, SciPy, statsmodels,
@@ -138,7 +150,8 @@ The conventions (`backend/lab/methodfile.py` has them in full):
 (Python can't read it, an import can't work, no recipe) and warnings that don't (a function without a docstring, a
 formula that does more than arithmetic, a step longer than about 25 lines, a function that changes a table it was
 given, a recipe that does more than call steps, imports other than the toolbox, pandas, numpy, scipy and the maths
-modules, file or network access outside the toolbox, a result named like a function).
+modules, file or network access outside the toolbox, a result named like a function, a `rows` setting whose columns
+can't be read or whose default doesn't fit them).
 
 ## The flow
 
@@ -165,7 +178,8 @@ at 120 columns as the file is. A change that would break the method is refused i
   libraries and the content of its inputs are the same as in an earlier run isn't calculated again: its result and
   its whole record come back from `LAYR_DATA_DIR/lab/cache/steps` and it is marked `cached`. After a changed setting
   only the steps that depend on it run. "Run everything again" (`run` with `fresh`) and the reference comparison
-  calculate every step. Reading GAML and integrating peaks are also remembered by `toolbox/cache.py`.
+  calculate every step. A toolbox function can also remember slow results itself (`toolbox/cache.py`; the GC
+  add-on does for its files and peaks).
 - `recorder.py` wraps the method's top-level functions (and the toolbox functions it imports) while it runs and
   records every call: inputs, result, time, error. Calls made by the recipe are the steps (their tables are saved);
   deeper calls are the formulas and helpers. A function called many times keeps its first 1000 calls and a count;
@@ -182,7 +196,10 @@ at 120 columns as the file is. A change that would break the method is refused i
   with its inputs, then the calls that gave those inputs.
 - A run error names the method's own line and says what is wrong in plain words (a missing column: which columns
   the table does have).
-- `compare.py` lists the numbers that moved between two runs (rows paired by their identifying columns).
+- `compare.py` lists the numbers that moved between two runs. Rows are paired by identifying columns found in the
+  tables themselves: of the columns holding texts, whole numbers or yes/no (never decimals) the one that tells the
+  most rows apart, then the next that tells more apart, until every row is told apart; when they can't, by
+  position.
 - `standalone.py` exports a method as a folder that runs without layr (`python run.py`): the method, the toolbox,
   the settings, the corrections, the raw files' checksums, a runner and the requirements. It also writes "this run
   in a notebook": a folder in JupyterLab's notebooks (the `jupyter` plugin's data folder) with the run's tables, the
@@ -194,10 +211,18 @@ at 120 columns as the file is. A change that would break the method is refused i
 ## Blocks and code help
 
 - `toolbox/blocks.py`: the ready-made steps, plain functions a beginner can read ("a table in, a table out", with a
-  docstring in the method style). `blocks()` builds the flow's palette from their signatures and docstrings: each
-  one's title, sentence, what it takes and gives, and the fields of its form (column, columns, text, number, choice,
-  formula, table...). A block added in the flow is an ordinary call in the recipe plus its name in the
-  `from toolbox import` line.
+  docstring in the method style). `blocks()` builds the flow's palette from their signatures and docstrings (and an
+  add-on's own `FORMS`): each one's title, sentence, what it takes and gives, the fields of its form (column,
+  columns, text, number, choice, formula, table...) and the module it is imported from. A block added in the flow
+  is an ordinary call in the recipe plus its name in the `from toolbox import` line (an add-on's in its own
+  `from toolbox.<add-on> import` line, added when missing).
+- **Toolbox add-ons** (`toolbox/registry.py`): the plugin finds them by their folders (`registry.addons()`) and
+  imports them only when it needs what they register; the general toolbox never imports one. An add-on registers its
+  **readers** (`register_reader(fn, label, extensions, out, param)`: what the flow's "add a raw file" offers; the
+  toolbox registers `read_table`) and its **curve readers** (above). Everything that treats the toolbox specially
+  also knows its add-ons: the checker, `toolbox_docs` (the add-ons as their own groups) and `toolbox_copy`, the flow
+  and the editor's help, explanations, the recorder (it wraps every imported `toolbox...` function), the remembered
+  steps (their key hashes every file of the toolbox, add-ons included) and the exported folder (it copies them).
 - `lab/codeintel.py`: help in the editor from the plugin's own Python with Jedi: completion (columns of the tables
   the last run saw come first after `peaks.` and inside `peaks["`), hover, the signature being typed, go to
   definition, rename everywhere; Ruff lays a method out at 120 columns, only when asked. Jedi is warmed up in the
@@ -209,11 +234,10 @@ Methods: `methods`, `method_get`, `method_check`, `method_versions`, `method_dif
 `method_revert`, `method_reference`, `method_delete`, `draft_get`, `draft_decide` (the user's; `source` accepts a
 merged text), `toolbox_docs`, `toolbox_copy`. The flow: `flow_get`, `flow_edit` (saves nothing), `flow_new`, `blocks`.
 Experiments and runs: `experiments`, `experiment_get`, `experiment_create`, `experiment_update`, `experiment_delete`,
-`lab_sample`, `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
+`examples` and `lab_sample` (make one of them), `file_import` and the upload tools, `run` (with `fresh`, or a trial run of an unsaved `source` /
 `settings`), `run_stop`, `run_get`, `runs`, `compare_runs`. Results and explanations: `result_table`, `figure`,
 `provenance`, `explain`, `explain_function`, `function_inside` (a function's code with the values of every line),
-`value_get` (the rows of any stored table), `chromatogram`, the corrections, `database_tables`, `database_query`,
-`export`, `method_export`, `notebook`. What a method declares: `method_declare` (pages, kinds of correction,
+`value_get` (the rows of any stored table), the corrections, `export`, `method_export`, `notebook`. What a method declares: `method_declare` (pages, kinds of correction,
 packages), `correction_kinds`, and for the pages `curve` (one curve for a review card) and `result_value` (a
 returned value or text). The editor: `code_complete`, `code_hover`, `code_signature`,
 `code_definition`, `code_rename`, `code_format`. For the panel's AI buttons: `ai_prompt` (explain, a Methods
@@ -228,21 +252,31 @@ statsmodels (its coefficients as a table, its full report as text) → quality c
 Overview (alpha, respondents, a bar chart, the regression) and Respondents (a scatter chart, the scores). Make it
 with Try an example › A survey (`lab_sample` with `which: survey`).
 
+## Examples
+
+`backend/lab/examples/<id>.py`, one module per example, listed by whatever is there (`examples` tool: id, title,
+description, method). Each has `ID`, `TITLE`, `DESCRIPTION`, `METHOD`, `EXPERIMENT` (the new experiment's title),
+`ORDER`, `SETTINGS`, `CORRECTIONS` and `files(folder)`, which writes its made-up raw files (`{input id: path}`).
+`lab_sample(which=<id>)` stores the files, makes the experiment and, for the first one of a method, pins it as the
+method's reference experiment.
+
 ## The GC-FID activity assay
 
 `gc-activity-assay` (`backend/lab/methods/gc-activity-assay.py`) is Ragini's assay (gcassay, her Python package,
 rewritten as one readable method): read the GAML export → sample names and design checks → reference retention
 times from the standards → RT-locked peak integration (with drift correction and the corrections) → internal
 standard ratio → calibration with LOD/LOQ → concentrations → time course → initial rates (U/gCDW) → interval rates →
-mass balance → quality checks → figure. `tests/test_lab_real.py` proves its numbers equal gcassay's on a real run
-(set `GCASSAY_PROJECT` to the gcassay project folder; the data never leaves it). A gcassay config and corrections
-file can be taken over when making an experiment (New experiment › Settings from a gcassay config, or
-`experiment_create` with `gcassay_config`).
+mass balance → quality checks → figure. Its GC-only functions are the toolbox's GC add-on (`toolbox/gc/`: GAML,
+peaks, the time-course figure; it registers `.gaml` as a reader and a curve reader), its example is
+`lab/examples/gc.py` (a made-up GAML sequence). Its compounds and sample name patterns are `rows` settings; the
+biomass is a number with an optional row per fed substrate. `tests/test_lab_real.py` proves its numbers equal
+gcassay's on a real run (set `GCASSAY_PROJECT` to the gcassay project folder; the data never leaves it; the test
+reads gcassay's config with its own helper, `tests/gcassay_config.py`).
 
 ## For AI agents
 
-The server's instructions say the rules and the style; in short: numbers only from `result_table` / `provenance` /
-`database_query` (with the run id); a method changes only through `method_write` (the whole file or one function),
+The server's instructions say the rules and the style; in short: numbers only from `result_table` / `provenance`
+(with the run id); a method changes only through `method_write` (the whole file or one function),
 which is a draft the user accepts and comes back with the checker's warnings to fix; `draft_get` shows the changed
 lines and the numbers that moved; `draft_decide` is the user's. Corrections need a reason and stay proposed until the
 user approves them. An agent reads the flow with `flow_get`, makes flow changes with `flow_edit` and saves the
@@ -255,6 +289,9 @@ the buttons hide without it) and mark the answer as written by AI; a step Claude
 
 From `plugins/research`: `uv run pytest tests -q` (add `GCASSAY_PROJECT=<folder>` for the real-data comparison).
 `tests/test_flow_server.py` drives 0.4 end to end through the server as layr starts it (the sample run, its flow
-with a value on every wire, the inside of a step, a changed setting with remembered steps, a block added and tried).
+with a value on every wire, the inside of a step, a changed setting with remembered steps, a block added and tried,
+every example made and run). `tests/test_generality.py` fails when a word of one method (GC, GAML, peak, compound,
+injection...) appears in the core (everything under `backend/` but the methods, the examples and the toolbox's
+add-ons; and `panels/pages.js`, `panels/guide.js`, `layr.json`).
 The panel: start `layr serve` with this plugin linked and its own home, then
 `node plugins/dev/research.test.mjs --port <port> --home <that home>`.

@@ -9,6 +9,7 @@ A job: {"job": "run", "source": path of the method file (the run's own copy), "r
 "kinds": {function: kind}, "args": {parameter: value}, "cache_dir": ..., "limit": calls kept per function,
 "step_cache": folder of remembered steps or null (none), "fresh": true to run every step (still remembering them),
 "inside": false to skip recording the values inside the functions, "values_budget": bytes of tables per run,
+"all_budget": light values of every round of the loops kept per run (lab/recorder.py, ALL_BUDGET),
 "paths": folders of the method's own packages (lab/packages.py)}. A returned text (long or of several lines, or a
 report object such as a statsmodels summary) is kept as outputs/<name>.txt.
 The run folder gets outputs/<name>.csv|png, steps/<n>_<step>.csv (each step's table), calls.json (every call),
@@ -227,6 +228,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     import pandas as pd
 
     import toolbox
+    import toolbox.cache  # the toolbox's own package no longer loads it
     from lab.recorder import WARM, Inside, Recorder, StepCache, load, plain_recipe, summarize
     from lab.values import BUDGET, Later, ValueStore, link_or_copy
 
@@ -300,13 +302,15 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         entry["order"] = n
 
     values = ValueStore(run_dir, int(job.get("values_budget") or BUDGET), later)
-    inside = Inside(source, str(source_path), values) if job.get("inside", True) else None
+    from lab.recorder import ALL_BUDGET, ALL_ROUNDS, INSIDE_LIMIT, ROUNDS
+
+    all_budget = int(job.get("all_budget") or ALL_BUDGET)
+    inside = Inside(source, str(source_path), values, all_budget=all_budget) if job.get("inside", True) else None
     cache = None
     if job.get("step_cache"):
         try:
-            from lab.recorder import INSIDE_LIMIT, ROUNDS
-
-            mode = f"inside={inside is not None} limit={int(job.get('limit') or 1000)} {ROUNDS} {INSIDE_LIMIT}"
+            mode = f"inside={inside is not None} limit={int(job.get('limit') or 1000)} {ROUNDS} {INSIDE_LIMIT} " \
+                   f"{ALL_ROUNDS} {all_budget}"
             cache = StepCache(job["step_cache"], source, read=not job.get("fresh"), mode=mode, later=later)
             if plain_recipe(source, job["recipe"]):
                 cache.remember_fingerprints()

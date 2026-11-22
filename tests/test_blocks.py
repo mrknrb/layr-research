@@ -15,7 +15,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-import toolbox  # noqa: E402
 from lab import checker, methodfile  # noqa: E402
 from lab import explain as explainer  # noqa: E402
 from lab.runner import Pool, Runner  # noqa: E402
@@ -173,9 +172,12 @@ def test_charts_return_a_figure(od):
 
 
 def test_every_block_is_in_the_toolbox_and_has_a_plain_sentence():
+    import importlib
+
     for b in blocks():
-        fn = getattr(toolbox, b["function"])
-        assert b["function"] in toolbox.__all__
+        module = importlib.import_module(b["module"])
+        fn = getattr(module, b["function"])
+        assert b["function"] in module.__all__ and b["module"].split(".")[0] == "toolbox"
         assert b["sentence"] and b["sentence"].endswith(".") and len(b["sentence"]) <= 120, b["function"]
         assert explainer.toolbox_view(b["function"])["sentence"] == b["sentence"]
         assert fn.__doc__
@@ -210,7 +212,22 @@ def test_palette_is_read_from_the_functions():
     assert palette["add_column"]["constants"]
     for b in palette.values():
         assert b["example"].split(" = ")[1].startswith(b["function"] + "("), b["function"]
-        assert b["import"] == f"from toolbox import {b['function']}"
+        assert b["import"] == f"from {b['module']} import {b['function']}"
+    assert palette["read_table"]["module"] == "toolbox" and palette["read_gaml"]["module"] == "toolbox.gc"
+
+
+def test_the_general_toolbox_knows_no_add_on():
+    """The add-ons are found by their folders; the general toolbox never imports one (a fresh Python shows it)."""
+    import subprocess
+
+    code = ("import sys, toolbox; from toolbox import registry; "
+            "assert not [m for m in sys.modules if m.startswith('toolbox.') and m.count('.') == 1 "
+            "and m in registry.addons()], sorted(sys.modules); "
+            "assert registry.addons() == ['toolbox.gc']; "
+            "assert [r['function'] for r in registry.readers()][:1] == ['read_table']")
+    backend = Path(__file__).resolve().parent.parent / "backend"
+    out = subprocess.run([sys.executable, "-c", code], cwd=backend, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
 
 
 # ---------------------------------------------------------------------------------------------------- in a method

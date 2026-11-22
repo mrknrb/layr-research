@@ -25,22 +25,24 @@ def register(mcp, store, api) -> None:
         """The ready-made steps the flow offers (pick rows, add a column from a formula, summarize by group, join,
         fit a line per group, charts, and the readers that take a file): {blocks: [{function, title, sentence, takes,
         gives, fields: [{name, kind (table, column, columns, text, number, boolean, choice, formula, file, list,
-        range), label, default, optional, keyword, of, choices}], example, import}]}. Read from the toolbox's
-        functions themselves."""
+        range), label, default, optional, keyword, of, choices}], example, import, module}], readers: [{function,
+        module, label, extensions, out, param}] (the functions that read a raw file: what "add a raw file" offers)}.
+        Read from the toolbox's functions (and its add-ons') themselves."""
+        from toolbox import registry
         from toolbox.blocks import blocks as palette
 
-        return {"blocks": palette()}
+        return {"blocks": palette(), "readers": registry.readers()}
 
     @mcp.tool()
     def code_complete(
         source: Source, line: Line, column: Column,
         columns: Annotated[dict[str, list[str]] | None, Field(description="Columns of tables known from the last "
-                                                                         "run, by variable name: {\"peaks\": "
-                                                                         "[\"injection\", \"area\"]}.")] = None,
+                                                                         "run, by variable name: {\"cultures\": "
+                                                                         "[\"culture\", \"od600\"]}.")] = None,
     ) -> dict[str, Any]:
         """What can be typed at the cursor: {items: [{label, insert, kind, detail, info?, group}], from, prefix,
-        note?}. Replace the text from `from` to the cursor with `insert`. Known columns come first after `peaks.` and
-        are the only answers inside `peaks["`; then the method's own names, the toolbox, keywords, the rest."""
+        note?}. Replace the text from `from` to the cursor with `insert`. Known columns come first after `cultures.`
+        and are the only answers inside `cultures["`; then the method's own names, the toolbox, keywords, the rest."""
         return codeintel.complete(source, line, column, columns)
 
     @mcp.tool()

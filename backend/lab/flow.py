@@ -371,13 +371,14 @@ class _Param:
 
 
 class _Callee:
-    __slots__ = ("name", "kind", "params", "returns", "sentence", "function", "obj", "opens_as")
+    __slots__ = ("name", "kind", "params", "returns", "sentence", "function", "obj", "opens_as", "module")
 
     def __init__(self, name: str, kind: str, params: list[_Param] | None = None, returns: str | None = None,
                  sentence: str = "", function: methodfile.Function | None = None, obj: Any = None,
-                 opens_as: str | None = None):
+                 opens_as: str | None = None, module: str | None = None):
         self.name, self.kind, self.params, self.returns, self.sentence = name, kind, params, returns, sentence
         self.function, self.obj, self.opens_as = function, obj, opens_as
+        self.module = module  # a toolbox function's module to import it from: toolbox or toolbox.<add-on>
 
 
 _TOOLBOX: dict[str, _Callee | None] = {}
@@ -403,21 +404,21 @@ def _signature_params(obj: Any) -> tuple[list[_Param] | None, str | None]:
 
 
 def _toolbox(name: str) -> _Callee | None:
-    """A toolbox function or class, read with inspect (once per process)."""
+    """A function or class of the toolbox or one of its add-ons, read with inspect (once per process)."""
     if name in _TOOLBOX:
         return _TOOLBOX[name]
     info = None
     try:
-        import toolbox
+        from toolbox import registry
 
-        obj = getattr(toolbox, name, None) if name in getattr(toolbox, "__all__", dir(toolbox)) else None
+        module, obj = registry.find(name) or (None, None)
     except Exception:  # the toolbox is the plugin's own code; a broken import means "not known" here
-        obj = None
+        module, obj = None, None
     if obj is not None and callable(obj):
         params, returns = _signature_params(obj)
         doc = (inspect.getdoc(obj) or "").strip()
         info = _Callee(name, "class" if inspect.isclass(obj) else "toolbox", params, returns,
-                       doc.splitlines()[0] if doc else "", obj=obj, opens_as="code")
+                       doc.splitlines()[0] if doc else "", obj=obj, opens_as="code", module=module)
     _TOOLBOX[name] = info
     return info
 
@@ -506,6 +507,7 @@ class _Analysis:
         self.classes = {n.name for n in method.tree.body if isinstance(n, ast.ClassDef)}
         self.module_names: set[str] = set()
         self.toolbox_imported: set[str] = set()
+        self.toolbox_module: dict[str, str] = {}  # a toolbox name -> the module it is imported from
         for n in method.tree.body:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 self.module_names.add(n.name)
@@ -514,8 +516,9 @@ class _Analysis:
             elif isinstance(n, (ast.Import, ast.ImportFrom)):
                 for a in n.names:
                     self.module_names.add((a.asname or a.name).split(".")[0])
-                    if isinstance(n, ast.ImportFrom) and n.module == "toolbox" and not n.level:
+                    if isinstance(n, ast.ImportFrom) and _is_toolbox(n.module) and not n.level:
                         self.toolbox_imported.add(a.asname or a.name)
+                        self.toolbox_module[a.asname or a.name] = n.module
         self._callees: dict[str, _Callee] = {}
         self.nodes: list[_Node] = []
         self.made: dict[str, int] = {}  # name -> the last node that made it
@@ -645,7 +648,7 @@ class _Analysis:
                         and node.fn not in self.toolbox_imported and node.fn not in self.module_names:
                     self.messages.append({"line": st.lineno, "node": None, "message":
                                           f"`{node.fn}` is a toolbox function but isn't imported: add it to the "
-                                          "`from toolbox import` line."})
+                                          f"`from {node.callee.module or 'toolbox'} import` line."})
             else:
                 node.outs = _assigned(st)
                 node.calls = _calls_in(st)
@@ -1643,7 +1646,7 @@ def _need(op: dict, key: str, what: str) -> Any:
 def _check_name(A: _Analysis, name: Any, what: str = "name") -> str:
     if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
         raise LabError(f"`{name}` can't be a {what}: use letters, digits and _, not starting with a digit "
-                       "(e.g. `peak_areas`).")
+                       "(e.g. `growth_rates`).")
     why = None
     if name in A.params:
         why = "a setting or input of the recipe"
@@ -1820,14 +1823,36 @@ def _render_call(indent: str, outs: list[str], fn: str, items: list[str]) -> lis
 # -------------------------------------------------------------- the toolbox import
 
 
+def _is_toolbox(module: str | None) -> bool:
+    """`toolbox` or one of its add-ons (`toolbox.<add-on>`)."""
+    return bool(module) and (module == "toolbox" or module.startswith("toolbox."))
+
+
 def _import_patch(A: _Analysis, add: list[str] = (), remove: list[str] = ()) -> list[tuple[int, int, list[str]]]:
-    imp = next((n for n in A.method.tree.body if isinstance(n, ast.ImportFrom) and n.module == "toolbox"
+    """Names added to (or removed from) the import line of the module each comes from: `from toolbox import` for
+    the toolbox's own, `from toolbox.<add-on> import` for an add-on's (a new line when the method has none yet)."""
+    by_module: dict[str, tuple[list[str], list[str]]] = {}
+    for name in add:
+        c = _toolbox(name)
+        by_module.setdefault((c.module if c else None) or "toolbox", ([], []))[0].append(name)
+    for name in remove:
+        by_module.setdefault(A.toolbox_module.get(name, "toolbox"), ([], []))[1].append(name)
+    patches = []
+    for module, (adding, removing) in by_module.items():
+        patches += _module_import_patch(A, module, adding, removing)
+    return patches
+
+
+def _module_import_patch(A: _Analysis, module: str, add: list[str], remove: list[str]
+                         ) -> list[tuple[int, int, list[str]]]:
+    head = f"from {module} import"
+    imp = next((n for n in A.method.tree.body if isinstance(n, ast.ImportFrom) and n.module == module
                 and not n.level), None)
     if imp is None:
         if not add:
             return []
-        line = f"from toolbox import {', '.join(sorted(add))}"
-        new = [line] if len(line) <= WIDTH else _wrap("from toolbox import (", sorted(add), ")")
+        line = f"{head} {', '.join(sorted(add))}"
+        new = [line] if len(line) <= WIDTH else _wrap(f"{head} (", sorted(add), ")")
         imports = [n for n in A.method.tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
         if imports:
             at = (imports[-1].end_lineno or imports[-1].lineno) + 1
@@ -1857,13 +1882,13 @@ def _import_patch(A: _Analysis, add: list[str] = (), remove: list[str] = ()) -> 
         if first > 1 and not before.strip() and not after.strip():
             first -= 1
         return [(first, last, [])]
-    one = f"from toolbox import {', '.join(names)}"
+    one = f"{head} {', '.join(names)}"
     old_lines = A.src.lines[first - 1:last]
     if "(" in old_lines[0]:
         old = [(A.src.seg(a) if a.asname else a.name, a.lineno - first) for a in imp.names]
-        new = _relayout(old_lines, old, names, "from toolbox import (", ")")
+        new = _relayout(old_lines, old, names, f"{head} (", ")")
     else:
-        new = [one] if len(one) <= WIDTH else _wrap("from toolbox import (", names, ")")
+        new = [one] if len(one) <= WIDTH else _wrap(f"{head} (", names, ")")
     return [(first, last, _comments_kept(old_lines, new))]
 
 

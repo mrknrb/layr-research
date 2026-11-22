@@ -4,42 +4,45 @@ A method is one Python file:
 - The module docstring's first line is the method's name; the rest describes it.
 - The **recipe** is the function named by a module-level `RECIPE = "name"`, or else the last function in the file.
   Its parameters are the experiment's inputs and settings:
-  - a parameter whose name ends in `_file` is a raw file the experiment supplies (`gaml_file`, `plate_file`);
+  - a parameter whose name ends in `_file` is a raw file the experiment supplies (`plate_file`, `answers_file`);
   - a parameter named `corrections` gets the experiment's approved corrections (a list of dicts);
   - every other parameter is a setting; its default (a literal, or a module-level constant holding one) is what an
     experiment uses unless it sets its own. A setting without a default must be set by the experiment.
 - **Steps** are the functions the recipe calls. **Formulas** are functions made only of arithmetic lines
   (`name = ...` and `return ...`). Other functions are **helpers** (they decide or loop for a step).
-- `DATABASE = ["table", ...]`: the returned tables kept in the results database (default: every returned table).
 - `PAGES`, `CORRECTIONS`, `REQUIREMENTS`: the experiment's own pages, the kinds of correction it records and extra
   Python packages (lab/pages.py).
 
 Docstrings (the explanation comes from them and from the code itself):
 
-    def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l):
+    def growth_rates(od, window_h):
         \"\"\"One plain sentence: what it does.
 
         More text, if needed.
 
         Formula:
-            slope = sum((t - t_mean) * (c - c_mean)) / sum((t - t_mean) ** 2)
+            mu = sum((t - t_mean) * (y - y_mean)) / sum((t - t_mean) ** 2)
         \"\"\"
 
 The recipe's docstring documents its parameters (sections Inputs, Settings, Returns; groups inside Settings):
 
         Inputs:
-            gaml_file: GC sequence, the GAML export from Chromeleon [.gaml]
+            plate_file: Plate reader export (CSV or Excel) [.csv, .xlsx]
         Settings:
-            Integration:
-                rt_tolerance_min: Retention time tolerance. The apex must lie this close to the reference time.
-                biomass_gcdw_per_l (biomass): Biomass [gCDW/L]. One number, or one per fed substrate.
+            Fitting:
+                window_h: Exponential window. Start and end of the exponential phase.
+                blank_od600: Blank [OD]. The medium's own absorbance.
+                strains (rows: strain text, label text, optional dilution number): Strains. One row per strain.
         Returns:
-            activities: Specific activities
+            rates: Growth rates
 
 A setting line is `name: Label. Help text`; `(type)` after the name picks the form's editor (text, number,
-integer, boolean, list, object, patterns, compounds, biomass), otherwise the default's type decides (a setting
-without a default whose name ends in a unit is a number); `[unit]` in the label overrides the unit read from the
-name (`rt_tolerance_min` → min).
+integer, boolean, list, object, rows), otherwise the default's type decides (a setting without a default whose name
+ends in a unit is a number); `[unit]` in the label overrides the unit read from the name (`window_h` → h).
+
+`rows` is a small table typed in the form: `(rows: column type, column type, ...)`, each type one of text, number,
+integer, boolean, optionally after the word `optional` (a cell that may be left empty). Its value is a list of row dicts,
+`[{"strain": "WT", "label": "wild type"}, ...]`; each column's label and unit are read from its name.
 """
 
 from __future__ import annotations
@@ -55,8 +58,8 @@ from .latex import UNITS, body_statements, call_name, split_unit
 UNKNOWN = object()  # a default that isn't a plain value (it is worked out when the method runs)
 SECTIONS = {"formula": "formula", "formulas": "formula", "inputs": "inputs", "settings": "settings",
             "returns": "returns", "outputs": "returns"}
-SPECIAL_EDITORS = {"sample_patterns": "patterns", "compounds": "compounds", "biomass_gcdw_per_l": "biomass"}
-EDITORS = {"text", "number", "integer", "boolean", "list", "object", "patterns", "compounds", "biomass"}
+EDITORS = {"text", "number", "integer", "boolean", "list", "object", "rows"}
+COLUMN_TYPES = ("text", "number", "integer", "boolean")
 ARITHMETIC_CALLS = {"sqrt", "abs", "fabs", "exp", "log", "ln", "log10", "log2", "min", "max", "round", "float", "int",
                     "floor", "ceil", "minimum", "maximum"}
 
@@ -94,7 +97,6 @@ class Method:
     functions: list[Function]
     recipe: str | None
     constants: dict[str, Any]
-    database: list[str] | None
     imports: list[dict[str, Any]]
     tree: ast.Module
 
@@ -291,7 +293,6 @@ def parse(source: str) -> Method:
     first, _, rest = module_doc.strip().partition("\n")
     constants: dict[str, Any] = {}
     recipe = None
-    database = None
     imports: list[dict[str, Any]] = []
     defs: list[ast.FunctionDef] = []
     for node in tree.body:
@@ -301,8 +302,6 @@ def parse(source: str) -> Method:
                 constants[node.targets[0].id] = v
             if node.targets[0].id == "RECIPE" and isinstance(v, str):
                 recipe = v
-            if node.targets[0].id == "DATABASE" and isinstance(v, list):
-                database = [str(x) for x in v]
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.Import):
                 for a in node.names:
@@ -339,7 +338,7 @@ def parse(source: str) -> Method:
                                   source="\n".join(lines[start - 1:end]), calls=_calls(d, names),
                                   formula_shaped=shaped))
     return Method(name=first.strip(), description=" ".join(rest.split()), functions=functions, recipe=recipe,
-                  constants=constants, database=database, imports=imports, tree=tree)
+                  constants=constants, imports=imports, tree=tree)
 
 
 # ---------------------------------------------------------------------------------------------------- the form
@@ -349,11 +348,9 @@ def is_input(param: str) -> bool:
     return param.endswith("_file") or param == "corrections"
 
 
-def _editor(param: str, default: Any, explicit: str | None, unit: str | None) -> str:
-    if explicit and explicit in EDITORS:
-        return explicit
-    if param in SPECIAL_EDITORS:
-        return SPECIAL_EDITORS[param]
+def _editor(default: Any, explicit: str | None, unit: str | None) -> str:
+    if explicit and explicit.split(":")[0].strip() in EDITORS:
+        return explicit.split(":")[0].strip()
     if isinstance(default, bool):
         return "boolean"
     if isinstance(default, int):
@@ -367,6 +364,85 @@ def _editor(param: str, default: Any, explicit: str | None, unit: str | None) ->
     if default is None or default is UNKNOWN:
         return "number" if unit else "text"
     return "text"
+
+
+def columns(spec: str) -> list[dict[str, Any]]:
+    """The columns of a `rows` setting from its docstring type, `rows: name type, optional name type, ...`:
+    [{id, label, type, optional, unit?}]. Raises ValueError in plain words."""
+    _, _, text = spec.partition(":")
+    out: list[dict[str, Any]] = []
+    for part in [p.strip() for p in text.split(",") if p.strip()]:
+        words = part.split()
+        optional = words[0].lower() == "optional"
+        words = words[1:] if optional else words
+        if not words or not words[0].isidentifier() or len(words) > 2 or \
+                (len(words) == 2 and words[1].lower() not in COLUMN_TYPES):
+            raise ValueError(f"`{part}` isn't a column: write `name type` (type: {', '.join(COLUMN_TYPES)}), "
+                             "optionally after `optional`.")
+        name = words[0]
+        if any(c["id"] == name for c in out):
+            raise ValueError(f"The column `{name}` is named twice.")
+        name_words, unit = split_unit(name)
+        column = {"id": name, "label": " ".join(name_words) or name, "type": words[1].lower() if len(words) == 2
+                  else "text", "optional": optional}
+        if unit:
+            column["unit"] = unit
+        out.append(column)
+    if not out:
+        raise ValueError("A rows setting needs its columns: `(rows: name text, value number)`.")
+    return out
+
+
+def check_value(setting: dict[str, Any], value: Any) -> Any:
+    """A setting's value checked against its type (rows: every row against the columns) and turned into it; None
+    resets the setting. Raises ValueError in plain words."""
+    if value is None or setting.get("type") != "rows":
+        return value
+    cols = setting.get("columns") or []
+    label = setting.get("label") or setting.get("id")
+    if not isinstance(value, list) or not all(isinstance(r, dict) for r in value):
+        raise ValueError(f"{label} is a list of rows, each {{{', '.join(repr(c['id']) + ': ...' for c in cols)}}}.")
+    known = {c["id"] for c in cols}
+    out = []
+    for i, row in enumerate(value, 1):
+        unknown = [k for k in row if k not in known]
+        if unknown:
+            raise ValueError(f"Row {i} of {label} has no column {', '.join(unknown)}. Columns: {', '.join(known)}.")
+        clean: dict[str, Any] = {}
+        for c in cols:
+            v = row.get(c["id"])
+            if v is None or (isinstance(v, str) and not v.strip()):
+                if not c["optional"]:
+                    raise ValueError(f"Row {i} of {label} needs its {c['label']}.")
+                continue
+            clean[c["id"]] = _cell(v, c, f"Row {i} of {label}")
+        out.append(clean)
+    return out
+
+
+def _cell(v: Any, column: dict[str, Any], where: str) -> Any:
+    t = column["type"]
+    try:
+        if t == "integer":
+            f = float(v)
+            if isinstance(v, bool) or f != int(f):
+                raise ValueError
+            return int(f)
+        if t == "number":
+            if isinstance(v, bool):
+                raise ValueError
+            return float(v)
+        if t == "boolean":
+            if isinstance(v, bool):
+                return v
+            text = str(v).strip().lower()
+            if text not in ("1", "0", "true", "false", "yes", "no"):
+                raise ValueError
+            return text in ("1", "true", "yes")
+        return v if isinstance(v, str) else str(v)
+    except (TypeError, ValueError):
+        what = {"integer": "a whole number", "number": "a number", "boolean": "yes or no"}[t]
+        raise ValueError(f"{where}: {column['label']} must be {what}, not {v!r}.") from None
 
 
 def settings(method: Method) -> list[dict[str, Any]]:
@@ -386,7 +462,7 @@ def settings(method: Method) -> list[dict[str, Any]]:
         unit = d.get("unit") or unit
         default = fn.defaults.get(pid, UNKNOWN)
         has_default = pid in fn.defaults
-        item = {"id": pid, "type": _editor(pid, default, d.get("type"), unit),
+        item = {"id": pid, "type": _editor(default, d.get("type"), unit),
                 "label": d.get("label") or pid.replace("_", " "),
                 "default": None if default is UNKNOWN else default, "group": d.get("group") or "Other settings",
                 "required": not has_default}
@@ -396,6 +472,11 @@ def settings(method: Method) -> list[dict[str, Any]]:
             item["unit"] = unit
         if has_default and default is UNKNOWN:
             item["computed_default"] = ast.unparse(_default_node(fn, pid))
+        if item["type"] == "rows":
+            try:
+                item["columns"] = columns(d.get("type") or "")
+            except ValueError as e:
+                item["columns"], item["problem"] = [], str(e)
         out.append(item)
     return out
 
@@ -444,10 +525,9 @@ def summary(method: Method) -> dict[str, Any]:
     return {"name": method.name, "description": method.description, "recipe": method.recipe,
             "outline": outline(method), "settings": settings(method), "inputs": inputs(method),
             "outputs": (method.recipe_function.doc.returns if method.recipe_function else {}),
-            "database": method.database,
             "steps": sum(1 for f in method.functions if f.kind == "step"),
             "pages": pages.pages(method.constants),
-            "corrections": pages.correction_kinds(method.constants, takes_corrections(method)),
+            "corrections": pages.correction_kinds(method.constants),
             "takes_corrections": takes_corrections(method),
             "requirements": pages.requirements(method.constants)}
 

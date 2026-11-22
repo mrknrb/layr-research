@@ -1,8 +1,10 @@
 """Which numbers moved between two runs (a method's reference experiment before and after a change).
 
-Rows of the same table are paired by their identifying columns (injection, compound, strain, substrate, time ...
-when those identify each row; otherwise every text and whole-number column; otherwise by position). Then every
-number that differs by more than a relative 1e-9, and every text that differs, is listed with its old and new value.
+Rows of the same table are paired by their identifying columns: of the columns both tables have that hold texts,
+whole numbers or yes/no (never decimal numbers), the one that tells the most rows apart, then the next that tells
+more apart, and so on until every row is told apart; a column that tells no more rows apart is not used. When those
+columns together can't tell every row apart (in either table), rows are paired by their position. Then every number
+that differs by more than a relative 1e-9, and every text that differs, is listed with its old and new value.
 """
 
 from __future__ import annotations
@@ -14,8 +16,6 @@ import pandas as pd
 
 from .store import Store, jsonable
 
-ID_COLUMNS = ["injection", "compound", "strain", "substrate", "substrate_fed", "time_min", "replicate", "interval_min",
-              "std_series", "std_conc_mM", "level", "category", "group", "sample", "well"]
 REL_TOL = 1e-9
 
 
@@ -29,14 +29,31 @@ def _read(store: Store, run: dict[str, Any], name: str) -> pd.DataFrame | None:
         return pd.DataFrame(columns=o.get("columns") or [])
 
 
+def _identifying(a: pd.DataFrame, b: pd.DataFrame, c: str) -> bool:
+    """A column that can name rows: texts, whole numbers or yes/no in both tables (never decimal numbers)."""
+    def kind(s: pd.Series) -> bool:
+        return not pd.api.types.is_float_dtype(s) and (pd.api.types.is_integer_dtype(s) or pd.api.types.is_bool_dtype(s)
+                                                       or pd.api.types.is_object_dtype(s)
+                                                       or pd.api.types.is_string_dtype(s))
+    return kind(a[c]) and kind(b[c])
+
+
 def _keys(a: pd.DataFrame, b: pd.DataFrame) -> list[str] | None:
-    common = [c for c in a.columns if c in b.columns]
-    preferred = [c for c in ID_COLUMNS if c in common]
-    if preferred and not a.duplicated(preferred).any() and not b.duplicated(preferred).any():
-        return preferred
-    plain = [c for c in common if not pd.api.types.is_float_dtype(a[c]) and not pd.api.types.is_float_dtype(b[c])]
-    if plain and not a.duplicated(plain).any() and not b.duplicated(plain).any():
-        return plain
+    """The columns that pair the rows of two tables (see the module's docstring), or None: by position."""
+    candidates = [c for c in a.columns if c in b.columns and _identifying(a, b, c)]
+    both = pd.concat([a[candidates], b[candidates]], ignore_index=True).astype(str) if candidates else None
+    keys: list[str] = []
+    told_apart = 1
+    while candidates and (a.duplicated(keys).any() or b.duplicated(keys).any() if keys else True):
+        counts = {c: len(both.drop_duplicates(keys + [c])) for c in candidates}
+        best = max(candidates, key=lambda c: counts[c])  # the first of the best, in the table's order
+        if counts[best] <= told_apart:
+            break
+        keys.append(best)
+        candidates.remove(best)
+        told_apart = counts[best]
+    if keys and not a.duplicated(keys).any() and not b.duplicated(keys).any():
+        return keys
     return None
 
 

@@ -28,9 +28,10 @@ async def test_sample_experiment_end_to_end(tmp_path: Path):
     async with server(tmp_path) as s:
         tools = {t.name for t in (await s.list_tools()).tools}
         assert {"method_get", "method_write", "method_check", "draft_get", "draft_decide", "toolbox_docs",
-                "compare_runs", "run", "run_stop", "explain", "explain_function", "provenance", "chromatogram",
-                "correction_propose", "database_query", "export", "method_export", "notebook"} <= tools
-        assert not {"step_catalog", "method_patch"} & tools
+                "compare_runs", "run", "run_stop", "explain", "explain_function", "provenance", "curve",
+                "correction_propose", "export", "method_export", "notebook", "examples"} <= tools
+        assert not {"step_catalog", "method_patch", "chromatogram", "database_query", "database_tables",
+                    "gcassay_settings"} & tools
         manifest = json.loads((Path(__file__).resolve().parent.parent / "layr.json").read_text("utf-8"))
         grouped = [t for g in manifest["access"]["groups"] for t in g["tools"]]
         assert sorted(grouped) == sorted(tools), set(grouped) ^ tools  # every tool in exactly one group
@@ -41,7 +42,7 @@ async def test_sample_experiment_end_to_end(tmp_path: Path):
         assert {s["id"] for s in got["summary"]["settings"]} >= {"rt_tolerance_min", "rate_window_min",
                                                                  "biomass_gcdw_per_l", "sample_patterns", "compounds"}
 
-        exp = value(await s.call_tool("lab_sample", {}))
+        exp = value(await s.call_tool("lab_sample", {"which": "gc"}))
         eid = exp["experiment"]
         run = value(await s.call_tool("run", {"experiment": eid}))
         assert run["status"] == "done", run
@@ -90,14 +91,20 @@ async def test_sample_experiment_end_to_end(tmp_path: Path):
         assert mean["chain"] == [] and "`time_course`" in mean["note"]  # a mean worked out inside the step itself
         docs = value(await s.call_tool("toolbox_docs", {}))
         assert {"fit_line", "read_gaml", "integrate_peak"} <= {f["name"] for f in docs["functions"]}
+        imports = {f["name"]: f["import"] for f in docs["functions"]}
+        assert imports["fit_line"] == "toolbox" and imports["read_gaml"] == "toolbox.gc"
+        assert [g["module"] for g in docs["groups"]][0] == "toolbox" and "toolbox.gc" in [g["module"] for g in
+                                                                                         docs["groups"]]
+        assert {r["function"] for r in docs["readers"]} >= {"read_table", "read_gaml"}
 
-        chrom = value(await s.call_tool("chromatogram", {"experiment": eid, "injection": 20, "start_min": 3.4,
-                                                         "end_min": 3.9, "points": 400}))
-        assert 0 < len(chrom["time"]) <= 400 and {p["compound"] for p in chrom["peaks"]} == {"SUB", "PROD", "octanol"}
+        # the raw file's curves come from the curve reader its add-on registered for .gaml
+        trace = value(await s.call_tool("curve", {"experiment": eid, "item": 20, "file": "gaml_file", "start": 3.4,
+                                                  "end": 3.9, "points": 400}))
+        assert 0 < len(trace["x"]) <= 400 and min(trace["x"]) >= 3.4 and trace["name"]
 
         # an agent only proposes; the decision makes it apply
         prop = value(await s.call_tool("correction_propose", {
-            "experiment": eid, "kind": "exclude", "injection": 20, "compound": "SUB",
+            "experiment": eid, "kind": "exclude", "fields": {"injection": 20, "compound": "SUB"},
             "reason": "Test: pipetting error noted in the lab book"}))
         assert prop["correction"]["status"] == "proposed"
         value(await s.call_tool("run", {"experiment": eid}))
@@ -112,15 +119,9 @@ async def test_sample_experiment_end_to_end(tmp_path: Path):
         assert pk["rows"][0]["status"] == "excluded"
         moved = value(await s.call_tool("compare_runs", {"before": run["run"], "after": after["run"]}))
         assert moved["numbers_changed"] > 0 and any(t["table"] == "concentrations" for t in moved["tables"])
-        bad = await s.call_tool("correction_propose", {"experiment": eid, "kind": "exclude", "injection": 3,
-                                                       "reason": "  "})
+        bad = await s.call_tool("correction_propose", {"experiment": eid, "kind": "exclude",
+                                                       "fields": {"injection": 3}, "reason": "  "})
         assert "reason" in error_text(bad)
-
-        tables = value(await s.call_tool("database_tables", {}))
-        assert {"activities", "time_course", "concentrations"} <= {t["table"] for t in tables}
-        assert "peaks" not in {t["table"] for t in tables}  # DATABASE lists what is kept
-        q = value(await s.call_tool("database_query", {"table": "activities", "where": {"compound": "SUB"}}))
-        assert len(q["rows"]) == 1 and q["rows"][0]["experiment"] == eid
 
         for fmt in ("html", "xlsx", "docx"):
             out = value(await s.call_tool("export", {"experiment": eid, "format": fmt}))
@@ -138,7 +139,7 @@ async def test_drafts_and_acceptance(tmp_path: Path):
     """An agent's change is a draft: it doesn't count, comes back with the checker's warnings and the numbers that
     moved on the reference experiment, and only the user accepts it. The user's own saves count at once."""
     async with server(tmp_path) as s:
-        eid = value(await s.call_tool("lab_sample", {}))["experiment"]
+        eid = value(await s.call_tool("lab_sample", {"which": "gc"}))["experiment"]
         assert value(await s.call_tool("methods", {}))[0]["reference"] == eid
         first = value(await s.call_tool("run", {"experiment": eid}))
         assert first["status"] == "done"
@@ -212,41 +213,3 @@ async def test_new_kind_of_analysis(tmp_path: Path):
         assert err["function"] == "relative_to_control" and err["line"] > 5
         assert "has no column 'height'" in err["message"] and "height_cm" in err["message"]
 
-
-async def test_experiments_from_0_2_still_open_and_run(tmp_path: Path):
-    """An experiment and its run as Research 0.2 stored them (its file as "raw", step ids, a JSON method version):
-    listed and explained, its old run marked as old, and a new run works with the Python method."""
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
-    from lab.sample import make_sample
-    from lab.store import Store
-    from lab.tools import SAMPLE_PARAMS
-
-    store = Store(tmp_path / "lab")
-    f = make_sample(store)
-    (tmp_path / "lab" / "methods" / "gc-activity-assay").mkdir(parents=True)
-    (tmp_path / "lab" / "methods" / "gc-activity-assay" / "2.json").write_text(
-        json.dumps({"id": "gc-activity-assay", "version": 2, "steps": [{"id": "read", "type": "gc.read_gaml"}]}),
-        "utf-8")
-    old_run = {"id": "r0000aaaa", "experiment": "e0000aaaa", "status": "done", "started": "2026-10-01T10:00:00+00:00",
-               "method": {"id": "gc-activity-assay", "version": 1}, "params": {},
-               "steps": [{"id": "read", "type": "gc.read_gaml", "status": "done", "outputs": {}}],
-               "outputs": {"activities": {"from": "rates.activities", "database": True}}}
-    (tmp_path / "lab" / "runs" / "r0000aaaa").mkdir(parents=True)
-    (tmp_path / "lab" / "runs" / "r0000aaaa" / "run.json").write_text(json.dumps(old_run), "utf-8")
-    exp = {"id": "e0000aaaa", "title": "From 0.2", "method": "gc-activity-assay", "inputs": {"raw": f},
-           "params": SAMPLE_PARAMS, "corrections": [], "last_run": {"id": "r0000aaaa", "status": "done"}}
-    (tmp_path / "lab" / "experiments" / "e0000aaaa.json").write_text(json.dumps(exp), "utf-8")
-    async with server(tmp_path) as s:
-        assert value(await s.call_tool("experiments", {}))[0]["title"] == "From 0.2"
-        got = value(await s.call_tool("experiment_get", {"experiment": "e0000aaaa"}))
-        assert got["inputs"]["gaml_file"]["sha256"] == f["sha256"] and got["method_problem"] is None
-        old = value(await s.call_tool("run_get", {"experiment": "e0000aaaa"}))
-        assert old["legacy"]
-        ex = value(await s.call_tool("explain", {"experiment": "e0000aaaa"}))
-        assert ex["run"] is None and ex["steps"]
-        missing = await s.call_tool("result_table", {"experiment": "e0000aaaa", "table": "activities"})
-        assert "has no table" in error_text(missing)
-        new = value(await s.call_tool("run", {"experiment": "e0000aaaa"}))
-        assert new["status"] == "done" and new["method"]["version"] == 1 and not new["legacy"]

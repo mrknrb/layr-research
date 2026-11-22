@@ -3,7 +3,7 @@
 // remove cards) whose Save writes PAGES back into the method with method_declare, as a new version of the method.
 //
 // Cards: text, number, table, figure, chart (drawn here from a table) and review (a curve per item with regions whose
-// boundaries can be dragged and saved as a correction: the GC peak review is one, declared by the GC method).
+// boundaries can be dragged and saved as a correction; the curves come from a table of the run or from a raw file).
 // lab.js gives the helpers it shares (createPages(ctx)).
 
 const CARD_KINDS = [
@@ -127,13 +127,13 @@ export function createPages(ctx) {
     return (exp.method_pages || []).map((p, i) => ({ id: `page:${i}`, label: p.title }));
   }
 
-  /** The tab to open for an old link (the Peaks tab of 0.4): the first page with a review card. */
+  /** The tab to open for a link to "the review": the first page with a review card. */
   function reviewTab(exp) {
     const i = (exp.method_pages || []).findIndex((p) => (p.cards || []).some((c) => c.card === "review"));
     return i >= 0 ? `page:${i}` : null;
   }
 
-  /** The review card that shows rows about `column` (e.g. injection, respondent), to open from Checks and
+  /** The review card that shows rows about `column` (e.g. a sample, a respondent), to open from Checks and
    * Corrections: {tab, card} or null. */
   function reviewFor(exp, columns) {
     const pages = exp.method_pages || [];
@@ -450,7 +450,7 @@ export function createPages(ctx) {
     const box = h("div", { class: "card-form" });
     const tableNames = Object.keys(src.tables);
     const kinds = exp.method_corrections || {};
-    const fileInputs = (exp.method_inputs || []).map((i) => i.id);
+    const fileInputs = (exp.method_inputs || []).map((i) => [i.id, i.label && i.label !== i.id ? `${i.label} (${i.id})` : i.id]);
     const opt = (v, label, cur) => h("option", { value: v, selected: v === cur }, label);
     const sel = (key, options, { empty, onchange, target = c } = {}) =>
       h(
@@ -619,8 +619,8 @@ export function createPages(ctx) {
           h(
             "p",
             { class: "layr-muted small" },
-            "One row per region in a table (a peak, a phase, a window): which item it belongs to (an injection, a " +
-              "sample), its name, where it starts and ends. Each item has a curve; the regions are drawn on it.",
+            "One row per region in a table (a phase, a window, a band): which item it belongs to (a sample, a " +
+              "culture), its name, where it starts and ends. Each item has a curve; the regions are drawn on it.",
           ),
         );
         rows.push(field("Table of regions", sel("regions", tableOpts(), { empty: "–" })));
@@ -641,17 +641,29 @@ export function createPages(ctx) {
               {
                 class: "layr-select",
                 onchange: (e) => {
-                  c.curve = e.target.value === "file" ? { file: fileInputs[0] } : {};
+                  c.curve = e.target.value === "file" ? { file: fileInputs[0]?.[0] } : {};
                   draw();
                 },
               },
               opt("table", "A table of the run (one row per point)", curveMode),
-              opt("file", "A raw file of the experiment (a GC sequence, GAML)", curveMode),
+              opt("file", "A raw file of the experiment", curveMode),
             ),
           ),
         );
-        if (curveMode === "file") rows.push(field("Raw file", sel("file", fileInputs.map((f) => [f, f]), { target: c.curve })));
-        else {
+        if (curveMode === "file") {
+          rows.push(field("Raw file", sel("file", fileInputs, { target: c.curve })));
+          rows.push(
+            h(
+              "p",
+              { class: "layr-muted small" },
+              "A table file (CSV, Excel…) is read like a table of points: name its item, x and y columns below. Any " +
+                "other kind of file is read by the toolbox's reader for it (leave the columns empty).",
+            ),
+          );
+          rows.push(field("Its item column (a table file)", text("item", "same name as the item", c.curve)));
+          rows.push(field("x column (a table file)", text("x", "", c.curve)));
+          rows.push(field("y column (a table file)", text("y", "", c.curve)));
+        } else {
           const ccols = colOpts(c.curve.table);
           rows.push(field("Table of points", sel("table", tableOpts(), { empty: "–", target: c.curve })));
           rows.push(field("Its item column", sel("item", ccols, { empty: "same name as the item", target: c.curve })));
@@ -659,8 +671,8 @@ export function createPages(ctx) {
           rows.push(field("y", sel("y", ccols, { empty: "–", target: c.curve })));
         }
         rows.push(field("Shown around a region (x units; empty: three times its width)", number("window", "")));
-        rows.push(field("x unit", text("x_label", "e.g. min")));
-        rows.push(field("y unit", text("y_label", "e.g. pA")));
+        rows.push(field("x unit", text("x_label", "e.g. h")));
+        rows.push(field("y unit", text("y_label", "e.g. OD")));
         const kindOpts = Object.entries(kinds).map(([k, v]) => [k, v.label]);
         rows.push(
           field(
@@ -1013,7 +1025,7 @@ export function createPages(ctx) {
       box,
       h(
         "div",
-        { class: "peaks-grid review-grid" },
+        { class: "review-grid" },
         h("div", { class: "inj-col" }, filterSel, list),
         h("div", { class: "plot-col" }, h("div", { class: "plot-head" }, chips, h("span", { class: "layr-spacer" }), nav), plotBox, legend),
       ),
@@ -1033,7 +1045,7 @@ export function createPages(ctx) {
     const half = st.zoom || num(card.window) || (a0 != null && b0 != null ? Math.max((b0 - a0) * 1.5, 1e-9) : null);
     const range = center != null && half != null ? { start: center - half, end: center + half } : {};
     const curveArgs = card.curve?.file
-      ? { file: card.curve.file }
+      ? { file: card.curve.file, item_column: card.curve.item || card.item, x: card.curve.x, y: card.curve.y }
       : { table: card.curve?.table, item_column: card.curve?.item || card.item, x: card.curve?.x, y: card.curve?.y };
     const data = await call("curve", { experiment: exp.id, item: it.item, ...curveArgs, ...range, points: 1400 });
     if (t !== ctx.token()) return;
@@ -1222,8 +1234,8 @@ export function createPages(ctx) {
       svg,
       h(
         "div",
-        { class: "peak-info" },
-        h("div", { class: "peak-title" }, h("b", {}, where), " ", h("span", { class: "layr-muted" }, it.name ?? "")),
+        { class: "review-info" },
+        h("div", { class: "review-title" }, h("b", {}, where), " ", h("span", { class: "layr-muted" }, it.name ?? "")),
         h(
           "div",
           { class: "kv" },
@@ -1234,7 +1246,7 @@ export function createPages(ctx) {
         ),
         card.note && r0[card.note] ? h("div", { class: "layr-muted small" }, r0[card.note]) : null,
         flags.length
-          ? h("ul", { class: "peak-flags" }, flags.map((f) => h("li", { class: f.level }, `${card.label && f[card.label] ? f[card.label] + ": " : ""}${f.message}`)))
+          ? h("ul", { class: "review-flags" }, flags.map((f) => h("li", { class: f.level }, `${card.label && f[card.label] ? f[card.label] + ": " : ""}${f.message}`)))
           : null,
         active.length
           ? h(
@@ -1268,7 +1280,7 @@ export function createPages(ctx) {
           : null,
         h(
           "div",
-          { class: "peak-actions" },
+          { class: "review-actions" },
           canCorrect && sel.start == null ? h("button", { class: "layr-button small", onclick: setByHand }, "Set the ends by hand") : null,
           saveBtn,
           excl && card.label && labelField(excl) && statusClass(card, r0[card.status]) !== "excl"

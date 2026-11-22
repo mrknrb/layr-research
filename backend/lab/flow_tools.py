@@ -90,7 +90,7 @@ def register(mcp: FastMCP, store: Store, api: Any) -> None:
 
     @mcp.tool()
     def flow_get(
-        method: Annotated[str | None, Field(description="Method id, e.g. gc-activity-assay.")] = None,
+        method: Annotated[str | None, Field(description="Method id, e.g. survey-scores.")] = None,
         version: Annotated[int | None, Field(description="Its version; default the latest.")] = None,
         source: Annotated[str | None, Field(description="Or the method's source (e.g. unsaved in the editor).")]
         = None,

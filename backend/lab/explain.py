@@ -235,19 +235,20 @@ def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, An
     import importlib
     import inspect
 
-    import toolbox
+    from toolbox import registry
 
-    obj = getattr(toolbox, name, None)
-    if obj is None or name not in toolbox.__all__:
-        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(toolbox.__all__)}.")
+    found = registry.find(name)
+    if found is None:
+        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(registry.everything())}.")
+    imported_from, obj = found
     doc = methodfile.parse_doc(inspect.getdoc(obj) or "")
     try:
         source = inspect.getsource(obj)
     except (OSError, TypeError):
         source = ""
     module = getattr(obj, "__module__", "toolbox")
-    view = {"name": name, "kind": "toolbox", "module": module, "sentence": doc.sentence, "text": doc.text,
-            "code": source, "signature": plain_signature(name, obj) if callable(obj) else name,
+    view = {"name": name, "kind": "toolbox", "module": module, "import": imported_from, "sentence": doc.sentence,
+            "text": doc.text, "code": source, "signature": plain_signature(name, obj) if callable(obj) else name,
             "formulas": [{"latex": f["latex"], "from": "docstring", "code": f["code"]}
                          for f in latex.draw_formula_lines(doc.formula)],
             "is_function": inspect.isfunction(obj)}
@@ -261,9 +262,10 @@ def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, An
 
 
 def toolbox_docs() -> list[dict[str, Any]]:
-    import toolbox
+    """Every function of the toolbox and its add-ons (see toolbox_view); `import` says where a method imports it."""
+    from toolbox import registry
 
-    return [toolbox_view(n) for n in toolbox.__all__]
+    return [toolbox_view(n) for n in registry.everything()]
 
 
 # ---------------------------------------------------------------------------------------------------- runs

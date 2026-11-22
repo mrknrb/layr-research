@@ -10,6 +10,7 @@ the user; an AI agent's change comes back with them so it fixes them):
 - imports other than the toolbox, pandas, numpy, scipy, statsmodels, scikit-learn, the standard maths modules and
   the packages the method lists in REQUIREMENTS;
 - PAGES, CORRECTIONS or REQUIREMENTS that can't be used as written (lab/pages.py);
+- a `rows` setting whose columns can't be read, or whose default doesn't fit its columns;
 - reading or writing files, or the network, outside the toolbox;
 - a name used both for a function and for a result in the same function (Python then can't call the function).
 """
@@ -54,6 +55,7 @@ def check(source: str) -> dict[str, Any]:
     messages += _imports(method)
     messages += _recipe(method)
     messages += _declarations(method)
+    messages += _rows_settings(method)
     names = {f.name for f in method.functions}
     formulas = {f.name for f in method.functions if f.kind == "formula"}
     for fn in method.functions:
@@ -95,15 +97,33 @@ def _declarations(method: methodfile.Method) -> list[dict[str, Any]]:
 
     fn = method.recipe_function
     outputs = set(fn.doc.returns) if fn and fn.doc.returns else None
+    inputs = {p for p in fn.params if p.endswith("_file")} if fn else None
     line = {n.targets[0].id: n.lineno for n in method.tree.body
             if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
-    out = [_msg("warning", line.get(name), p) for name, p in pages.problems(method.constants, outputs)]
+    out = [_msg("warning", line.get(name), p) for name, p in pages.problems(method.constants, outputs, inputs)]
     for n in pages.NAMES:
         if n not in method.constants and any(isinstance(x, ast.Assign) and len(x.targets) == 1 and
                                              isinstance(x.targets[0], ast.Name) and x.targets[0].id == n
                                              for x in method.tree.body):
             out.append(_msg("warning", line.get(n), f"{n} must be written as a plain value (text, numbers, lists and "
                                                      "dicts), so the panel can read it without running the method."))
+    return out
+
+
+def _rows_settings(method: methodfile.Method) -> list[dict[str, Any]]:
+    """`rows` settings whose columns can't be read, or whose default doesn't fit them."""
+    fn = method.recipe_function
+    out = []
+    for s in methodfile.settings(method):
+        if s["type"] != "rows":
+            continue
+        if s.get("problem"):
+            out.append(_msg("warning", fn.line, f"The setting `{s['id']}`: {s['problem']}", fn.name))
+            continue
+        try:
+            methodfile.check_value(s, s.get("default"))
+        except ValueError as e:
+            out.append(_msg("warning", fn.line, f"The default of `{s['id']}` doesn't fit its columns: {e}", fn.name))
     return out
 
 
@@ -150,7 +170,8 @@ def _imports(method: methodfile.Method) -> list[dict[str, Any]]:
             for name in imp["names"]:
                 if name != "*" and not hasattr(mod, name):
                     known = ", ".join(getattr(mod, "__all__", [])) or "see the toolbox"
-                    out.append(_msg("error", line, f"The toolbox has no `{name}`. It has: {known}."))
+                    which = "The toolbox" if module == "toolbox" else f"`{module}`"
+                    out.append(_msg("error", line, f"{which} has no `{name}`. It has: {known}."))
     return out
 
 
@@ -252,7 +273,7 @@ def _length(fn: methodfile.Function) -> list[dict[str, Any]]:
 
 
 def _names_in(target: ast.AST) -> ast.AST:
-    """The variable at the root of a target: `peaks` for peaks["x"], peaks.loc[...], peaks.x."""
+    """The variable at the root of a target: `scores` for scores["x"], scores.loc[...], scores.x."""
     while isinstance(target, (ast.Subscript, ast.Attribute)):
         target = target.value
     return target
@@ -329,8 +350,8 @@ def _file_access(fn: methodfile.Function) -> list[dict[str, Any]]:
         if what:
             out.append(_msg("warning", node.lineno, f"`{what}` (in `{fn.name}`) reads or writes files or the network. "
                                                     "Raw data comes in through the recipe's inputs (parameters "
-                                                    "ending in _file) and the toolbox's readers (read_table, "
-                                                    "read_gaml); results go out by returning them from the recipe.",
+                                                    "ending in _file) and the toolbox's readers (such as "
+                                                    "read_table); results go out by returning them from the recipe.",
                             fn.name))
         del name
     return out

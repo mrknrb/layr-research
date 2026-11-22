@@ -8,11 +8,8 @@ gcassay; its numbers equal gcassay's.
 import numpy as np
 import pandas as pd
 
-from toolbox import (PeakSettings, combine_flags, fit_line, fit_line_through_zero, flag, flags_table,
-                     integrate_by_hand, integrate_peak, match_name, plot_time_courses, read_gaml, vendor_peak)
-
-# The results kept in the results database, to compare experiments across the PhD.
-DATABASE = ["activities", "time_course", "concentrations", "interval_rates", "mass_balance"]
+from toolbox import combine_flags, fit_line, fit_line_through_zero, flag, flags_table, match_name
+from toolbox.gc import PeakSettings, integrate_by_hand, integrate_peak, plot_time_courses, read_gaml, vendor_peak
 
 # The kinds of correction an experiment can record, each with a reason; approved ones reach the recipe's `corrections`.
 CORRECTIONS = {
@@ -175,6 +172,11 @@ def retention_shift(rt_min, reference_rt_min):
 # ---------------------------------------------------------------- steps: tables in, a table out
 
 
+def gc_flag(level, category, message, injection="", compound=""):
+    """One quality flag about an injection and a compound (either may be left empty)."""
+    return flag(level, category, message, injection=injection, compound=compound)
+
+
 def sample_names(injections, sample_patterns, corrections):
     """Turn each injection's name into its design: role, strain, time, replicate, substrate and standard.
 
@@ -229,7 +231,7 @@ def unmatched_names(samples):
     flags = []
     for row in samples[samples.role == "unknown"].to_dict("records"):
         message = f"Name '{row['name']}' matches no sample pattern - it is ignored."
-        flags.append(flag("error", "design", message, row["injection"]))
+        flags.append(gc_flag("error", "design", message, row["injection"]))
     return flags
 
 
@@ -241,7 +243,7 @@ def duplicate_samples(samples):
         if len(group) > 1:
             numbers = ", ".join(f"#{number}" for number in group.injection)
             message = f"Duplicate sample name '{group['name'].iloc[0]}' at injections {numbers}."
-            flags.append(flag("error", "design", message, int(group.injection.iloc[-1])))
+            flags.append(gc_flag("error", "design", message, int(group.injection.iloc[-1])))
     return flags
 
 
@@ -258,7 +260,7 @@ def mislabelled_samples(samples):
         if here != before and here != after and before == after:
             message = (f"'{names[i]}' sits inside a block of {before} samples - probably mislabelled "
                        f"(should it be {before}?).")
-            flags.append(flag("error", "design", message, int(numbers[i])))
+            flags.append(gc_flag("error", "design", message, int(numbers[i])))
     return flags
 
 
@@ -276,7 +278,7 @@ def missing_samples(samples):
                 if (time, replicate) not in have:
                     missing.append(f"{int(time)}min R{int(replicate)}")
         if missing:
-            flags.append(flag("warning", "design", f"{strain}/{substrate}: missing {', '.join(missing)}."))
+            flags.append(gc_flag("warning", "design", f"{strain}/{substrate}: missing {', '.join(missing)}."))
     return flags
 
 
@@ -288,7 +290,7 @@ def incomplete_standards(samples):
     for series, group in standards.groupby("std_series"):
         missing = sorted(every - set(group.std_conc_mM))
         if missing:
-            flags.append(flag("warning", "design", f"Standard series {series} lacks concentrations {missing}."))
+            flags.append(gc_flag("warning", "design", f"Standard series {series} lacks concentrations {missing}."))
     return flags
 
 
@@ -298,7 +300,7 @@ def rename_notes(corrections):
     for correction in corrections:
         if correction["kind"] == "rename":
             message = f"renamed to '{correction['new_name']}': {correction.get('reason', '')}"
-            flags.append(flag("info", "correction", message, correction["injection"]))
+            flags.append(gc_flag("info", "correction", message, correction["injection"]))
     return flags
 
 
@@ -310,23 +312,27 @@ def reference_retention_times(injections, samples, compounds, rt_tolerance_min, 
     sample peak much narrower or wider than in the standards is not taken for the same compound.
     """
     if not compounds:
-        raise ValueError('Give the compounds with their retention times in the settings, e.g. {"HAME": {"rt": 3.622}}.')
+        raise ValueError("Give the compounds with their retention times in the settings (one row each: compound, "
+                         "rt_min).")
     standard_numbers = set(samples[samples.role == "standard"].injection)
     rows = []
-    for compound, spec in compounds.items():
-        if "rt" not in spec:
-            raise ValueError(f"The compound {compound} needs an rt: its expected retention time in minutes.")
-        tolerance = spec.get("rt_tolerance_min", rt_tolerance_min)
+    for spec in compounds:
+        compound = spec["compound"]
+        if spec.get("rt_min") is None:
+            raise ValueError(f"The compound {compound} needs an rt_min: its expected retention time in minutes.")
+        tolerance = spec.get("rt_tolerance_min")
+        if tolerance is None:
+            tolerance = rt_tolerance_min
         times = []
         widths = []
         for injection in injections:
             if injection.number in standard_numbers:
-                peak = integrate_peak(injection, compound, spec["rt"], tolerance * 2.5, settings)
+                peak = integrate_peak(injection, compound, spec["rt_min"], tolerance * 2.5, settings)
                 if peak["status"] == "ok":
                     times.append(peak["rt"])
                     widths.append(peak["fwhm"])
-        rows.append({"compound": compound, "rt_config": float(spec["rt"]),
-                     "rt_ref": float(np.median(times)) if times else float(spec["rt"]),
+        rows.append({"compound": compound, "rt_config": float(spec["rt_min"]),
+                     "rt_ref": float(np.median(times)) if times else float(spec["rt_min"]),
                      "fwhm_ref": float(np.median(widths)) if widths else np.nan,
                      "n_standards": len(times), "rt_tolerance": float(tolerance)})
     return pd.DataFrame(rows)
@@ -536,7 +542,7 @@ def start_values(table, keys, column):
     return values
 
 
-def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l):
+def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l, biomass_by_substrate):
     """Fit a straight line through all replicate concentrations in the early time window, for each compound.
 
     Its slope becomes a specific activity per gram of cell dry weight. The fed substrate's own rate is its
@@ -547,7 +553,7 @@ def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l):
     samples = concentrations[(concentrations.role == "sample") & concentrations.conc_mM.notna()]
     rows = []
     for (strain, substrate, compound), group in samples.groupby(["strain", "substrate", "compound"]):
-        biomass = biomass_for(substrate, biomass_gcdw_per_l)
+        biomass = biomass_for(substrate, biomass_gcdw_per_l, biomass_by_substrate)
         early = group[group.time_min.between(start, end)]
         line = fit_line(early.time_min, early.conc_mM)
         activity = specific_activity(line.slope, biomass)
@@ -560,16 +566,15 @@ def initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l):
     return pd.DataFrame(rows)
 
 
-def biomass_for(substrate, biomass_gcdw_per_l):
-    """The cell dry weight (gCDW/L) for a fed substrate: one number for all, or one per substrate ("*": the rest)."""
+def biomass_for(substrate, biomass_gcdw_per_l, biomass_by_substrate):
+    """The cell dry weight (gCDW/L) for a fed substrate: its own row in the biomass per substrate, else the biomass
+    for all."""
+    for row in biomass_by_substrate or []:
+        if row["substrate"] == substrate:
+            return float(row["biomass_gcdw_per_l"])
     if biomass_gcdw_per_l is None:
-        raise ValueError("Give the biomass (gCDW/L) in the settings: one number, or one per fed substrate.")
-    if isinstance(biomass_gcdw_per_l, dict):
-        if substrate in biomass_gcdw_per_l:
-            return float(biomass_gcdw_per_l[substrate])
-        if "*" in biomass_gcdw_per_l:
-            return float(biomass_gcdw_per_l["*"])
-        raise ValueError(f"No biomass for the substrate {substrate}: add it to the biomass setting.")
+        raise ValueError(f"No biomass for the substrate {substrate}: give the biomass (gCDW/L) in the settings, for "
+                         "all substrates or per substrate.")
     return float(biomass_gcdw_per_l)
 
 
@@ -582,7 +587,7 @@ def nonzero_label(activity, activity_se):
     return "no"
 
 
-def interval_rates(course, biomass_gcdw_per_l):
+def interval_rates(course, biomass_gcdw_per_l, biomass_by_substrate):
     """The activity between each pair of consecutive time points, from the mean concentrations.
 
     This is what the earlier Excel sheets did. It uses means only, so it has no standard error: the initial rate
@@ -590,7 +595,7 @@ def interval_rates(course, biomass_gcdw_per_l):
     """
     rows = []
     for (strain, substrate, compound), group in course.groupby(["strain", "substrate", "compound"]):
-        biomass = biomass_for(substrate, biomass_gcdw_per_l)
+        biomass = biomass_for(substrate, biomass_gcdw_per_l, biomass_by_substrate)
         points = group.sort_values("time_min").to_dict("records")
         for before, after in zip(points, points[1:]):
             rate = rate_between(before["mean"], after["mean"], before["time_min"], after["time_min"])
@@ -638,11 +643,11 @@ def internal_standard_checks(peaks, references, internal_standard, is_area_toler
         deviation = deviation_pct(row["area"], median_area)
         if abs(deviation) > is_area_tolerance_pct:
             message = f"IS area {deviation:+.0f}% vs. run median ({row['name']})."
-            flags.append(flag("warning", "internal standard", message, row["injection"], internal_standard))
+            flags.append(gc_flag("warning", "internal standard", message, row["injection"], internal_standard))
         if width and row["fwhm"] > shoulder_fwhm_ratio * width:
             message = (f"IS peak {width_ratio(row['fwhm'], width):.1f}x wider than in standards - co-eluting "
                        "compound? All ratios of this injection are biased low.")
-            flags.append(flag("warning", "internal standard", message, row["injection"], internal_standard))
+            flags.append(gc_flag("warning", "internal standard", message, row["injection"], internal_standard))
     return flags_table(flags)
 
 
@@ -655,7 +660,7 @@ def peak_shape_checks(peaks, references, internal_standard, shoulder_fwhm_ratio)
         width = widths.get(row["compound"])
         if width and row["fwhm"] > shoulder_fwhm_ratio * width:
             message = f"Peak {width_ratio(row['fwhm'], width):.1f}x wider than in standards - possible co-elution."
-            flags.append(flag("warning", "peak shape", message, row["injection"], row["compound"]))
+            flags.append(gc_flag("warning", "peak shape", message, row["injection"], row["compound"]))
     return flags_table(flags)
 
 
@@ -670,7 +675,7 @@ def instrument_checks(peaks):
         message = (f"Chromeleon labelled a peak far from the {compound} reference RT ({group.rt_expected.median():.3f} "
                    f"min) in {len(group)} injections: {where}. Numbers taken from the instrument's own peak table (as "
                    "in a spreadsheet) would be a different compound.")
-        flags.append(flag("info", "Chromeleon assignment", message, "", compound))
+        flags.append(gc_flag("info", "Chromeleon assignment", message, "", compound))
     return flags_table(flags)
 
 
@@ -680,13 +685,13 @@ def calibration_checks(calibration, calibration_points, min_r2, max_residual_pct
     flags = []
     for line in calibration.to_dict("records"):
         if line["r2"] < min_r2:
-            flags.append(flag("warning", "calibration", f"R^2 = {line['r2']:.4f}", "", line["compound"]))
+            flags.append(gc_flag("warning", "calibration", f"R^2 = {line['r2']:.4f}", "", line["compound"]))
     used = calibration_points[calibration_points.used]
     for point in used.to_dict("records"):
         if abs(point["residual_pct"]) > max_residual_pct:
             message = (f"Standard {point['std_conc_mM']:g} mM {point['std_series']}: back-calculated "
                        f"{point['residual_pct']:+.0f}%.")
-            flags.append(flag("warning", "calibration", message, point["injection"], point["compound"]))
+            flags.append(gc_flag("warning", "calibration", message, point["injection"], point["compound"]))
     return flags_table(flags)
 
 
@@ -697,11 +702,11 @@ def concentration_checks(concentrations):
     samples = concentrations[concentrations.role == "sample"]
     for row in samples[samples.conc_flag == "above calibration range"].to_dict("records"):
         message = f"{row['conc_mM']:.3f} mM is above the calibrated range - extrapolated."
-        flags.append(flag("warning", "range", message, row["injection"], row["compound"]))
+        flags.append(gc_flag("warning", "range", message, row["injection"], row["compound"]))
     blanks = concentrations[concentrations.role == "blank"]
     for row in blanks[blanks.status == "ok"].to_dict("records"):
         message = f"Detected in blank (S/N {row['snr']:.0f}) - carry-over or contamination."
-        flags.append(flag("warning", "blank", message, row["injection"], row["compound"]))
+        flags.append(gc_flag("warning", "blank", message, row["injection"], row["compound"]))
     return flags_table(flags)
 
 
@@ -713,7 +718,7 @@ def replicate_checks(course, max_replicate_cv_pct, cv_min_conc_mM):
     for row in spread.to_dict("records"):
         message = (f"{row['substrate']}-fed, {row['time_min']:g} min: replicate CV {row['cv_pct']:.0f}% "
                    f"(mean {row['mean']:.3f} mM).")
-        flags.append(flag("warning", "replicates", message, "", row["compound"]))
+        flags.append(gc_flag("warning", "replicates", message, "", row["compound"]))
     return flags_table(flags)
 
 
@@ -725,7 +730,7 @@ def mass_balance_checks(balance, mass_balance_range_pct):
         if not low <= row["pct_of_t0"] <= high:
             message = (f"{row['substrate']}-fed, {row['time_min']:g} min: sum of analytes {row['pct_of_t0']:.0f}% "
                        "of t0.")
-            flags.append(flag("warning", "mass balance", message, "", row["substrate"]))
+            flags.append(gc_flag("warning", "mass balance", message, "", row["substrate"]))
     return flags_table(flags)
 
 
@@ -734,7 +739,8 @@ def correction_notes(peaks):
     corrected = peaks[peaks.status.isin(["manual", "excluded"])]
     flags = []
     for row in corrected.to_dict("records"):
-        flags.append(flag("info", "correction", f"{row['status']}: {row['note']}", row["injection"], row["compound"]))
+        message = f"{row['status']}: {row['note']}"
+        flags.append(gc_flag("info", "correction", message, row["injection"], row["compound"]))
     return flags_table(flags)
 
 
@@ -745,8 +751,8 @@ def activity_assay(gaml_file, corrections, compounds, channel=None, sample_patte
                    internal_standard="octanol", rt_tolerance_min=0.012, rt_drift_correction=True, smoothing_points=11,
                    max_half_width_min=0.15, lod_snr=3, loq_snr=10, cal_min_conc_mM=None, cal_max_conc_mM=None,
                    cal_series=(), force_zero_intercept=False, concentration_factor=1.0, rate_window_min=(0, 30),
-                   biomass_gcdw_per_l=None, is_area_tolerance_pct=25, shoulder_fwhm_ratio=1.3, min_r2=0.995,
-                   max_residual_pct=15, max_replicate_cv_pct=20, cv_min_conc_mM=0.02,
+                   biomass_gcdw_per_l=None, biomass_by_substrate=(), is_area_tolerance_pct=25, shoulder_fwhm_ratio=1.3,
+                   min_r2=0.995, max_residual_pct=15, max_replicate_cv_pct=20, cv_min_conc_mM=0.02,
                    mass_balance_range_pct=(80, 120)):
     """Whole-cell activity assay measured by GC-FID.
 
@@ -759,12 +765,13 @@ def activity_assay(gaml_file, corrections, compounds, channel=None, sample_patte
             channel (text): Detector channel. The trace's name in the GAML file (e.g. BackDetectorFID); empty: the
                 first trace.
         Samples:
-            sample_patterns (patterns): Sample name patterns. One regular expression per role (sample, standard,
-                blank); named groups become columns: strain, time_min, replicate, substrate, std_conc_mM,
-                std_series.
+            sample_patterns (rows: role text, regex text): Sample name patterns. One regular expression per role
+                (sample, standard, blank), tried in order; named groups become columns: strain, time_min,
+                replicate, substrate, std_conc_mM, std_series.
         Compounds:
-            compounds (compounds): Compounds and retention times. Each compound with its expected retention time
-                (min) and, if needed, its own tolerance.
+            compounds (rows: compound text, rt_min number, optional rt_tolerance_min number): Compounds and
+                retention times. Each compound with its expected retention time (min) and, if needed, its own
+                tolerance.
             internal_standard: Internal standard. One of the compounds, e.g. octanol.
         Integration:
             rt_tolerance_min: Retention time tolerance. The apex must lie this close to the reference time.
@@ -781,8 +788,10 @@ def activity_assay(gaml_file, corrections, compounds, channel=None, sample_patte
         Activity:
             concentration_factor: Concentration factor. For example 500 µl intended / 550 µl cells added = 0.909.
             rate_window_min: Initial rate window. Start and end of the linear range.
-            biomass_gcdw_per_l (biomass): Biomass [gCDW/L]. Cell dry weight in the assay: one number, or one per
-                fed substrate.
+            biomass_gcdw_per_l: Biomass [gCDW/L]. Cell dry weight in the assay, for every fed substrate without
+                its own row below.
+            biomass_by_substrate (rows: substrate text, biomass_gcdw_per_l number): Biomass per fed substrate.
+                A substrate's own cell dry weight, when it differs.
         Checks:
             is_area_tolerance_pct: Internal standard area tolerance.
             shoulder_fwhm_ratio: Widest acceptable peak (x standards).
@@ -817,8 +826,8 @@ def activity_assay(gaml_file, corrections, compounds, channel=None, sample_patte
     calibration_points = check_standards(standards, calibration)
     concentrations = quantify(ratios, calibration, concentration_factor)
     course = time_course(concentrations)
-    activities = initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l)
-    intervals = interval_rates(course, biomass_gcdw_per_l)
+    activities = initial_rates(concentrations, rate_window_min, biomass_gcdw_per_l, biomass_by_substrate)
+    intervals = interval_rates(course, biomass_gcdw_per_l, biomass_by_substrate)
     balance = mass_balance(course)
     standard_flags = internal_standard_checks(peaks, references, internal_standard, is_area_tolerance_pct,
                                               shoulder_fwhm_ratio)

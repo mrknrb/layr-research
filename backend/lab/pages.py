@@ -24,10 +24,14 @@ Cards (every card may have a "title" and "width": "half" to sit beside the next 
 - figure: {"figure": "<a returned figure>"}
 - chart: {"table": t, "x": c, "y": c or [c, ...], "group": c, "kind": line|scatter|bar} (drawn by the panel)
 - review: a curve per item with regions on it whose boundaries can be dragged and saved as a correction:
-  {"regions": t, "item": c, "label": c, "start": c, "end": c, "curve": {"table": t, "x": c, "y": c} or
-  {"file": "<input id>"} (a GAML sequence), optional "name", "group", "status", "ok", "info", "note",
-  "expected", "tolerance", "baseline", "window", "x_label", "y_label", "correct", "start_field", "end_field",
-  "exclude"}
+  {"regions": t, "item": c, "label": c, "start": c, "end": c, "curve": ..., optional "name", "group", "status",
+  "ok", "info", "note", "expected", "tolerance", "baseline", "window", "x_label", "y_label", "correct",
+  "start_field", "end_field", "exclude"}. The curves come from
+  - a table of the run with one row per point: "curve": {"table": t, "item": c, "x": c, "y": c} ("item": the
+    table's column naming the curve; default the card's "item"), or
+  - a raw file of the experiment: "curve": {"file": "<input id>"}, read as a table with the same "item", "x" and
+    "y" columns when it is one (CSV, Excel...), or else by the curve reader the toolbox (or one of its add-ons)
+    registers for its kind of file (toolbox/registry.py).
 
 A correction kind: {"label", "help"?, "fields": {name: "text" | "number" | "integer" | "boolean", with "optional"
 written in it when it may be left empty}, "key"?: [fields]}. Two approved corrections of one kind with the same key
@@ -53,17 +57,6 @@ SUMMARIES = {"mean", "median", "sum", "count", "min", "max", "first", "last"}
 CHART_KINDS = {"line", "scatter", "bar"}
 FIELD_TYPES = {"text", "number", "integer", "boolean"}
 WIDTH = 120
-
-# The kinds a method gets when it takes `corrections` but declares none (methods written before 0.5: the GC assay's).
-LEGACY_CORRECTIONS: dict[str, Any] = {
-    "rename": {"label": "Rename an injection", "help": "Fix a wrong injection name before it is read.",
-               "fields": {"injection": "integer", "new_name": "text"}, "key": ["injection"]},
-    "exclude": {"label": "Leave out an injection, or one compound in it",
-                "fields": {"injection": "integer", "compound": "optional text"}},
-    "manual_integration": {"label": "Integrate a peak by hand", "help": "Set a peak's start and end by hand.",
-                           "fields": {"injection": "integer", "compound": "text", "start_min": "number",
-                                      "end_min": "number"}},
-}
 
 _REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,\s-]+\])?"
                           r"(\s*(==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]+(\s*,\s*(==|>=|<=|~=|!=|>|<)\s*"
@@ -115,11 +108,9 @@ def normalize_kinds(value: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
-def correction_kinds(constants: dict[str, Any], takes_corrections: bool) -> dict[str, dict[str, Any]]:
-    """The kinds of correction an experiment of this method can record (normalized)."""
-    if "CORRECTIONS" in constants:
-        return normalize_kinds(constants["CORRECTIONS"])
-    return normalize_kinds(LEGACY_CORRECTIONS) if takes_corrections else {}
+def correction_kinds(constants: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The kinds of correction an experiment of this method can record (normalized); none when it declares none."""
+    return normalize_kinds(constants.get("CORRECTIONS"))
 
 
 def requirements(constants: dict[str, Any]) -> list[str]:
@@ -129,9 +120,10 @@ def requirements(constants: dict[str, Any]) -> list[str]:
     return [str(r).strip() for r in reqs if isinstance(r, str) and str(r).strip()]
 
 
-def problems(constants: dict[str, Any], outputs: set[str] | None = None) -> list[tuple[str, str]]:
+def problems(constants: dict[str, Any], outputs: set[str] | None = None,
+             inputs: set[str] | None = None) -> list[tuple[str, str]]:
     """What is wrong with the declarations, in plain words: [(which declaration, message)] (the checker shows these
-    as warnings)."""
+    as warnings). `outputs` and `inputs`: the recipe's results and raw file inputs, when known."""
     out: list[tuple[str, str]] = []
     if "PAGES" in constants:
         ps = constants["PAGES"]
@@ -154,6 +146,9 @@ def problems(constants: dict[str, Any], outputs: set[str] | None = None) -> list
                                 and name not in outputs:
                             out.append(("PAGES", f"A {kind} card on the page \"{p['title']}\" shows `{name}`, which "
                                                  "the recipe doesn't return."))
+                    if kind == "review":
+                        out += [("PAGES", f"The review card on the page \"{p['title']}\": {m}")
+                                for m in curve_problems(c.get("curve"), outputs, inputs)]
     if "CORRECTIONS" in constants:
         ks = constants["CORRECTIONS"]
         if not isinstance(ks, dict):
@@ -177,6 +172,26 @@ def problems(constants: dict[str, Any], outputs: set[str] | None = None) -> list
     return out
 
 
+def curve_problems(curve: Any, outputs: set[str] | None = None, inputs: set[str] | None = None) -> list[str]:
+    """What is wrong with a review card's "curve", in plain words."""
+    if not isinstance(curve, dict) or not (curve.get("table") or curve.get("file")):
+        return ["say where its curves come from: \"curve\": {\"table\": ..., \"x\": ..., \"y\": ...} (a table of the "
+                "run) or {\"file\": \"<input>\"} (a raw file of the experiment)."]
+    if curve.get("table") and curve.get("file"):
+        return ["its curves come from a table or from a raw file, not both."]
+    out = []
+    if curve.get("table"):
+        if not (curve.get("x") and curve.get("y")):
+            out.append("a curve from a table needs its x and y columns.")
+        name = curve["table"]
+        if outputs is not None and isinstance(name, str) and not name.startswith("step:") and name not in outputs:
+            out.append(f"its curves come from `{name}`, which the recipe doesn't return.")
+    elif inputs is not None and curve["file"] not in inputs:
+        out.append(f"its curves come from the raw file `{curve['file']}`, which isn't an input of the recipe "
+                   f"(inputs: {', '.join(sorted(inputs)) or 'none'}).")
+    return out
+
+
 def check_requirements(reqs: list[str]) -> list[str]:
     bad = [r for r in reqs if not _REQUIREMENT.match(r.strip())]
     if bad:
@@ -192,8 +207,9 @@ def check_correction(kinds: dict[str, dict[str, Any]], kind: str, fields: dict[s
     """The correction's fields, checked against its kind and turned into their types. Raises ValueError in plain
     words."""
     if not kinds:
-        raise ValueError("This method takes no corrections: add a kind of correction to it first (Corrections › "
-                         "Kinds of correction), and a `corrections` input to its recipe.")
+        raise ValueError(f"This method declares no kinds of correction, so there is no '{kind}': add the kind to the "
+                         "method first (Corrections › Kinds of correction, or CORRECTIONS in its file), and a "
+                         "`corrections` input to its recipe.")
     k = kinds.get(kind)
     if k is None:
         raise ValueError(f"The method has no kind of correction '{kind}'. Kinds: {', '.join(kinds)}.")
