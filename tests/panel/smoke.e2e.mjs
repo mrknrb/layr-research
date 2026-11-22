@@ -67,18 +67,20 @@ await bench("smoke", async ({ h, open, shot, until, step }) => {
   await until("the numbers in the flow", async () => /alpha\s*0\.9/.test(await flowText()), 20_000);
   await stop("03-work-folded");
 
-  step("folded: a box is looked into in the flow's own side panel");
+  step("folded: a box clicked is read under the flow (its code, and what went in and came out beside it)");
   await box("Scale scores").locator(".fl-nh").click();
-  await page.locator(".fl-side.open").waitFor();
-  await until("the side panel's content", async () => (await page.locator(".fl-side.open").innerText()).length > 40);
-  await stop("04-inside-side-panel");
+  await page.locator(".mv-grid.reading .mv-read-code .fl-editor").waitFor({ timeout: 20_000 });
+  await until("what it holds", async () => (await page.locator(".mv-read-info").innerText()).length > 40);
+  if (await page.locator(".fl-side.open").count()) throw new Error("the flow's side panel opened");
+  await stop("04-inside-reading");
 
-  step("the code shown: the side panel closes, a box shows its function in the code");
-  await page.locator(".code-toggle").click();
-  await page.locator(".mv-grid").waitFor({ state: "visible" });
-  await until("the side panel to close", async () => (await page.locator(".fl-side.open").count()) === 0);
-  await until("the code of the box picked while it was folded", async () =>
-    /def scale_scores\(/.test(await page.locator(".cm-content").first().textContent()), 30_000);
+  step("✎ Edit the code: the editor, at the box read; a box shows its function in the code");
+  await page.locator(".code-bar .code-mode").click();
+  await page.locator(".mv-editor").waitFor({ state: "visible" });
+  await until("the code of the box read", async () =>
+    /def scale_scores\(/.test(await page.locator(".mv-editor .cm-content").first().textContent()), 30_000);
+  await lab(() => window.__lab.flow().fit()); // the flow got lower: every box in sight again
+  await page.waitForTimeout(200);
   await box("Scale reliability").locator(".fl-nh").click();
   await until("the function at the cursor", async () => (await state())?.fn === "scale_reliability", 10_000);
   await until("its explanation", async () => /Scale reliability/i.test(await page.locator(".mv-inspector").innerText()), 20_000);

@@ -70,8 +70,10 @@ The tabs:
   shown for a method without data, or when a link or a box asks for a function; "Show the code" unfolds it. Beside
   the code: the outline (recipe, steps, formulas, helpers, the toolbox, read only) and the inspector (what the
   function at the cursor does, its formulas drawn as math, the checker's notes, Explain). The code shows this run's
-  values at the ends of its lines; a change is tried at once in a trial run (it can be switched off). A box of the
-  flow opens its side panel: its code with this run's values, its tables, its rounds, the checks, Copy link. A run
+  values at the ends of its lines; a change is tried at once in a trial run (it can be switched off). The code under
+  the flow is read or edited (✎ Edit the code / ✓ Back to reading on the bar): reading, a box clicked in the flow
+  (or a step in the outline) shows its code with this run's values beside the outline, and on the right what went
+  in, its rounds, what came out, the checks, Copy link (a box without code, e.g. a table, fills the middle). A run
   picked in the flow (Latest ▾) is what every tab shows.
 - **The experiment's own pages** (`panels/pages.js`): tabs made of cards the method declares (numbers, tables,
   charts, texts, curves to review with regions to drag); "+ Page" and Edit page change them (a new version of the

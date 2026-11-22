@@ -14,7 +14,7 @@ export PYTHONDONTWRITEBYTECODE=1
 node tests/panel/smoke.e2e.mjs
 ```
 
-The scripts: `smoke`, `tabs`, `code` (the workspace and its tabs), `rounds` (the rounds tables of loops), `resize`
+The scripts: `smoke`, `tabs`, `code` (the workspace and its tabs), `reading` (a box read under the flow, Edit the code and back), `rounds` (the rounds tables of loops), `resize`
 (every resizable place), `sources` (experiments that read other experiments: the picker, out of date, the flow's
 input box, provenance › Open it there, deleting a source) and `links` (Copy link on every kind of thing, then each
 link opened through the param `ref`, broken links), each `tests/panel/<name>.e2e.mjs`. Screenshots go to `tests/panel/out/` (or `$SHOTS`), with the harness's stderr in `out/harness.log`. Playwright is not
