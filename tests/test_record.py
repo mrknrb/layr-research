@@ -432,6 +432,27 @@ def in_process_runner(store, **job_extra):
     return Runner(store, InProcess())
 
 
+def test_a_statement_that_runs_once_uses_no_budget(tmp_path):
+    from lab.recorder import Inside, Recorder, load
+    from lab.values import ValueStore
+
+    source = ("def once(x):\n    a = x + 1\n    b = a * 2\n    return b\n\n\n"
+              "def recipe():\n    total = 0\n    for i in range(40):\n        total += once(i)\n    return total\n")
+    path = tmp_path / "once.py"
+    path.write_text(source, "utf-8")
+    inside = Inside(source, str(path), ValueStore(tmp_path / "values"), all_budget=81)
+    rec = Recorder(inside=inside)
+    module = load(source, path, rec, {}, "recipe")
+    inside.start()
+    try:
+        module.recipe()
+    finally:
+        inside.stop()
+    report = inside.report(rec.report()["calls"])
+    # the loop's 40 rounds of `i` and `total` fit; `total = 0` and the 40 calls' `a` and `b` cost nothing
+    assert report["every"]["cut"] == 0 and report["every"]["kept"] == 80, report["every"]
+
+
 def test_the_light_values_have_a_budget_per_run(tmp_path):
     store = Store(tmp_path / "lab")
     runner = in_process_runner(store, all_budget=700)

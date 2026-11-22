@@ -25,7 +25,8 @@ as they are; anything else (tables, lists, arrays, objects) only as its kind and
 stored. A small list, tuple, set or dict (at most `PREVIEW_ITEMS` items, all of them plain values) also keeps a short
 text of its content, its preview (`"3, 5, 2, 4"`, `"respondent=17, q1=3"`). Kept column-wise, one list per name, with the round of the statement's innermost loop beside each value, so
 a loop's rounds can be laid out as a table (one row per round, one column per name). A run keeps at most
-`ALL_BUDGET` light values (a preview counts as one more for every `PREVIEW_COST` characters); past it, statements keep only their full rounds, and the record says where it cut.
+`ALL_BUDGET` light values (a preview counts as one more for every `PREVIEW_COST` characters); past it, statements keep only their full rounds, and the record says where it cut. A statement
+that runs once in a call doesn't use the budget (its full round says all).
 
 **Remembered steps** (`StepCache`): a step whose code and inputs are the same as in an earlier run isn't run again:
 its result and its whole record (calls, values inside, tables) come back from the cache.
@@ -957,7 +958,7 @@ class Inside:
         if rec is None:
             rec = lines[s.start] = {"n": 0, "first": [], "last": deque(maxlen=self.rounds), "s": s,
                                     "cols": [(n, []) for n in s.names], "at": [] if s.loop is not None else None,
-                                    "cut": None}
+                                    "cut": None, "paid": 0}
         rec["n"] += 1
         k = rec["n"]
         if not s.names and not failed:
@@ -980,7 +981,7 @@ class Inside:
                 rec["cut"] = "budget"
                 self.cut_by_budget += 1
             else:
-                self.left -= len(cols)
+                cost = len(cols)
                 for n, col in cols:
                     v = got.get(n)
                     t = type(v)
@@ -992,7 +993,9 @@ class Inside:
                         lv = _light(v)
                         col.append(lv)
                         if type(lv) is dict and "preview" in lv:
-                            self.left -= len(lv["preview"]) // PREVIEW_COST
+                            cost += len(lv["preview"]) // PREVIEW_COST
+                self.left -= cost
+                rec["paid"] += cost
                 at = rec["at"]
                 if at is not None:
                     head = lines.get(s.loop)
@@ -1057,6 +1060,11 @@ class Inside:
                 if at is not None and at != list(range(1, len(at) + 1)):  # else round i is simply the i-th value
                     light["at"] = at
                 every[s.start] = light
+            elif s.loop is None and s.body is None and rec["n"] <= 1:
+                # ran once: its light values aren't kept (its full round says all), so they don't use the budget
+                self.left += rec["paid"]
+                if rec["cut"] == "budget":
+                    self.cut_by_budget -= 1
             rounds = list(rec["first"])
             for k, held in rec["last"]:
                 if k > self.rounds:

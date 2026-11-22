@@ -208,14 +208,15 @@ def analysis(table_file, value_column="value", group_column="group", control="co
 '''
 
 
-def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
+def register(mcp: FastMCP, data_dir: Path, emit, pool: Pool | None = None) -> Store:
+    """Adds the lab's tools to `mcp`. Starts no calculation process: the first run starts one, or the server warms
+    `pool` when it runs (server.py)."""
     store = Store(data_dir / "lab")
     if store.started_fresh:
         logging.getLogger("research").warning("the data of an earlier version was cleared: %s starts fresh", store.root)
     packages.configure(store.root)
-    pool = Pool()
+    pool = pool or Pool()
     runner = Runner(store, pool)
-    threading.Thread(target=pool.warm, daemon=True).start()
 
     def changed(what: str, **data: Any) -> None:
         emit("research:lab", {"what": what, **data})

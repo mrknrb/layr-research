@@ -1,7 +1,9 @@
-// The Research plugin's code editor: CodeMirror 6 (vendor/cm6/cm6.js, built by scripts/vendor-research-editor.mjs)
-// set up for method files, with the things the plugin draws into the code: values at the end of a line, folded checks,
-// a block under a line, diagnostics, and a merge view to review a draft. It knows nothing about the plugin's tools:
-// completion, hover and call signatures come from functions the page passes in. Load editor.css with it.
+// The Research plugin's code editor: CodeMirror 6 (vendor/cm6/cm6.js, a prebuilt bundle of CodeMirror 6 and Lezer made
+// once from their npm packages outside the plugin and copied in unchanged; versions and licences are in
+// vendor/cm6/LICENSE) set up for method files, with the things the plugin draws into the code: values at the end of a
+// line, folded checks, a block under a line, diagnostics, and a merge view to review a draft. It knows nothing about
+// the plugin's tools: completion, hover and call signatures come from functions the page passes in. Load editor.css
+// with it.
 //
 //   import { createEditor, createMerge, highlight } from "./editor.js";
 //

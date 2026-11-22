@@ -927,10 +927,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lab import ref_tools  # noqa: E402
 from lab import tools as lab_tools  # noqa: E402
 from lab.events import Emitter  # noqa: E402
+from lab.runner import Pool  # noqa: E402
 
 HUB = _Hub()
 EVENTS = Emitter(HUB.send, _hub_known)
-LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
+POOL = Pool()  # no calculation process yet: the server warms one when it runs, a run starts one when it needs it
+LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic), POOL)
 ref_tools.register(mcp, LAB)
 
 
@@ -952,6 +954,7 @@ if __name__ == "__main__":
     log.info("research backend starting; data in %s", DATA)
     import threading
 
+    threading.Thread(target=POOL.warm, daemon=True).start()  # the first run doesn't wait for pandas and SciPy
     threading.Thread(target=_warm, daemon=True).start()
 
     async def _serve() -> None:
