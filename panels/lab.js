@@ -1,10 +1,16 @@
-// Experiments: methods as Python code drawn as a flow and explained from itself, the experiment's own pages made of
-// cards (pages.js: numbers, tables, charts, texts, curves to review), results, checks, corrections, the results
-// database. Everything goes through the plugin's own tools (layr.tools.run), the same ones AI agents use. The flow
-// (flow.js) is the main screen of an experiment and sits above the code of a method.
+// Experiments: one workspace for a method and an experiment of it. The method is Python code drawn as a flow
+// (flow.js) with its code under it (editor.js), explained from itself; the experiment brings the data that flows
+// through it, its own pages made of cards (pages.js), its results, checks, corrections and settings. Everything goes
+// through the plugin's own tools (layr.tools.run), the same ones AI agents use.
+//
+// Every place in the panel is reached through one function, show(target): the buttons use it, and links to "this
+// experiment / method / tab / result / function / line" call it too.
 import { createEditor, createMerge, highlight } from "./editor.js";
 import { mountFlow } from "./flow.js";
 import { createPages } from "./pages.js";
+import { resizable } from "./resize.js";
+import { cellKind, cellText, cellTitle, createRounds, roundWords } from "./rounds.js";
+import { createSources, tableWord } from "./sources.js";
 
 const view = document.getElementById("view");
 const crumbs = document.getElementById("crumbs");
@@ -12,25 +18,31 @@ const actions = document.getElementById("actions");
 const statusEl = document.getElementById("status");
 const dialog = document.getElementById("dialog");
 
+// The panel's state (layr.panel.setState keeps it for the next time the panel opens).
 const S = {
-  view: "home",
-  exp: null,
-  tab: "flow",
-  run: null, // an earlier run of the experiment picked in the flow (null: the latest)
-  setting: null, // a setting to show when the Settings tab opens
-  method: null,
-  fn: null,
-  line: null,
-  numbersExp: null,
+  view: "home", // home | work (the workspace: a method, with an experiment of it or without data) | new | guide
+  method: null, // the workspace's method
+  exp: null, // the workspace's experiment (null: just the method, without data)
+  tab: "flow", // flow ("Flow & code") | page:<n> | results | checks | corrections | settings
+  run: null, // an earlier run of the experiment picked in the flow (null: its latest)
+  code: false, // the Flow & code tab shows the code under the flow (false: folded away, the flow fills the tab)
+  fn: null, // the function the code shows (where the cursor is)
+  line: null, // a line of the code to show, once
+  result: {}, // what the Results tab shows, per experiment: {experiment: ":numbers" | an output | "step:<function>"}
+  target: null, // {exp, result, row, column, why}: a number (or a single value) the Results tab shows highlighted, once
+  setting: null, // a setting to show, once, when the Settings tab opens
   review: {}, // each review card's item, region, filter and zoom (pages.js)
   focus: null, // {item, label} a review card opens at (a link from Checks or Corrections)
-  table: null,
-  dbTable: null,
-  flowFrac: 0.42, // the method screen: how much of the height the flow takes
-  autoRecalc: true, // the method screen: a trial run by itself after a change
+  newMethod: null, // the method a new experiment starts with
+  flowFrac: null, // how much of the Flow & code tab's height the flow takes while the code shows (null: the usual)
+  sizes: {}, // the sizes she dragged, in px, per place (resize.js): "work.outline", "flow.side", "results.list" …
+  autoRecalc: true, // after a change of the code, a trial run on the experiment by itself
+  seenComparison: null, // "method:version" whose comparison banner was closed
 };
-let live = null; // {exp, timer} while a run is in progress
+let live = null; // {exp, step, timer} while a run the panel started is in progress
 let token = 0; // render generation: a slower, older render must not overwrite a newer one
+let EXPS = []; // every experiment, as the experiments tool listed them last
+let METHODS = []; // every method, as the methods tool listed them last
 
 // ------------------------------------------------------------------------------------------------ helpers
 
@@ -95,12 +107,30 @@ function setStatus(text) {
 }
 
 function save() {
-  layr.panel.setState({ ...S }).catch(() => {});
+  const { line, setting, focus, newMethod, preset, target, ...keep } = S; // what only the next drawing uses isn't kept
+  layr.panel.setState(keep).catch(() => {});
 }
 
+/** Where a size she drags at `place` is remembered (S.sizes, saved with the panel's state): resizable's `size`. */
+function sizeOf(place) {
+  return {
+    get: () => S.sizes?.[place] ?? null,
+    set: (px) => {
+      S.sizes = { ...S.sizes };
+      if (px == null) delete S.sizes[place];
+      else S.sizes[place] = px;
+      save();
+    },
+  };
+}
+
+/** Wide enough for boxes side by side (narrower, the CSS stacks them and nothing is resized sideways). */
+const sideBySide = (px = 760) => innerWidth > px;
+
+/** Changes the state and draws the panel again. Leaving the workspace with unsaved code asks first. */
 function go(patch) {
   const leaving =
-    S.view === "method" && ((patch.view && patch.view !== "method") || (patch.method && patch.method !== S.method));
+    S.view === "work" && ((patch.view && patch.view !== "work") || (patch.method && patch.method !== S.method));
   if (leaving && ME?.dirty) {
     openDialog({
       title: "Leave without saving?",
@@ -117,14 +147,64 @@ function go(patch) {
     });
     return;
   }
-  if (leaving) closeMethod();
-  if ((patch.view && patch.view !== "experiment") || (patch.exp && patch.exp !== S.exp)) {
-    closeExpFlow();
-    if (!("run" in patch)) patch = { ...patch, run: null };
-  }
+  if (leaving) closeWork();
+  if ("exp" in patch && patch.exp !== S.exp && !("run" in patch)) patch = { ...patch, run: null };
   Object.assign(S, patch);
   save();
   render();
+}
+
+/**
+ * Goes to a place in the panel: the one function the panel's buttons and its links use. `target`:
+ *   {method, exp, tab, result, fn, line, run, setting, focus, code}: the workspace. An experiment alone opens its
+ *     method's; a method alone opens with its reference experiment (or the one run last), `exp: null` without data;
+ *     neither (on the workspace) keeps the one open.
+ *   {view: "home"}, {view: "new", newMethod}, {view: "guide"}
+ * tab: "flow" (Flow & code), "page:<n>", "results", "checks", "corrections", "settings". result: what the Results
+ * tab shows (":numbers", an output's name, "step:<function>"; a single value's name shows it among the numbers,
+ * highlighted). cell: {row: {column: value, ...} picking one row, column}: that number of the result's table, scrolled
+ * into view and highlighted (filters cleared); why: true also opens how it was calculated. fn / line: a function or a
+ * line of the method's code (they show the code under the flow). code: true shows the code, false folds it away; else opening an experiment
+ * starts with it folded, opening a method without data with it shown, and on the same workspace it stays as it is.
+ */
+async function show(target = {}) {
+  const t = { view: "work", ...target };
+  if (t.view !== "work") return go(t);
+  if (!t.method && !("exp" in t) && S.view === "work") t.method = S.method;
+  try {
+    if ((t.exp && !t.method) || (t.method && t.exp === undefined && !(S.view === "work" && S.method === t.method))) {
+      const [exps, methods] = await Promise.all([call("experiments"), METHODS.length ? METHODS : call("methods")]);
+      EXPS = exps;
+      METHODS = methods;
+      if (t.exp && !t.method) t.method = exps.find((e) => e.experiment === t.exp)?.method;
+      if (t.exp === undefined) t.exp = defaultExperiment(t.method);
+    }
+  } catch (err) {
+    return fail(err);
+  }
+  if (!t.method) return go({ view: "home" });
+  const same = S.view === "work" && S.method === t.method;
+  const exp = t.exp === undefined ? (same ? S.exp : null) : t.exp || null;
+  const patch = { view: "work", method: t.method, exp };
+  patch.tab = t.tab || (t.result ? "results" : t.fn || t.line ? "flow" : same ? S.tab : "flow");
+  patch.code = t.fn || t.line ? true : "code" in t ? !!t.code : same ? S.code : !exp;
+  if (t.fn !== undefined || !same) patch.fn = t.fn || null;
+  if (t.line) patch.line = t.line;
+  if ("run" in t) patch.run = t.run || null;
+  if (t.result && exp) patch.result = { ...S.result, [exp]: t.result };
+  patch.target = t.result && exp && t.cell ? { exp, result: t.result, row: t.cell.row, column: t.cell.column, why: !!t.why } : null;
+  if (t.setting) patch.setting = t.setting;
+  if (t.focus) patch.focus = t.focus;
+  go(patch);
+}
+
+/** The experiment a method opens with: its reference experiment, else the one run last, else none. */
+function defaultExperiment(method) {
+  const mine = EXPS.filter((e) => e.method === method);
+  const ref = METHODS.find((m) => m.id === method)?.reference;
+  if (ref && mine.some((e) => e.experiment === ref)) return ref;
+  const at = (e) => String(e.last_run?.finished || e.last_run?.started || "");
+  return mine.filter((e) => e.last_run).sort((a, b) => at(b).localeCompare(at(a)))[0]?.experiment || null;
 }
 
 function badge(text, kind) {
@@ -140,9 +220,15 @@ function flagBadges(counts) {
   return out;
 }
 
-function openDialog({ title, body, buttons, wide = false }) {
+/**
+ * A modal dialog → the id (or `value()`) of the button pressed, null when closed. A button's `value()` may return a
+ * promise (the button waits); undefined keeps the dialog open (invalid, or an error shown in it). `size`: "wide",
+ * "medium" or nothing.
+ */
+function openDialog({ title, body, buttons, wide = false, size = wide ? "wide" : "" }) {
   return new Promise((resolve) => {
-    dialog.classList.toggle("wide", !!wide);
+    dialog.classList.toggle("wide", size === "wide");
+    dialog.classList.toggle("medium", size === "medium");
     put(
       dialog,
       h("h3", {}, title),
@@ -155,8 +241,18 @@ function openDialog({ title, body, buttons, wide = false }) {
             "button",
             {
               class: `layr-button ${b.kind || ""}`,
-              onclick: () => {
-                const v = b.value ? b.value() : b.id;
+              title: b.title || null,
+              onclick: async (e) => {
+                let v = b.value ? b.value() : b.id;
+                if (v && typeof v.then === "function") {
+                  const btn = e.currentTarget;
+                  btn.disabled = true;
+                  try {
+                    v = await v;
+                  } finally {
+                    btn.disabled = false;
+                  }
+                }
                 if (v === undefined) return; // invalid: keep open
                 dialog.close();
                 resolve(v);
@@ -203,9 +299,16 @@ async function askReason(title, hint) {
   });
 }
 
-function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
+/**
+ * A table of row objects. onRow(row) / onCell(row, column): clicks (only numbers are clickable cells); onMenu(row,
+ * column, event): a right-click on a cell that holds something. focus: {row (one of `rows`), column}: that cell is
+ * marked (class cell-focus) and its row is among the rows shown however far down it is.
+ */
+function table(rows, columns, { onRow, onCell, onMenu, focus, limit = 200 } = {}) {
   if (!rows.length) return h("div", { class: "layr-muted pad" }, "No rows.");
   const cols = columns || Object.keys(rows[0]);
+  const at = focus ? rows.indexOf(focus.row) : -1;
+  if (at >= limit) limit = at + 20;
   return h(
     "div",
     { class: "table-wrap" },
@@ -227,14 +330,20 @@ function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
         rows.slice(0, limit).map((r) =>
           h(
             "tr",
-            { class: onRow ? "click" : "", onclick: onRow && (() => onRow(r)) },
+            { class: `${onRow ? "click" : ""}${r === focus?.row ? " row-focus" : ""}`, onclick: onRow && (() => onRow(r)) },
             cols.map((c) =>
               h(
                 "td",
                 {
-                  class: typeof r[c] === "number" ? (onCell ? "num click" : "num") : "",
-                  title: typeof r[c] === "number" && onCell ? "How was this number calculated?" : null,
+                  class:
+                    (typeof r[c] === "number" ? (onCell ? "num click" : "num") : "") +
+                    (r === focus?.row && c === focus.column ? " cell-focus" : ""),
+                  title:
+                    typeof r[c] === "number" && onCell
+                      ? `How was this number calculated?${onMenu ? " (Right-click: copy a link to it)" : ""}`
+                      : null,
                   onclick: typeof r[c] === "number" && onCell ? () => onCell(r, c) : null,
+                  oncontextmenu: onMenu && r[c] != null && r[c] !== "" ? (e) => onMenu(r, c, e) : null,
                 },
                 fmt(r[c]),
               ),
@@ -246,6 +355,15 @@ function table(rows, columns, { onRow, onCell, limit = 200 } = {}) {
     rows.length > limit
       ? h("div", { class: "layr-muted pad" }, `${rows.length - limit} more rows (export to Excel for all).`)
       : null,
+  );
+}
+
+/** Whether a row has these values (numbers as numbers, anything else as text: as the backend compares them). */
+function rowHas(r, values) {
+  return Object.entries(values || {}).every(([k, v]) =>
+    typeof v === "number" && typeof r[k] === "number"
+      ? Math.abs(r[k] - v) <= 1e-9 * Math.max(1, Math.abs(v))
+      : String(r[k] ?? "") === String(v ?? ""),
   );
 }
 
@@ -288,12 +406,6 @@ async function storeFileRef(ref) {
   } finally {
     setStatus("");
   }
-}
-
-async function readText(types) {
-  const ref = await layr.files.open({ types });
-  if (!ref) return null;
-  return { name: ref.name, text: new TextDecoder().decode(await layr.files.read(ref.id)) };
 }
 
 // ------------------------------------------------------------------------------------------------ Claude (optional)
@@ -345,26 +457,151 @@ function aiAnswer(text, label = "Written by AI (Claude): check it against the co
   );
 }
 
+// ------------------------------------------------------------------------------------------------ links
+
+// "Copy link" puts a reference to something in Research on the clipboard as a Markdown link (reference_make: its text
+// is readable anywhere, its address is layr://research/open/<ref>); a Wiki page draws it as a card. Such a link opens
+// this panel with the param `ref`, and openRef goes there.
+
+/** Copies the Markdown link of a reference (reference_make's arguments) → true when it is on the clipboard. */
+async function copyLink(args) {
+  let r;
+  try {
+    const { all, ...make } = args;
+    r = await call("reference_make", make);
+  } catch (err) {
+    // one number whose row the columns picked don't tell apart in the whole table: every column of the row then
+    if (args.row && args.all && /give more columns/.test(String(err?.message || err)))
+      return copyLink({ ...args, row: args.all, all: null });
+    layr.ui.notify(cleanError(err), "error");
+    return false;
+  }
+  try {
+    await layr.clipboard.writeText(r.markdown);
+  } catch (err) {
+    fail(err);
+    return false;
+  }
+  layr.ui.notify(
+    S.run && args.experiment ? "Link copied: paste it in a Wiki page (it always shows the latest run)" : "Link copied: paste it in a Wiki page",
+    "success",
+  );
+  return true;
+}
+
+/** A link to one value of a table: its row picked by the columns that tell it apart (rowKeys), more if needed. */
+function copyCellLink(exp, tableName, row, column, rows) {
+  const scalar = (v) => v !== null && v !== "" && typeof v !== "object";
+  const keys = rowKeys(rows || [row], row, column).filter((k) => scalar(row[k]));
+  let left = (rows || [row]).filter((r) => rowHas(r, Object.fromEntries(keys.map((k) => [k, row[k]]))));
+  for (const k of Object.keys(row)) {
+    if (left.length <= 1) break;
+    if (k === column || keys.includes(k) || !scalar(row[k])) continue;
+    const next = left.filter((r) => rowHas(r, { [k]: row[k] }));
+    if (next.length < left.length) {
+      keys.push(k);
+      left = next;
+    }
+  }
+  const pick = (ks) => Object.fromEntries(ks.map((k) => [k, row[k]]));
+  const all = pick(Object.keys(row).filter((k) => k !== column && scalar(row[k])));
+  return copyLink({ experiment: exp.id, result: tableName, row: pick(keys), column, all });
+}
+
+/** Waits until the workspace shows the experiment's flow, drawn (after a show()) → false when it doesn't come. */
+async function flowReady(expId, ms = 30_000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; ) {
+    if (S.view === "work" && ME?.exp === expId && ME.flow?.graph && !ME.els.flow.querySelector(".fl.loading"))
+      return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/**
+ * Opens the panel at a reference (the `ref` of a layr://research/open/… link: experiment, method, result, row,
+ * column, function, …). What no longer exists is gone round: it goes as far as it can and says what is missing in
+ * one notice.
+ */
+async function openRef(text) {
+  let ref = String(text || "").trim();
+  if (ref.startsWith("layr://research/open/")) ref = decodeURIComponent(ref.slice("layr://research/open/".length));
+  const p = Object.fromEntries(new URLSearchParams(ref.replace(/^\?/, "")));
+  let row = null;
+  let got;
+  try {
+    if (p.row) row = JSON.parse(p.row);
+  } catch {
+    layr.ui.notify("This link can't be opened: the row it names can't be read.", "warning");
+    return;
+  }
+  try {
+    got = await call("reference_get", { ref });
+  } catch (err) {
+    layr.ui.notify(`This link can't be opened: ${cleanError(err)}`, "warning");
+    return;
+  }
+  const tell = (text = got.missing) => text && layr.ui.notify(text, "warning");
+  try {
+    [EXPS, METHODS] = await Promise.all([call("experiments"), call("methods")]);
+  } catch (err) {
+    return fail(err);
+  }
+  if (p.experiment) {
+    const e = EXPS.find((x) => x.experiment === p.experiment);
+    if (!e) {
+      await show({ view: "home" });
+      return tell(got.missing || "This experiment no longer exists.");
+    }
+    const at = { method: e.method, exp: e.experiment };
+    if (p.function) {
+      // a step: the flow, its box selected and looked inside (the code stays folded: the flow's side panel shows it)
+      await show({ ...at, tab: "flow", code: false });
+      if (got.ok && (await flowReady(e.experiment))) ME.flow.lookInside(p.function);
+      return tell();
+    }
+    if (p.result) {
+      const number = got.ok && row && p.column;
+      await show({ ...at, result: p.result, ...(number ? { cell: { row, column: p.column } } : {}) });
+      return tell();
+    }
+    await show(at);
+    return tell();
+  }
+  if (p.method) {
+    if (!METHODS.some((m) => m.id === p.method)) {
+      await show({ view: "home" });
+      return tell(got.missing || "This method no longer exists.");
+    }
+    await show(p.function && got.ok ? { method: p.method, fn: p.function, code: true } : { method: p.method });
+    return tell();
+  }
+  tell("This link doesn't say what to open.");
+}
+
 // ------------------------------------------------------------------------------------------------ chrome
 
+/** The path at the top: [{label, go: a show() target}] links, {label} plain, {node} an element (a picker). */
 function setCrumbs(items) {
   put(
     crumbs,
     ...items.flatMap((it, i) => [
       i ? h("span", { class: "sep" }, "›") : null,
-      it.go
-        ? h(
-            "a",
-            {
-              href: "#",
-              onclick: (e) => {
-                e.preventDefault();
-                go(it.go);
+      it.node
+        ? it.node
+        : it.go
+          ? h(
+              "a",
+              {
+                href: "#",
+                onclick: (e) => {
+                  e.preventDefault();
+                  show(it.go);
+                },
               },
-            },
-            it.label,
-          )
-        : h("b", {}, it.label),
+              it.label,
+            )
+          : h("b", {}, it.label),
     ]),
   );
 }
@@ -375,113 +612,161 @@ function setActions(nodes) {
 
 // ------------------------------------------------------------------------------------------------ home
 
+let EXAMPLES = null; // what "Try an example" offers (the examples tool)
+
+/** What an experiment's last run says, in a word or two. */
+function stateWord(e) {
+  if (e.running) return "running";
+  const st = e.last_run?.status;
+  return !st ? "not run yet" : st === "done" ? "calculated" : st === "stopped" ? "stopped" : "failed";
+}
+
+/** The experiment was last calculated with an older version of its method (`version`: the method's newest). */
+const outOfDate = (e, version) =>
+  !!version && e.last_run?.status === "done" && e.last_run.method_version != null && e.last_run.method_version < version;
+
+/** Why the experiment is out of date because of what it reads, one reason per experiment read ("Spring: …"). */
+const sourceReasons = (e) => (e.outdated || []).map((o) => `${o.title}: ${o.reason}`);
+
+function expCard(e) {
+  const open = () => show({ method: e.method, exp: e.experiment });
+  const menu = (ev) => {
+    ev.stopPropagation();
+    layr.ui.contextMenu(
+      [
+        { label: "Open", icon: "open_in_new", run: open },
+        { label: "Copy link to this experiment", icon: "link", run: () => copyLink({ experiment: e.experiment }) },
+      ],
+      ev,
+    );
+  };
+  // the experiments it reads and those that read it, each a link
+  const titled = (ids) =>
+    [...new Set(ids)].map((id, i) => [
+      i ? ", " : "",
+      h(
+        "a",
+        {
+          href: "#",
+          onclick: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            show({ exp: id });
+          },
+        },
+        EXPS.find((x) => x.experiment === id)?.title || "a deleted experiment",
+      ),
+    ]);
+  const reads = (e.reads || []).map((r) => r.experiment);
+  const readBy = (e.read_by || []).map((r) => r.experiment);
+  const files = Object.values(e.files || {});
+  return h(
+    "div",
+    { class: "layr-card exp-card click", onclick: open, oncontextmenu: menu },
+    h(
+      "div",
+      { class: "exp-head" },
+      h("div", { class: "exp-title" }, e.title),
+      h(
+        "button",
+        { class: "layr-button small ghost icon exp-more", title: "More", "aria-label": `More for ${e.title}`, onclick: menu },
+        "⋯",
+      ),
+    ),
+    files.length || !reads.length ? h("div", { class: "layr-muted small" }, files.join(", ") || "no file yet") : null,
+    reads.length ? h("div", { class: "layr-muted small exp-links" }, "Reads ", titled(reads)) : null,
+    readBy.length ? h("div", { class: "layr-muted small exp-links" }, "Read by ", titled(readBy)) : null,
+    h(
+      "div",
+      { class: "exp-meta" },
+      e.running
+        ? badge("running", "accent")
+        : e.last_run
+          ? [
+              badge(stateWord(e), e.last_run.status === "done" ? "success" : "danger"),
+              outOfDate(e, METHODS.find((m) => m.id === e.method)?.version) ? badge("older version of the method", "warning") : null,
+              e.outdated?.length ? badge("out of date", "warning") : null,
+              ...flagBadges(e.last_run.summary?.flags),
+              h("span", { class: "layr-muted small" }, when(e.last_run.finished)),
+            ]
+          : badge("not run yet", ""),
+      e.proposed_corrections ? badge(`${e.proposed_corrections} proposed corrections`, "warning") : null,
+    ),
+    e.outdated?.length && !e.running
+      ? h("div", { class: "exp-why small", title: sourceReasons(e).join("\n") }, sourceReasons(e).join(" · "))
+      : null,
+  );
+}
+
+/** The experiments grouped by their method: a section per method (one nobody uses yet too), its experiments in it. */
 async function renderHome(t) {
   const [exps, methods] = await Promise.all([call("experiments"), call("methods")]);
   if (t !== token) return;
+  EXPS = exps;
+  METHODS = methods;
+  if (!EXAMPLES) call("examples").then((r) => (EXAMPLES = r.examples || []), () => {});
   setCrumbs([{ label: "Experiments" }]);
   layr.panel.setTitle("Experiments").catch(() => {});
   setActions([
-    h("button", { class: "layr-button ghost", onclick: () => go({ view: "guide" }) }, "Python guide"),
-    h("button", { class: "layr-button ghost", onclick: () => go({ view: "database" }) }, "Results database"),
+    h("button", { class: "layr-button ghost", onclick: () => show({ view: "guide" }) }, "Python guide"),
+    h("button", { class: "layr-button ghost", onclick: makeExample }, "Try an example ▾"),
+    h("button", { class: "layr-button", onclick: newMethod }, "New method"),
+    h("button", { class: "layr-button primary", onclick: () => show({ view: "new" }) }, "New experiment"),
   ]);
-  const cards = exps.map((e) =>
-    h(
-      "div",
-      {
-        class: "layr-card exp-card click",
-        onclick: () => go({ view: "experiment", exp: e.experiment, tab: "flow" }),
-      },
-      h("div", { class: "exp-title" }, e.title),
-      h("div", { class: "layr-muted" }, e.method_name, " · ", Object.values(e.files || {}).join(", ") || "no file yet"),
+  const used = (m) => exps.some((e) => e.method === m.id);
+  const section = (m) => {
+    const mine = exps.filter((e) => e.method === m.id);
+    return h(
+      "section",
+      { class: "method-section" },
       h(
         "div",
-        { class: "exp-meta" },
-        e.running
-          ? badge("running", "accent")
-          : e.last_run
-            ? [
-                badge(
-                  e.last_run.status === "done" ? "calculated" : e.last_run.status,
-                  e.last_run.status === "done" ? "success" : "danger",
-                ),
-                ...flagBadges(e.last_run.summary?.flags),
-                h("span", { class: "layr-muted" }, when(e.last_run.finished)),
-              ]
-            : badge("not run yet", ""),
-        e.proposed_corrections ? badge(`${e.proposed_corrections} proposed corrections`, "warning") : null,
+        { class: "method-head" },
+        h("h2", {}, m.name),
+        h(
+          "span",
+          { class: "layr-muted small method-state" },
+          m.draft_only ? "new, proposed by Claude" : `version ${m.version}`,
+          m.builtin ? " · built in" : "",
+        ),
+        m.draft && !m.draft_only ? badge("a change by Claude waits for you", "warning") : null,
+        m.draft_only ? badge("waiting for you", "warning") : null,
+        h("span", { class: "layr-spacer" }),
+        h(
+          "button",
+          {
+            class: "layr-button small ghost",
+            title: "The method's flow and code (with the data of its reference experiment, or the one run last)",
+            onclick: () => show({ method: m.id }),
+          },
+          "Open",
+        ),
+        m.draft_only
+          ? null
+          : h(
+              "button",
+              { class: "layr-button small", onclick: () => show({ view: "new", newMethod: m.id }) },
+              "New experiment",
+            ),
       ),
-    ),
-  );
+      m.description ? h("p", { class: "method-desc layr-muted" }, m.description) : null,
+      mine.length
+        ? h("div", { class: "cards" }, mine.map(expCard))
+        : h("div", { class: "layr-muted small no-exp" }, "No experiment yet."),
+    );
+  };
   put(
     view,
     h(
       "div",
-      { class: "page" },
+      { class: "page home" },
       h(
-        "section",
-        {},
-        h(
-          "div",
-          { class: "section-head" },
-          h("h2", {}, "Experiments"),
-          h("span", { class: "layr-spacer" }),
-          h("button", { class: "layr-button ghost", onclick: makeExample }, "Try an example ▾"),
-          h("button", { class: "layr-button primary", onclick: () => go({ view: "new" }) }, "New experiment"),
-        ),
-        cards.length
-          ? h("div", { class: "cards" }, cards)
-          : h(
-              "div",
-              { class: "layr-empty" },
-              "No experiments yet. Start one from your data (a table, a survey export, a GC sequence…), or try an " +
-                "example.",
-            ),
+        "p",
+        { class: "layr-muted home-intro" },
+        "Your experiments, grouped by the method they use. A method is the recipe, written in plain Python; an " +
+          "experiment runs it on your data, and every number it makes can be traced back to its line.",
       ),
-      h(
-        "section",
-        {},
-        h(
-          "div",
-          { class: "section-head" },
-          h("h2", {}, "Methods"),
-          h("span", { class: "layr-spacer" }),
-          h("button", { class: "layr-button", onclick: newMethod }, "New method"),
-        ),
-        h(
-          "p",
-          { class: "layr-muted" },
-          "A method is the recipe, written in plain Python: small formulas, steps that work on tables, and a recipe " +
-            "that calls the steps. Open one to read or change its code; every number it makes can be traced back to " +
-            "its line. Changes Claude makes wait for you to accept them.",
-        ),
-        h(
-          "ul",
-          { class: "layr-list lined" },
-          methods.map((m) =>
-            h(
-              "li",
-              {
-                class: m.legacy ? "" : "click",
-                onclick: m.legacy ? null : () => go({ view: "method", method: m.id, fn: null }),
-              },
-              h("b", {}, m.name),
-              " ",
-              h(
-                "span",
-                { class: "layr-muted" },
-                m.legacy
-                  ? "old step method (0.2): no longer runs"
-                  : m.draft_only
-                    ? "new, proposed by Claude"
-                    : `version ${m.version} · ${m.steps} steps${m.builtin ? " · built in" : ""}`,
-              ),
-              m.draft && !m.draft_only ? [" ", badge("change proposed", "warning")] : null,
-              m.draft_only ? [" ", badge("waiting for you", "warning")] : null,
-              h("div", { class: "layr-muted small" }, m.description),
-            ),
-          ),
-        ),
-      ),
+      [...methods.filter(used), ...methods.filter((m) => !used(m))].map(section),
     ),
   );
 }
@@ -534,72 +819,131 @@ async function newMethod() {
     });
     if (r.saved === false)
       return layr.ui.notify((r.messages || []).map((m) => m.message).join("; ") || r.note, "error");
-    go({ view: "method", method: id, fn: null, numbersExp: null });
+    show({ method: id, exp: null });
   } catch (e) {
     fail(e);
   }
 }
 
+/** An example experiment (the examples tool lists them): made, opened and run. */
 async function makeExample(ev) {
-  const which = await new Promise((resolve) =>
-    layr.ui.contextMenu(
-      [
-        { label: "A survey: scale scores, reliability, a regression", icon: "groups", run: () => resolve("survey") },
-        { label: "A GC activity assay: peaks, calibration, rates", icon: "science", run: () => resolve("gc") },
-      ],
-      ev,
-    ),
+  try {
+    if (!EXAMPLES) EXAMPLES = (await call("examples")).examples || [];
+  } catch (err) {
+    return fail(err);
+  }
+  if (!EXAMPLES.length) return layr.ui.notify("No examples are installed.", "info");
+  const picked = await layr.ui.contextMenu(
+    EXAMPLES.map((x) => ({ label: `${x.title}: ${x.description}`, icon: "science", id: x.id })),
+    ev,
   );
-  if (!which) return;
+  if (!picked) return; // the menu was closed without a pick
   let e;
   try {
     setStatus("Making the example…");
-    e = await call("lab_sample", { which });
+    e = await call("lab_sample", { which: picked.id });
   } catch (err) {
     fail(err);
   } finally {
     setStatus("");
   }
   if (!e) return;
-  go({ view: "experiment", exp: e.experiment, tab: "flow" });
-  startRun(e.experiment); // after the status above is cleared: the status now follows the run
+  await show({ method: e.method, exp: e.experiment, tab: "flow", code: false });
+  // the run starts once the workspace has read what it shows (on Windows a run's files can't be replaced while they
+  // are being read: see the backend's store), and after the status above is cleared: the status follows the run
+  for (let i = 0; i < 60 && !ME?.flow?.graph; i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 400));
+  startRun(e.experiment);
 }
 
 // ------------------------------------------------------------------------------------------------ new experiment
 
+const extOf = (name) => (/\.[^./\\]+$/.exec(String(name || ""))?.[0] || "").toLowerCase();
+const reads = (inp, ext) => (inp.types || []).some((x) => String(x).toLowerCase() === ext);
+
+/**
+ * A new experiment: a title, a method, a file for each of its file inputs and the experiments each of its result
+ * inputs reads (`preset`: a file the panel was opened with).
+ */
 async function renderNew(t, preset) {
-  const methods = await call("methods");
+  const [methods, exps] = await Promise.all([call("methods"), call("experiments")]);
   if (t !== token) return;
+  METHODS = methods;
+  EXPS = exps;
   setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: "New experiment" }]);
   setActions([]);
-  const st = { files: {}, params: {}, corrections: [], title: "", method: methods[0]?.id };
-  if (preset) st.files.raw = preset;
-  const title = h("input", { class: "layr-input", placeholder: "e.g. Activity assay 06 - VLB120 ΔalkB, glucose" });
+  layr.panel.setTitle("New experiment").catch(() => {});
+  const usable = methods.filter((m) => !m.draft_only);
+  const ext = preset ? extOf(preset.name) : "";
+  // the method to start with: the one asked for, else (for a file) the first that reads its kind of file
+  const start =
+    usable.find((m) => m.id === S.newMethod)?.id ||
+    (ext && usable.find((m) => (m.inputs || []).some((i) => reads(i, ext)))?.id) ||
+    usable[0]?.id;
+  const files = {};
+  const picks = {}; // result input → [{experiment, result}]
+  const title = h("input", { class: "layr-input", placeholder: "e.g. Attitude survey, spring wave" });
   const methodSel = h(
     "select",
     { class: "layr-select" },
-    methods
-      .filter((m) => !m.legacy)
-      .map((m) => h("option", { value: m.id, selected: m.id === S.newMethod }, m.name)),
+    usable.map((m) => h("option", { value: m.id, selected: m.id === start }, m.name)),
   );
-  S.newMethod = null;
+  const about = h("div", { class: "layr-muted small" });
+  const readsLabel = h("label", { class: "layr-label" }, "Raw data");
   const filesBox = h("div", {});
-  const gcBox = h("div", { class: "layr-muted" });
+  const err = h("div", { class: "layr-error", hidden: true });
+  const titleOf = (id) => EXPS.find((e) => e.experiment === id)?.title || id;
+  const resultRow = (inp) => {
+    const items = (picks[inp.id] || []).map((p) => ({ ...p, title: titleOf(p.experiment) }));
+    return h(
+      "div",
+      { class: "file-row src-input" },
+      h("span", {}, inp.label || inp.id),
+      " ",
+      SRC.chips(items, {
+        onRemove: (i) => {
+          picks[inp.id].splice(i, 1);
+          drawFiles();
+        },
+      }),
+      " ",
+      h(
+        "button",
+        {
+          class: "layr-button small",
+          onclick: async () => {
+            const got = await SRC.pick({ input: inp, picked: items, exps: EXPS, methods: METHODS });
+            if (got) {
+              picks[inp.id] = got;
+              drawFiles();
+            }
+          },
+        },
+        items.length ? "Change…" : "Pick experiments…",
+      ),
+    );
+  };
   const drawFiles = () => {
-    const m = methods.find((x) => x.id === methodSel.value);
-    st.method = m.id;
-    const gc = (m.inputs || []).some((i) => (i.types || []).includes(".gaml"));
-    const card = view.querySelector(".gc-import");
-    if (card) card.hidden = !gc;
+    const m = usable.find((x) => x.id === methodSel.value);
+    const inputs = m?.inputs || [];
+    err.hidden = true;
+    put(about, m?.description || "");
+    put(readsLabel, inputs.some((i) => i.kind === "result") ? "What it reads" : "Raw data");
+    for (const k of Object.keys(picks)) if (!inputs.some((i) => i.id === k && i.kind === "result")) delete picks[k];
+    // the file the panel was opened with goes to the input that reads its kind of file
+    for (const k of Object.keys(files)) if (!inputs.some((i) => i.id === k) || files[k] === preset) delete files[k];
+    const home = preset ? inputs.find((i) => reads(i, ext)) : null;
+    if (home && !files[home.id]) files[home.id] = preset;
     put(
       filesBox,
-      ...(m.inputs || []).map((inp) =>
-        h(
+      inputs.length ? null : h("div", { class: "layr-muted" }, "This method reads no file."),
+      inputs.map((inp) =>
+        inp.kind === "result" ? resultRow(inp) : h(
           "div",
           { class: "file-row" },
           h("span", {}, inp.label || inp.id),
           " ",
-          st.files[inp.id] ? h("b", {}, st.files[inp.id].name) : h("span", { class: "layr-muted" }, "no file"),
+          files[inp.id] ? h("b", {}, files[inp.id].name) : h("span", { class: "layr-muted" }, "no file"),
           " ",
           h(
             "button",
@@ -609,7 +953,7 @@ async function renderNew(t, preset) {
                 try {
                   const f = await pickAndStore(inp.types || []);
                   if (f) {
-                    st.files[inp.id] = f;
+                    files[inp.id] = f;
                     drawFiles();
                   }
                 } catch (err) {
@@ -617,64 +961,45 @@ async function renderNew(t, preset) {
                 }
               },
             },
-            "Choose file…",
+            files[inp.id] ? "Another file…" : "Choose file…",
           ),
         ),
       ),
+      preset && !home
+        ? h("div", { class: "banner" }, `This method can't read ${preset.name}: pick another method, or other files.`)
+        : null,
     );
   };
-  methodSel.onchange = drawFiles;
-  drawFiles();
-  const importGc = async () => {
-    try {
-      const cfg = await readText([".yaml", ".yml"]);
-      if (!cfg) return;
-      let corr = null;
-      if (
-        await openDialog({
-          title: "Corrections file",
-          body:
-            "Does this experiment have a gcassay corrections file " +
-            "(renames, exclusions, manual integrations with reasons)?",
-          buttons: [
-            { label: "No", id: false, kind: "ghost" },
-            { label: "Choose it…", id: true, kind: "primary" },
-          ],
-        })
-      ) {
-        corr = await readText([".yaml", ".yml"]);
-      }
-      const got = await call("gcassay_settings", { config: cfg.text, corrections: corr?.text || null });
-      st.params = got.params;
-      st.corrections = got.corrections;
-      if (!title.value) title.value = got.title;
-      put(
-        gcBox,
-        `Settings from ${cfg.name}: ${Object.keys(got.params).length} parameters`,
-        corr ? `, ${got.corrections.length} corrections from ${corr.name}` : "",
-        ".",
-        got.raw_file ? h("div", {}, `Its raw file was ${got.raw_file}: choose that file above.`) : null,
-      );
-    } catch (err) {
-      fail(err);
-    }
+  methodSel.onchange = () => {
+    err.hidden = true;
+    drawFiles();
   };
+  drawFiles();
   const create = async () => {
+    const m = usable.find((x) => x.id === methodSel.value);
+    if (!m) return;
+    const say = (text) => {
+      put(err, text);
+      err.hidden = false;
+    };
+    const missing = (m.inputs || []).filter((i) => !i.optional && (i.kind === "result" ? !picks[i.id]?.length : !files[i.id]));
+    if (missing.length)
+      return say(
+        missing.map((i) => (i.kind === "result" ? `Pick the experiments for: ${i.label || i.id}` : `Choose the file for: ${i.label || i.id}`)).join(". "),
+      );
+    const firstPick = Object.values(picks).flat()[0];
     try {
-      const m = methods.find((x) => x.id === methodSel.value);
-      const missing = (m.inputs || []).filter((i) => !st.files[i.id] && !i.optional);
-      if (missing.length)
-        return layr.ui.notify(`Choose the file for: ${missing.map((i) => i.label || i.id).join(", ")}`, "error");
       const e = await call("experiment_create", {
-        title: title.value || "Experiment",
+        title:
+          title.value.trim() ||
+          `${m.name}: ${Object.values(files)[0]?.name || (firstPick ? titleOf(firstPick.experiment) : "experiment")}`,
         method: m.id,
-        files: st.files,
-        params: st.params,
-        corrections: st.corrections,
+        files,
+        ...(Object.keys(picks).length ? { sources: picks } : {}),
       });
-      go({ view: "experiment", exp: e.experiment, tab: "settings" });
-    } catch (err) {
-      fail(err);
+      show({ method: m.id, exp: e.experiment, tab: "settings", code: false });
+    } catch (e) {
+      say(cleanError(e)); // e.g. a pick the backend refuses, said in plain words
     }
   };
   put(
@@ -687,22 +1012,27 @@ async function renderNew(t, preset) {
       title,
       h("label", { class: "layr-label" }, "Method"),
       methodSel,
-      h("label", { class: "layr-label" }, "Raw data"),
+      about,
+      readsLabel,
       filesBox,
+      err,
       h(
         "div",
-        { class: "layr-card gc-import" },
-        h("div", {}, h("b", {}, "Already analysed with gcassay?"), " Take over its settings and corrections."),
-        h("button", { class: "layr-button small", onclick: importGc }, "Settings from a gcassay config…"),
-        gcBox,
+        { class: "row-end" },
+        h("button", { class: "layr-button ghost", onclick: () => show({ view: "home" }) }, "Cancel"),
+        h("span", { class: "layr-spacer" }),
+        h("button", { class: "layr-button primary", onclick: create }, "Create"),
       ),
-      h("div", { class: "row-end" }, h("button", { class: "layr-button primary", onclick: create }, "Create")),
     ),
   );
-  drawFiles(); // now that the gcassay card is on the screen: shown only for a method that reads a GC sequence
 }
 
-// ------------------------------------------------------------------------------------------------ experiment
+// ------------------------------------------------------------------------------------------------ the workspace
+
+// One screen for a method and an experiment of it (or the method without data): the experiment picker in the path at
+// the top, the actions beside it, then the tabs. "Flow & code" is the flow with the method's code under it (folded
+// away until asked for when an experiment opens); the other tabs are the experiment's: its pages, Results, Checks,
+// Corrections, Settings, showing its latest run or an earlier one picked in the flow.
 
 const TABS = [
   ["results", "Results"],
@@ -731,116 +1061,297 @@ const PG = createPages({
   kv: (k, v) => kv(k, v),
   filteredTable: (...a) => filteredTable(...a),
   token: () => token,
+  sizeOf: (place) => sizeOf(place), // where a size she drags is remembered (resize.js)
 });
 
-// The experiment's flow stays mounted while the experiment is shown (its view, selection and inside panel survive a
-// redraw of the screen around it): {exp, host, flow, run, lastRun}.
-let EF = null;
+// What an experiment reads of other experiments: the picker and its chips (sources.js); a chip opens that experiment.
+const SRC = createSources({ h, put, openDialog, when, stateWord, onOpen: (id) => show({ exp: id }) });
 
-function closeExpFlow() {
-  EF?.flow.destroy();
-  EF = null;
+/** Picks what one of the experiment's result inputs reads, and keeps it (the experiment isn't run by itself). */
+async function pickSources(exp, inputId) {
+  const inp = (exp.method_inputs || []).find((i) => i.id === inputId) || { id: inputId, label: human(inputId) };
+  try {
+    [EXPS, METHODS] = await Promise.all([call("experiments"), call("methods")]);
+  } catch (err) {
+    return fail(err);
+  }
+  const got = await SRC.pick({
+    input: inp,
+    picked: exp.sources?.[inputId] || [],
+    exps: EXPS,
+    methods: METHODS,
+    self: exp.id,
+    save: (list) => saveSources(exp, inputId, list),
+  });
+  if (!got) return;
+  layr.ui.notify("Saved: press Run to calculate with what it reads now", "success");
+  render();
 }
 
-/** The run the experiment's tabs show: an earlier one picked in the flow, else its latest. */
-const runArgs = (exp) => (S.run ? { run: S.run } : { experiment: exp.id });
+/** Keeps what a result input reads → null, or the backend's sentence when it refuses (a loop, a missing table…). */
+async function saveSources(exp, inputId, list) {
+  try {
+    await call("experiment_update", { experiment: exp.id, sources: { [inputId]: list } });
+    return null;
+  } catch (err) {
+    return cleanError(err);
+  }
+}
 
-async function renderExperiment(t) {
-  const exp = await call("experiment_get", { experiment: S.exp });
+/** The run the experiment's tabs show: an earlier one picked in the flow, else its latest (never a trial run). */
+const runArgs = (exp) => (S.run ? { run: S.run } : exp.last_run?.id ? { run: exp.last_run.id } : { experiment: exp.id });
+
+async function renderWork(t) {
+  const same = ME && ME.method === S.method;
+  const [m, all, exp, docs] = await Promise.all([
+    same ? ME.m : call("method_get", { method: S.method }),
+    call("experiments"),
+    S.exp ? call("experiment_get", { experiment: S.exp }).catch(() => null) : null,
+    toolboxList(),
+  ]);
   if (t !== token) return;
-  layr.panel.setTitle(exp.title).catch(() => {});
-  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: exp.title }]);
-  const running = exp.running || (live && live.exp === exp.id);
+  EXPS = all;
+  if (S.exp && (!exp || exp.method !== m.id)) {
+    // deleted meanwhile, or of another method: the method without data
+    S.exp = null;
+    S.run = null;
+    save();
+  }
+  const mine = all.filter((e) => e.method === m.id);
+  if (!ME || ME.method !== m.id) openWork(m, docs, mine, S.exp ? exp : null);
+  ME.mine = mine;
+  ME.expObj = S.exp ? exp : null;
+  if (ME.exp !== S.exp) switchExperiment();
+  layr.panel.setTitle(ME.expObj ? ME.expObj.title : m.name).catch(() => {});
+  setCrumbs([
+    { label: "Experiments", go: { view: "home" } },
+    { label: m.draft_only ? `${m.name} (proposed)` : m.name },
+    { node: expPicker() },
+  ]);
+  drawActions();
+  drawStatus();
+  await drawWork(t);
+}
+
+/** The experiment picker in the path: every experiment of the method, a new one, or none (just the method). */
+function expPicker() {
+  const sel = h(
+    "select",
+    { class: "layr-select crumb-pick", title: "The experiment whose data goes through the method", "aria-label": "Experiment" },
+    ME.mine.map((e) =>
+      h(
+        "option",
+        { value: e.experiment, selected: e.experiment === S.exp },
+        `${e.title} · ${stateWord(e)}${outOfDate(e, ME.m.version) || e.outdated?.length ? " · out of date" : ""}`,
+      ),
+    ),
+    ME.mine.length ? h("option", { disabled: true }, "──────────") : null,
+    h("option", { value: ":new" }, "New experiment…"),
+    h("option", { value: ":none", selected: !S.exp }, "No data: just the method"),
+  );
+  sel.addEventListener("change", () => {
+    const v = sel.value;
+    sel.value = S.exp || ":none"; // what is open stays shown until the change is made (or refused)
+    if (v === ":new") show({ view: "new", newMethod: ME.method });
+    else show({ method: ME.method, exp: v === ":none" ? null : v, ...(v === ":none" && !S.code ? { code: true } : {}) });
+  });
+  return sel;
+}
+
+/** One row of actions: More ▾, Export ▾, Save, Run all again (or Stop), Run. */
+function drawActions() {
+  if (!ME || S.view !== "work") return;
+  const exp = ME.expObj;
+  const running = !!exp && (exp.running || live?.exp === exp.id);
   setActions([
+    h("button", { class: "layr-button ghost", onclick: (e) => moreMenu(e) }, "More ▾"),
+    exp
+      ? h("button", { class: "layr-button ghost", disabled: !exp.last_run, onclick: (e) => exportMenu(e, exp) }, "Export ▾")
+      : null,
     h(
       "button",
-      { class: "layr-button ghost", disabled: !exp.last_run, onclick: (e) => exportMenu(e, exp) },
-      "Export ▾",
+      {
+        class: `layr-button ${ME.dirty ? "primary" : "ghost"} save-btn`,
+        disabled: !ME.dirty,
+        title: ME.dirty ? "Save the code as a new version of the method (Ctrl+S)" : "No unsaved changes",
+        onclick: () => saveMethod(),
+      },
+      "Save",
     ),
     running
-      ? h(
-          "button",
-          {
-            class: "layr-button danger",
-            onclick: () => call("run_stop", { experiment: exp.id }).catch(fail),
-          },
-          "Stop",
-        )
-      : exp.last_run
+      ? h("button", { class: "layr-button danger", onclick: () => call("run_stop", { experiment: exp.id }).catch(fail) }, "Stop")
+      : exp?.last_run
         ? h(
             "button",
             {
               class: "layr-button ghost run-all",
               title: "Calculate every step again, reusing nothing from before",
-              onclick: () => startRun(exp.id, { fresh: true }),
+              onclick: () => runNow({ fresh: true }),
             },
             "Run all again",
           )
         : null,
     h(
       "button",
-      { class: "layr-button primary", disabled: running, onclick: () => startRun(exp.id) },
+      {
+        class: `layr-button ${ME.dirty ? "" : "primary"} run-btn`,
+        disabled: running || !exp,
+        title: !exp
+          ? "Pick an experiment first: a run calculates its data"
+          : ME.dirty
+            ? "Saves your change as a new version first, then runs it"
+            : "Calculate the experiment (steps that didn't change are reused)",
+        onclick: () => runNow(),
+      },
       running ? "Running…" : "Run",
     ),
   ]);
-  const corr = exp.corrections || [];
-  const proposed = corr.filter((c) => c.status === "proposed").length;
-  const flags = exp.last_run?.summary?.flags || {};
-  const editing = PG.editing();
-  if (editing && (editing.exp !== exp.id || S.tab !== `page:${editing.index}`)) PG.cancelEdit();
-  const pageTabs = PG.tabs(exp);
-  if (PG.editing()?.isNew) pageTabs.push({ id: S.tab, label: PG.editing().page.title || "New page" });
-  if (S.tab === "peaks") S.tab = PG.reviewTab(exp) || "flow"; // the Peaks tab of 0.4
-  const known = ["flow", ...pageTabs.map((p) => p.id), ...TABS.map(([id]) => id)];
-  if (!known.includes(S.tab)) S.tab = "flow";
-  const tab = S.tab;
-  const tabButton = (id, label, extra) =>
-    h("button", { class: `tab ${tab === id ? "active" : ""} tab-${id.replace(":", "-")}`, onclick: () => go({ tab: id }) }, label, extra);
-  const tabs = h(
-    "div",
-    { class: "tabs" },
-    tabButton("flow", "Flow"),
-    pageTabs.map((p) => tabButton(p.id, p.label)),
-    h(
-      "button",
-      {
-        class: "tab tab-add",
-        title: "A page of your own: numbers, tables, charts, texts, curves to review",
-        onclick: () => PG.addPage(exp),
-      },
-      "+ Page",
-    ),
-    TABS.map(([id, label]) =>
-      tabButton(
-        id,
-        label,
-        id === "checks" && (flags.error || flags.warning)
-          ? h("span", { class: "count" }, (flags.error || 0) + (flags.warning || 0))
-          : id === "corrections" && proposed
-            ? h("span", { class: "count warn" }, proposed)
-            : null,
-      ),
-    ),
-  );
-  const body = h("div", { class: `tab-body${tab === "flow" ? " flow-tab" : ""}` });
-  put(view, h("div", { class: "exp" }, tabs, h("div", { class: "exp-banners" }, expBanners(exp, tab)), body));
-  if (tab.startsWith("page:")) return PG.renderPage(body, exp, Number(tab.slice(5)), t, runArgs(exp));
-  const fn =
-    {
-      flow: tabFlow,
-      results: tabResults,
-      checks: tabChecks,
-      corrections: tabCorrections,
-      settings: tabSettings,
-    }[tab] || tabFlow;
-  await fn(body, exp, t);
 }
 
-/** What the experiment's screen says above its tab: a problem, a failed or missing run, an earlier run shown. */
+/** Run (or Run all again): with unsaved code it is saved first (saving runs it). */
+async function runNow({ fresh = false } = {}) {
+  const exp = ME?.expObj;
+  if (!exp) return;
+  if (ME.dirty) return saveMethod();
+  startRun(exp.id, { fresh });
+}
+
+function moreMenu(ev) {
+  const exp = ME.expObj;
+  const isRef = !!exp && ME.m.reference === exp.id;
+  layr.ui.contextMenu(
+    [
+      { label: "Versions…", icon: "history", run: showVersions },
+      { label: "Format the code (tidy layout)", icon: "format_align_left", run: formatCode },
+      { label: "Extra Python packages…", icon: "extension", run: editPackages },
+      exp
+        ? {
+            label: "Reference experiment: compare every change on it",
+            icon: "compare_arrows",
+            checked: isRef,
+            run: () => setReference(isRef ? null : exp.id),
+          }
+        : null,
+      "-",
+      exp ? { label: "Copy link to this experiment", icon: "link", run: () => copyLink({ experiment: exp.id }) } : null,
+      { label: "Copy link to the method", icon: "link", run: () => copyLink({ method: ME.method }) },
+      "-",
+      exp ? null : { label: "Folder that runs without layr (zip)", icon: "folder_zip", run: () => exportFolder({ method: ME.method }) },
+      { label: "Duplicate the method…", icon: "content_copy", run: () => duplicate(ME.m) },
+      { label: "Python guide", icon: "school", run: () => show({ view: "guide" }) },
+    ].filter(Boolean),
+    ev,
+  );
+}
+
+async function setReference(experiment) {
+  try {
+    await call("method_reference", { method: ME.method, experiment });
+    layr.ui.notify(
+      experiment
+        ? "Every new version of the method is compared on this experiment now"
+        : "No reference experiment any more",
+      "success",
+    );
+    await refreshMethodMeta();
+  } catch (err) {
+    fail(err);
+  }
+}
+
+/** The tabs, the banners and the open tab's content. The Flow & code tab's flow and editor stay mounted. */
+async function drawWork(t) {
+  const els = ME.els;
+  if (!view.contains(els.ws)) put(view, els.ws);
+  const tab = drawTabs();
+  put(els.wsBanners, expBanners(ME.expObj, tab));
+  els.body.className = `tab-body${tab === "flow" ? " flow-tab" : ""}`;
+  if (tab === "flow") {
+    if (els.body.firstChild !== els.main) {
+      put(els.body, els.main);
+      ME.ed.view.requestMeasure();
+    }
+    if (els.split.classList.contains("folded") === !!S.code) codeShown(); // a link showed or folded the code
+    revealTarget();
+    return;
+  }
+  const exp = ME.expObj;
+  const box = h("div", { class: "tab-in" });
+  put(els.body, box);
+  if (tab.startsWith("page:")) return PG.renderPage(box, exp, Number(tab.slice(5)), t, runArgs(exp));
+  const fn = { results: tabResults, checks: tabChecks, corrections: tabCorrections, settings: tabSettings }[tab];
+  await fn(box, exp, t);
+}
+
+/** The tab row (an experiment's tabs only with an experiment) → the tab shown. */
+function drawTabs() {
+  const exp = ME.expObj;
+  const editing = PG.editing();
+  if (editing && (!exp || editing.exp !== exp.id || S.tab !== `page:${editing.index}`)) PG.cancelEdit();
+  const pageTabs = exp ? PG.tabs(exp) : [];
+  if (PG.editing()?.isNew) pageTabs.push({ id: S.tab, label: PG.editing().page.title || "New page" });
+  const known = ["flow", ...(exp ? [...pageTabs.map((p) => p.id), ...TABS.map(([id]) => id)] : [])];
+  if (!known.includes(S.tab)) S.tab = "flow";
+  const tab = S.tab;
+  const flags = exp?.last_run?.summary?.flags || {};
+  const proposed = (exp?.corrections || []).filter((c) => c.status === "proposed").length;
+  const tabButton = (id, label, extra) =>
+    h(
+      "button",
+      { class: `tab ${tab === id ? "active" : ""} tab-${id.replace(":", "-")}`, onclick: () => go({ tab: id }) },
+      label,
+      extra,
+    );
+  put(
+    ME.els.tabs,
+    tabButton("flow", "Flow & code", ME.dirty ? h("span", { class: "dirty-dot", title: "Unsaved changes to the code" }) : null),
+    exp
+      ? [
+          pageTabs.map((p) => tabButton(p.id, p.label)),
+          h(
+            "button",
+            {
+              class: "tab tab-add",
+              title: "A page of your own: numbers, tables, charts, texts, curves to review",
+              onclick: () => PG.addPage(exp),
+            },
+            "+ Page",
+          ),
+          TABS.map(([id, label]) =>
+            tabButton(
+              id,
+              label,
+              id === "checks" && (flags.error || flags.warning)
+                ? h("span", { class: "count" }, (flags.error || 0) + (flags.warning || 0))
+                : id === "corrections" && proposed
+                  ? h("span", { class: "count warn" }, proposed)
+                  : null,
+            ),
+          ),
+        ]
+      : h("span", { class: "tabs-note layr-muted small" }, "Pick an experiment above to see its pages, results, checks and settings."),
+  );
+  return tab;
+}
+
+/** What the screen says above the open tab: a problem, a failed or missing run, unsaved code, an earlier run. */
 function expBanners(exp, tab) {
+  if (!exp) return [];
   const last = exp.last_run;
   const at = last?.error_at;
   const out = [];
+  const link = (label, onclick) =>
+    h(
+      "a",
+      {
+        href: "#",
+        onclick: (e) => {
+          e.preventDefault();
+          onclick();
+        },
+      },
+      label,
+    );
   if (exp.method_problem) out.push(h("div", { class: "banner danger" }, exp.method_problem));
   else if (last && last.status !== "done" && !S.run)
     out.push(
@@ -850,26 +1361,62 @@ function expBanners(exp, tab) {
         `The last run ${last.status === "stopped" ? "was stopped" : "failed"}: `,
         last.error || "",
         at?.line
-          ? [
-              " ",
-              h(
-                "a",
-                {
-                  href: "#",
-                  onclick: (e) => {
-                    e.preventDefault();
-                    go({ view: "method", method: exp.method, fn: at.function, line: at.line, numbersExp: exp.id });
-                  },
-                },
-                `line ${at.line} in ${at.function}`,
-              ),
-            ]
+          ? [" ", link(`line ${at.line} in ${at.function}`, () => show({ fn: at.function, line: at.line }))]
           : null,
       ),
     );
   else if (!last) out.push(h("div", { class: "banner" }, "Not calculated yet. Check the settings, then press Run."));
+  else if (exp.outdated?.length && !S.run)
+    // what it reads changed since its last run (it isn't run by itself: one click on Run)
+    out.push(
+      h(
+        "div",
+        { class: "banner outdated" },
+        h("b", {}, "Out of date: "),
+        "what it reads changed since its last run. Press Run to calculate it with what they hold now.",
+        h(
+          "ul",
+          { class: "outdated-why" },
+          exp.outdated.map((o) =>
+            h(
+              "li",
+              {},
+              EXPS.some((x) => x.experiment === o.experiment) ? link(o.title, () => show({ exp: o.experiment })) : h("b", {}, o.title),
+              `: ${o.reason}`,
+            ),
+          ),
+        ),
+      ),
+    );
   else if (exp.changed && exp.changed > (last.started || last.finished) && !S.run)
     out.push(h("div", { class: "banner" }, "Changed since the last run: press Run to recalculate."));
+  else if (!S.run && !exp.method_version && outOfDate(exp, ME?.m.version))
+    out.push(
+      h(
+        "div",
+        { class: "banner" },
+        `Calculated with version ${last.method_version} of the method; it is at version ${ME.m.version} now. ` +
+          "Press Run to bring the results up to date.",
+      ),
+    );
+  if (ME?.m.draft && !ME.m.draft_only && tab !== "flow")
+    out.push(
+      h(
+        "div",
+        { class: "banner quiet" },
+        "Claude proposed a change to the method. ",
+        link("Review it in Flow & code", () => go({ tab: "flow" })),
+      ),
+    );
+  if (ME?.dirty && tab !== "flow")
+    out.push(
+      h(
+        "div",
+        { class: "banner quiet" },
+        "Your change of the code isn't saved: this tab shows the last real run. ",
+        link("Back to the code", () => go({ tab: "flow" })),
+      ),
+    );
   if (S.run) {
     const follows = tab === "results" || tab === "checks" || tab === "flow" || tab.startsWith("page:");
     out.push(
@@ -881,58 +1428,14 @@ function expBanners(exp, tab) {
           ? "The flow, the pages, Results and Checks show it (a curve to review always shows the latest run)."
           : "This tab shows the experiment as it is now (Results and Checks show the earlier run).",
         " ",
-        h(
-          "a",
-          {
-            href: "#",
-            onclick: (e) => {
-              e.preventDefault();
-              go({ run: null });
-            },
-          },
-          "Back to the latest run",
-        ),
+        link("Back to the latest run", () => {
+          go({ run: null });
+          ME?.flow.update({ run: null });
+        }),
       ),
     );
   }
   return out;
-}
-
-// ---------- Flow tab: the method as boxes with this experiment's data; a box opens what belongs to it
-
-async function tabFlow(body, exp) {
-  const lastRun = exp.last_run?.id || null;
-  if (!EF || EF.exp !== exp.id) {
-    closeExpFlow();
-    const host = h("div", { class: "flow-host" });
-    body.append(host);
-    EF = { exp: exp.id, host, run: S.run || null, lastRun, flow: null };
-    EF.flow = mountFlow(host, {
-      call,
-      tex,
-      method: exp.method,
-      version: exp.method_version ?? null,
-      experiment: exp.id,
-      run: S.run || null,
-      editable: false,
-      inside: "panel",
-      claude: false,
-      runNote: false, // the screen's own banner says when the last run failed, with a link to the line
-      figure: figureOf,
-      onSetting: (id, value) => settingChanged(exp, id, value),
-      onPick: (p) => pickedInFlow(exp, p),
-      onOpen: (o) => openFromFlow(exp, o),
-      boxActions: (n) => expBoxActions(exp, n),
-    });
-  } else {
-    body.append(EF.host);
-    if (EF.run !== (S.run || null) || EF.lastRun !== lastRun) {
-      EF.run = S.run || null;
-      EF.lastRun = lastRun;
-      EF.flow.update({ run: EF.run });
-    }
-  }
-  EF.flow.setRunning(live && live.exp === exp.id && live.step ? { step: live.step } : null);
 }
 
 /** A figure a run returned, as an image's src (the flow shows it in the result's card and inside its box). */
@@ -942,60 +1445,72 @@ async function figureOf({ run, output }) {
   return img ? `data:${img.mimeType};base64,${img.data}` : null;
 }
 
-/** The links a box gets on the experiment's screen: the page that shows its table, the checks, the corrections. */
-function expBoxActions(exp, n) {
+/** The links a box gets: the page of the experiment that shows its table, the checks, the corrections, the file. */
+function boxActions(n) {
+  const exp = ME?.expObj;
+  if (!exp) return [];
   if (n.folded && n.quality)
     return [{ label: "See the checks", title: "Every check with what it found", run: () => go({ tab: "checks" }) }];
-  if (n.input?.kind === "corrections")
-    return [{ label: "Open the corrections", run: () => go({ tab: "corrections" }) }];
+  if (n.input?.kind === "corrections") return [{ label: "Open the corrections", run: () => go({ tab: "corrections" }) }];
+  if (n.input?.kind === "result")
+    return [
+      {
+        label: (n.input.sources || []).length ? "Change what it reads" : "Pick experiments",
+        title: "The experiments this experiment reads, and the table of each",
+        run: () => pickSources(exp, n.input.id),
+      },
+    ];
   if (n.input)
-    return [{ label: n.input.value ? "Use another file" : "Choose the file", title: "In the experiment's settings",
-      run: () => go({ tab: "settings" }) }];
+    return [
+      {
+        label: n.input.value ? "Use another file" : "Choose the file",
+        title: "In the experiment's settings",
+        run: () => go({ tab: "settings" }),
+      },
+    ];
   const page = PG.pageShowing(exp, [...(n.outs || []), n.fn ? `step:${n.fn}` : null].filter(Boolean));
-  if (page) return [{ label: `Open ${page.title}`, title: "The page of this experiment that shows it", run: () => go({ tab: page.tab }) }];
+  if (page)
+    return [{ label: `Open ${page.title}`, title: "The page of this experiment that shows it", run: () => go({ tab: page.tab }) }];
   return [];
 }
 
-function openFromFlow(exp, o) {
-  if (o.what === "results") go({ tab: "results", table: o.table || null });
-  else if (o.what === "settings") go({ tab: "settings", setting: o.setting || null });
-  else if (o.what === "corrections") go({ tab: "corrections" });
-  else if (o.what === "checks") go({ tab: "checks" });
-  else if (o.what === "peaks") go({ tab: PG.reviewTab(exp) || "flow" });
-  else if (o.what === "function")
-    go({
-      view: "method",
-      method: exp.method,
-      fn: o.fn || null,
-      line: o.fn ? null : o.line || null,
-      numbersExp: exp.id,
-    });
-  else if (o.what === "new-experiment") go({ view: "new", newMethod: o.method || exp.method });
-}
-
-function pickedInFlow(exp, { experiment, run }) {
-  if (experiment && experiment !== exp.id) {
-    go({ view: "experiment", exp: experiment, run: null });
-    return;
-  }
-  if (!experiment) return;
-  // The flow already shows the run: keep the record so the other tabs follow, and redraw the banner.
-  S.run = run || null;
-  if (EF) EF.run = S.run;
-  save();
-  render();
-}
-
-/** A setting changed in a box: it is the experiment's now, and the experiment is calculated again by itself. */
-async function settingChanged(exp, id, value) {
+/**
+ * A setting changed in a box: the experiment keeps it. It is calculated again by itself: for real, or (with unsaved
+ * code) as a trial run of that code.
+ */
+async function settingChanged(id, value) {
+  const exp = ME?.expObj;
+  if (!exp) return layr.ui.notify("Pick an experiment above first: settings belong to it.", "info");
   try {
     await call("experiment_update", { experiment: exp.id, params: { [id]: value } });
-    S.run = null;
-    startRun(exp.id);
+    if (ME.dirty) {
+      ME.trialSource = null;
+      recalc(ME.ed.getValue());
+    } else startRun(exp.id);
   } catch (err) {
     fail(err);
     render();
   }
+}
+
+/** Another experiment's data (or none) goes through the method: unsaved code stays and is calculated on it. */
+function switchExperiment() {
+  ME.exp = S.exp;
+  ME.trialRun = null;
+  ME.trialSource = ME.dirty ? null : ME.saved;
+  ME.trialNote = null;
+  ME.inside = new Map();
+  ME.tickets.trial++;
+  const me = ME;
+  ME.flow.update({ experiment: S.exp, run: S.run || null }).then(() => {
+    // its latest run is of an older version of the code: the code as it is now is tried on it (steps reused), so
+    // every box has its numbers
+    if (ME === me && !ME.dirty && ME.flow.graph?.stale && S.autoRecalc !== false && ME.exp && !S.run && !ME.busy)
+      recalc(ME.ed.getValue());
+  });
+  drawValues();
+  drawInspector();
+  if (ME.dirty && S.autoRecalc !== false && S.exp) settle();
 }
 
 /** The Methods paragraph for a paper, drafted by Claude from the method and settings and kept with the experiment. */
@@ -1095,13 +1610,14 @@ async function openNotebook(exp) {
 }
 
 /**
- * Calculates the experiment (`fresh`: every step again, nothing reused). The flow lights up the step being
+ * Calculates the experiment for real (`fresh`: every step again, nothing reused). The flow lights up the step being
  * calculated; when it is done the screen shows the new numbers and how many steps were reused.
  */
 function startRun(expId, { fresh = false } = {}) {
   const mine = (live = { exp: expId, step: null });
   S.run = null;
   setStatus("Calculating…");
+  const flowOf = () => (ME && ME.exp === expId ? ME.flow : null);
   // The run answers when it is done (a remembered run in well under a second); its steps light up from its events.
   // A long one answers "running" after the wait: then it is asked again every half second.
   call("run", { experiment: expId, wait_s: 30, ...(fresh ? { fresh: true } : {}) }).then(
@@ -1109,20 +1625,24 @@ function startRun(expId, { fresh = false } = {}) {
     (err) => {
       if (live !== mine) return;
       live = null;
-      if (EF?.exp === expId) EF.flow.setRunning(null);
+      flowOf()?.setRunning(null);
       setStatus("");
       fail(err);
+      render();
     },
   );
   const done = (r) => {
     live = null;
-    if (EF?.exp === expId) {
-      EF.flow.setRunning(null);
-      // the new numbers go into the flow at once; the screen around it (banners, buttons) is drawn as well
-      if (r.run && !S.run && r.status !== "stopped") {
-        EF.lastRun = r.run;
-        EF.run = null;
-        EF.flow.update({ run: null, refresh: true });
+    const flow = flowOf();
+    if (flow) {
+      flow.setRunning(null);
+      // the new numbers go into the flow at once (unless unsaved code is being tried: its trial run stays shown)
+      if (r.run && !S.run && r.status !== "stopped" && !ME.dirty) {
+        ME.trialRun = null;
+        ME.trialSource = ME.saved;
+        flow.update({ run: null, refresh: true });
+        valuesChanged();
+        drawInspector();
       }
     }
     const hits = r.cache?.hits || 0;
@@ -1140,7 +1660,7 @@ function startRun(expId, { fresh = false } = {}) {
         setStatus(`Calculating: ${human(r.step) || r.message || "…"}`);
         if (r.step && r.step !== live.step) {
           live.step = r.step;
-          if (EF?.exp === expId) EF.flow.setRunning({ step: r.step });
+          flowOf()?.setRunning({ step: r.step });
         }
         live.timer = setTimeout(poll, 500);
         return;
@@ -1148,7 +1668,7 @@ function startRun(expId, { fresh = false } = {}) {
       done(r);
     } catch (err) {
       live = null;
-      if (EF?.exp === expId) EF.flow.setRunning(null);
+      flowOf()?.setRunning(null);
       setStatus("");
       fail(err);
     }
@@ -1165,14 +1685,14 @@ function kindBadge(kind) {
   return h("span", { class: `kind ${kind || ""}` }, kind || "");
 }
 
-// The step that made a saved table, from its file name (steps/03_integrate_peaks.csv).
+// The step that made a saved table, from its file name (steps/03_scale_scores.csv).
 function stepOfFile(file) {
   const m = /steps\/\d+_(.+?)(_in_.+|_\d+)?\.csv$/.exec(file || "");
   return m ? m[1] : null;
 }
 
 function tableChips(inputs, output, fnName, exp) {
-  const open = (step) => exp && step && go({ view: "experiment", exp: exp.id, tab: "results", table: `step:${step}` });
+  const open = (step) => exp && step && show({ exp: exp.id, method: ME?.method, result: `step:${step}` });
   const chips = [];
   for (const [k, v] of Object.entries(inputs || {}))
     if (v && v.kind === "table")
@@ -1244,121 +1764,234 @@ function kv(k, v) {
   return h("div", { class: "kv-row" }, h("span", { class: "layr-muted" }, k), h("span", {}, v));
 }
 
-// ---------- Results tab
+// ---------- Results tab: a list of everything the run returned; only the one picked is shown beside it
+
+/**
+ * The entries of the Results list for a run: [{id, group, kind, label, sub}]. The single values all together
+ * (":numbers"), then each text, each table, each figure, then each step's table ("step:<function>").
+ */
+function resultEntries(run) {
+  const outs = run.outputs || {};
+  const names = Object.keys(outs);
+  const of = (kind) => names.filter((n) => outs[n].kind === kind);
+  const label = (n) => outs[n].label || human(n);
+  const size = (rows, cols) => `${rows ?? "?"} row${rows === 1 ? "" : "s"} × ${cols?.length ?? 0} column${cols?.length === 1 ? "" : "s"}`;
+  const out = [];
+  const values = of("value");
+  if (values.length)
+    out.push({ id: ":numbers", group: "", kind: "numbers", label: "Numbers", sub: `${values.length} value${values.length === 1 ? "" : "s"}` });
+  for (const n of of("text")) out.push({ id: n, group: "Texts", kind: "text", label: label(n), sub: `${outs[n].chars} characters` });
+  for (const n of of("table")) out.push({ id: n, group: "Tables", kind: "table", label: label(n), sub: size(outs[n].rows, outs[n].columns) });
+  for (const n of of("figure")) out.push({ id: n, group: "Figures", kind: "figure", label: label(n), sub: "figure" });
+  const seen = new Set();
+  for (const s of run.steps || [])
+    if (s.table && s.function && !seen.has(s.function)) {
+      seen.add(s.function);
+      out.push({ id: `step:${s.function}`, group: "Each step's table", kind: "step", label: human(s.function), sub: size(s.table.rows, s.table.columns) });
+    }
+  return out;
+}
 
 async function tabResults(body, exp, t) {
-  if (!exp.last_run || exp.last_run.status !== "done") {
+  if (!exp.last_run || (exp.last_run.status !== "done" && !S.run)) {
     put(body, h("div", { class: "layr-empty" }, "No results yet: run the experiment."));
     return;
   }
   const run = await call("run_get", runArgs(exp));
   if (t !== token) return;
-  if (run.legacy) {
-    put(
-      body,
+  const outs = run.outputs || {};
+  const entries = resultEntries(run);
+  if (!entries.length) {
+    put(body, h("div", { class: "layr-empty" }, "This run returned nothing to show."));
+    return;
+  }
+  let pick = S.result?.[exp.id];
+  // a number to show highlighted (a link to it, "Open it there"); a single value is shown among the numbers
+  const target = S.target?.exp === exp.id ? S.target : null;
+  S.target = null;
+  let value = null;
+  if (outs[pick]?.kind === "value") {
+    value = pick;
+    pick = ":numbers";
+  }
+  if (!entries.some((e) => e.id === pick))
+    pick = (entries.find((e) => e.kind === "numbers") || entries.find((e) => e.kind === "table") || entries[0]).id;
+  const shown = h("div", { class: "result-shown" });
+  const list = h("div", { class: "result-list", role: "listbox", "aria-label": "What the run returned" });
+  const choose = (id, focus = {}) => {
+    S.result = { ...S.result, [exp.id]: id };
+    save();
+    for (const el of list.querySelectorAll(".result-item")) {
+      el.classList.toggle("active", el.dataset.id === id);
+      el.setAttribute("aria-selected", el.dataset.id === id ? "true" : "false");
+    }
+    drawResult(shown, exp, run, entries.find((e) => e.id === id), outs, t, focus);
+  };
+  let group = null;
+  for (const e of entries) {
+    if (e.group && e.group !== group) list.append(h("div", { class: "result-group" }, e.group));
+    group = e.group;
+    list.append(
       h(
-        "div",
-        { class: "layr-empty" },
-        "This run is from an older version of the plugin: press Run to calculate it again.",
+        "button",
+        {
+          class: `result-item kind-${e.kind}`,
+          role: "option",
+          "data-id": e.id,
+          title: e.label,
+          onclick: () => choose(e.id),
+        },
+        h("span", { class: "result-label" }, e.label),
+        h("span", { class: "result-sub" }, e.sub),
       ),
     );
-    return;
   }
-  const outs = run.outputs || {};
-  const tableNames = Object.keys(outs).filter((n) => outs[n].kind === "table");
-  const figs = Object.keys(outs).filter((n) => outs[n].kind === "figure");
-  const stepTables = (run.steps || []).filter((s) => s.table).map((s) => `step:${s.function}`);
-  if (!S.table || !(tableNames.includes(S.table) || stepTables.includes(S.table))) S.table = tableNames[0];
-  const figBox = h("div", { class: "figs" });
-  for (const f of figs) {
-    // a figure is read like every other value (value_get and its file); the figure tool only for an old run's
-    const src = outs[f].file
-      ? call("value_get", { run: run.run, file: outs[f].file }).then((r) =>
-          r.data ? `data:image/png;base64,${r.data}` : null,
-        )
-      : figureOf({ run: run.run, output: f });
-    src
-      .then((s) => s && figBox.append(h("img", { src: s, class: "fig", alt: outs[f].label || f })))
-      .catch(() => {});
-  }
-  const sel = h(
-    "select",
-    { class: "layr-select", onchange: (e) => go({ table: e.target.value }) },
-    h(
-      "optgroup",
-      { label: "Results" },
-      tableNames.map((n) => h("option", { value: n, selected: n === S.table }, outs[n].label || n)),
-    ),
-    h(
-      "optgroup",
-      { label: "Each step's table" },
-      stepTables.map((n) => h("option", { value: n, selected: n === S.table }, human(n.slice(5)))),
-    ),
-  );
-  const tbox = h("div", {}, h("span", { class: "layr-spinner" }));
-  const values = Object.keys(outs).filter((n) => outs[n].kind === "value" || outs[n].kind === "text");
-  const valueCard = (n) =>
-    outs[n].kind === "text"
-      ? h(
-          "details",
-          {
-            class: "layr-card value-card text",
-            ontoggle: async (e) => {
-              const d = e.currentTarget;
-              if (!d.open || d.dataset.loaded) return;
-              d.dataset.loaded = "1";
-              try {
-                const got = await call("result_value", { ...runArgs(exp), output: n });
-                d.querySelector("pre").textContent = got.text;
-              } catch (err) {
-                fail(err);
-              }
-            },
-          },
-          h(
-            "summary",
-            {},
-            h("b", {}, outs[n].label || human(n)),
-            " ",
-            h("span", { class: "layr-muted small" }, `text, ${outs[n].chars} characters`),
-          ),
-          h("pre", { class: "text-result" }, outs[n].preview || ""),
-        )
-      : h(
-          "div",
-          { class: "layr-card value-card" },
-          h("div", { class: "layr-muted small" }, outs[n].label || human(n)),
-          h("div", { class: "big-number" }, PG.valueText(outs[n].value)),
-        );
-  put(
-    body,
-    h(
-      "div",
-      { class: "page wide" },
-      values.length ? h("div", { class: "values" }, values.map(valueCard)) : null,
-      figBox,
-      tableNames.length || stepTables.length
-        ? h(
-            "div",
-            { class: "section-head" },
-            sel,
-            h("span", { class: "layr-muted small" }, " Click a number to see how it was calculated."),
-          )
-        : null,
-      tbox,
-    ),
-  );
-  if (!S.table) {
-    put(tbox, values.length || figs.length ? null : h("div", { class: "layr-empty" }, "This run returned nothing to show."));
-    return;
-  }
-  const data = await call("result_table", { ...runArgs(exp), table: S.table, limit: 2000 });
-  if (t !== token) return;
-  filteredTable(tbox, exp, S.table, data);
+  // the list's right edge is dragged to make it wider (the list scrolls inside a frame that holds the strip)
+  const side = h("div", { class: "result-side" }, list);
+  const grid = h("div", { class: "results" }, side, shown);
+  put(body, grid);
+  resizable(side, {
+    edge: "right",
+    min: 150,
+    max: () => Math.max(150, grid.clientWidth - 320),
+    enabled: () => sideBySide(),
+    size: sizeOf("results.list"),
+    apply: (px) => (px == null ? grid.style.removeProperty("--list-w") : grid.style.setProperty("--list-w", `${px}px`)),
+    title: "Drag to make the list wider or narrower · double-click for the usual width",
+  });
+  choose(pick, { target: target && target.result === pick ? target : null, value });
 }
 
-/** A table with a filter for each column of a few repeated texts, every number clickable (how was it calculated). */
-function filteredTable(box, exp, tableName, data, only) {
+/** A short-lived highlight on an element (a linked number), scrolled into the middle of the view. */
+function spotlight(el) {
+  if (!el) return;
+  el.classList.add("cell-focus");
+  requestAnimationFrame(() => el.scrollIntoView({ block: "center", inline: "center" }));
+  setTimeout(() => el.classList.remove("cell-focus"), 6000);
+}
+
+/**
+ * The picked entry of the Results list, drawn into `box`. focus: {target: {row, column, why}} a number of the table
+ * to show highlighted (a link to it), {value: name} a single value to highlight among the numbers.
+ */
+async function drawResult(box, exp, run, entry, outs, t, focus = {}) {
+  const mine = (box.dataset.ticket = String(Number(box.dataset.ticket || 0) + 1));
+  const stale = () => t !== token || box.dataset.ticket !== mine;
+  const linkButton = (args, what) =>
+    h(
+      "button",
+      {
+        class: "layr-button small ghost result-link",
+        title: `Copy a link to ${what} for a Wiki page (pasted there, it shows it and stays up to date)`,
+        onclick: () => copyLink(args),
+      },
+      "Copy link",
+    );
+  const head = (title, sub, link = true) =>
+    h(
+      "div",
+      { class: "result-head" },
+      h("h3", {}, title),
+      sub ? h("span", { class: "layr-muted small" }, sub) : null,
+      link ? [h("span", { class: "layr-spacer" }), linkButton({ experiment: exp.id, result: entry.id }, "it")] : null,
+    );
+  put(box, head(entry.label, entry.sub, false), h("span", { class: "layr-spinner" }));
+  try {
+    if (entry.kind === "numbers") {
+      const values = Object.keys(outs).filter((n) => outs[n].kind === "value");
+      const cards = values.map((n) =>
+        h(
+          "div",
+          {
+            class: "layr-card value-card",
+            "data-name": n,
+            oncontextmenu: (e) =>
+              layr.ui.contextMenu(
+                [{ label: "Copy link to this number", icon: "link", run: () => copyLink({ experiment: exp.id, result: n }) }],
+                e,
+              ),
+          },
+          h("div", { class: "value-top" }, h("div", { class: "layr-muted small" }, outs[n].label || human(n)), linkButton({ experiment: exp.id, result: n }, "this number")),
+          h("div", { class: "big-number" }, PG.valueText(outs[n].value)),
+        ),
+      );
+      put(box, head("Numbers", entry.sub, false), h("div", { class: "values" }, cards));
+      if (focus.value) spotlight(cards[values.indexOf(focus.value)]);
+    } else if (entry.kind === "text") {
+      const got = await call("result_value", { run: run.run, output: entry.id });
+      if (stale()) return;
+      put(box, head(entry.label, entry.sub), h("pre", { class: "text-result" }, got.text ?? ""));
+    } else if (entry.kind === "figure") {
+      const src = await figureOf({ run: run.run, output: entry.id });
+      if (stale()) return;
+      put(
+        box,
+        head(entry.label),
+        src ? h("img", { src, class: "fig", alt: entry.label }) : h("div", { class: "layr-muted" }, "This figure can't be shown."),
+      );
+    } else {
+      let data = await call("result_table", { run: run.run, table: entry.id, limit: 2000 });
+      if (stale()) return;
+      // a linked number: its row, even past the rows read at first
+      const target = focus.target;
+      let cell = null;
+      if (target?.row) {
+        let r = data.rows.find((x) => rowHas(x, target.row));
+        if (!r && data.total > data.rows.length) {
+          const more = await call("result_table", { run: run.run, table: entry.id, where: target.row, limit: 2 }).catch(() => null);
+          if (stale()) return;
+          if (more?.rows?.length === 1) {
+            r = more.rows[0];
+            data = { ...data, rows: [...data.rows, r] };
+          }
+        }
+        if (r) cell = { row: r, column: target.column, why: target.why };
+        else
+          layr.ui.notify(
+            `No row of ${entry.label} has ${Object.entries(target.row).map(([k, v]) => `${k} ${v}`).join(", ")} any more.`,
+            "warning",
+          );
+      }
+      const tbox = h("div", {});
+      put(
+        box,
+        head(entry.label, entry.kind === "step" ? "the table this step gave" : null),
+        h(
+          "div",
+          { class: "layr-muted small" },
+          "Click a number to see how it was calculated; right-click a cell to copy a link to it (for a Wiki page).",
+        ),
+        tbox,
+      );
+      filteredTable(tbox, exp, entry.id, data, null, cell);
+    }
+  } catch (err) {
+    if (!stale()) put(box, head(entry.label, null, false), h("div", { class: "layr-error" }, cleanError(err)));
+  }
+}
+
+/** A table cell's right-click menu: how its number was calculated, a link to it. */
+function cellMenu(exp, tableName, row, column, rows, ev) {
+  const number = typeof row[column] === "number";
+  layr.ui.contextMenu(
+    [
+      number ? { label: "How was this number calculated?", icon: "functions", run: () => showProvenance(exp, tableName, row, column, rows) } : null,
+      {
+        label: number ? "Copy link to this number" : "Copy link to this value",
+        icon: "link",
+        run: () => copyCellLink(exp, tableName, row, column, rows),
+      },
+    ].filter(Boolean),
+    ev,
+  );
+}
+
+/**
+ * A table with a filter for each column of a few repeated texts, every number clickable (how was it calculated), a
+ * right-click on a cell for its menu. focus: {row (one of data.rows), column, why}: that cell is scrolled into view and
+ * highlighted for a few seconds, with no filter on (why: its "how was it calculated" opens too).
+ */
+function filteredTable(box, exp, tableName, data, only, focus = null) {
   const filterCols = (
     only ||
     data.columns.filter((c) => {
@@ -1392,10 +2025,19 @@ function filteredTable(box, exp, tableName, data, only) {
         ),
         h("span", { class: "layr-muted small" }, `${rows.length} of ${data.total} rows`),
       ),
-      table(rows, data.columns, { onCell: (r, c) => showProvenance(exp, tableName, r, c, data.rows) }),
+      table(rows, data.columns, {
+        onCell: (r, c) => showProvenance(exp, tableName, r, c, data.rows),
+        onMenu: (r, c, e) => cellMenu(exp, tableName, r, c, data.rows, e),
+        focus: first ? focus : null,
+      }),
     );
   };
+  let first = !!focus;
   draw();
+  if (!first) return;
+  first = false;
+  spotlight(box.querySelector(".cell-focus"));
+  if (focus.why) showProvenance(exp, tableName, focus.row, focus.column, data.rows);
 }
 
 /** The columns that pick out one row, to ask how one of its numbers was calculated: texts first, then whole numbers,
@@ -1424,9 +2066,49 @@ async function showProvenance(exp, tableName, row, column, rows) {
   try {
     const p = await call("provenance", { ...runArgs(exp), table: tableName, where, column });
     const chain = p.chain || [];
+    // the chain's last step can be a number that came in from another experiment: open it there, and how it came
+    const source = (c, i) =>
+      h(
+        "div",
+        { class: "prov-step prov-source" },
+        h(
+          "div",
+          {},
+          h("span", { class: "stepnum" }, i + 1),
+          h("b", {}, "From the experiment ", c.title || c.experiment),
+          " ",
+          kindBadge("source"),
+          " = ",
+          h("b", {}, fmt(c.value)),
+        ),
+        h(
+          "div",
+          { class: "layr-muted small" },
+          c.sentence ||
+            [`its table ${tableWord(c.result)}`, ...Object.entries(c.where || {}).map(([k, v]) => `${k} ${v}`), c.column]
+              .filter(Boolean)
+              .join(" · "),
+        ),
+        h(
+          "button",
+          {
+            class: "layr-button small prov-open",
+            title: "Open that experiment's table at this number, and how it was calculated there",
+            onclick: () => {
+              dialog.close();
+              show({
+                exp: c.experiment,
+                result: c.result,
+                ...(c.where && Object.keys(c.where).length && c.column ? { cell: { row: c.where, column: c.column }, why: true } : {}),
+              });
+            },
+          },
+          "Open it there",
+        ),
+      );
     const body = chain.length
       ? chain.map((c, i) =>
-          h(
+          c.kind === "source" ? source(c, i) : h(
             "div",
             { class: `prov-step level-${Math.min(c.level || 0, 4)}` },
             h(
@@ -1462,7 +2144,18 @@ async function showProvenance(exp, tableName, row, column, rows) {
     await openDialog({
       title: `How ${column} = ${fmt(row[column])} was calculated`,
       body: [h("div", { class: "layr-muted small" }, keys.map((k) => `${k} ${row[k]}`).join(" · ")), body],
-      buttons: [{ label: "Close", id: null }],
+      buttons: [
+        {
+          label: "Copy link to this number",
+          kind: "ghost",
+          title: "For a Wiki page: pasted there, it shows this number and says when it changed",
+          value: () => {
+            copyCellLink(exp, tableName, row, column, rows);
+            return undefined; // the dialog stays open
+          },
+        },
+        { label: "Close", id: null },
+      ],
     });
   } catch (err) {
     fail(err);
@@ -1831,7 +2524,8 @@ async function editKinds(exp) {
     const r = await call("method_declare", { method: exp.method, what: "corrections", value: got, change: "Changed the kinds of correction" });
     if (r.saved === false && !r.draft) return layr.ui.notify(r.note || "Not saved.", "error");
     layr.ui.notify(`Saved as version ${r.version} of the method`, "success");
-    go({});
+    await refreshMethodMeta();
+    render();
   } catch (err) {
     fail(err);
   }
@@ -1866,7 +2560,33 @@ async function tabSettings(body, exp) {
       ),
     ),
   );
+  // a result of other experiments: the experiments picked as chips (each opens it, × stops reading it), the picker
+  const resultRow = (inp) => {
+    // a deleted experiment is named by the title its last reading knew (the backend only has its id)
+    const items = (exp.sources?.[inp.id] || []).map((s) => {
+      const known = s.missing && (exp.outdated || []).find((o) => o.experiment === s.experiment)?.title;
+      return known ? { ...s, title: `${known} (deleted)` } : s;
+    });
+    const err = h("div", { class: "layr-error small", hidden: true });
+    return h(
+      "div",
+      { class: "file-row src-input", "data-input": inp.id },
+      h("span", {}, inp.label || inp.id, ": "),
+      SRC.chips(items, {
+        onRemove: async (i) => {
+          const left = items.filter((_, k) => k !== i).map(({ experiment, result }) => ({ experiment, result }));
+          const problem = await saveSources(exp, inp.id, left);
+          if (!problem) return render();
+          put(err, problem);
+          err.hidden = false;
+        },
+      }),
+      h("button", { class: "layr-button small", onclick: () => pickSources(exp, inp.id) }, items.length ? "Change…" : "Pick experiments…"),
+      err,
+    );
+  };
   const files = (exp.method_inputs || []).map((inp) => {
+    if (inp.kind === "result") return resultRow(inp);
     const f = exp.inputs?.[inp.id];
     return h(
       "div",
@@ -1908,8 +2628,11 @@ async function tabSettings(body, exp) {
       for (const p of defs)
         if (JSON.stringify(params[p.id]) !== JSON.stringify(exp.resolved_params[p.id])) changed[p.id] = params[p.id];
       await call("experiment_update", { experiment: exp.id, title: title.value, notes: notes.value, params: changed });
-      layr.ui.notify("Saved. Press Run to recalculate.", "success");
-      render();
+      if (Object.keys(changed).length) startRun(exp.id); // calculated again with the new settings
+      else {
+        layr.ui.notify("Saved", "success");
+        render();
+      }
     } catch (err) {
       fail(err);
     }
@@ -1923,7 +2646,7 @@ async function tabSettings(body, exp) {
       title,
       h("label", { class: "layr-label" }, "Notes"),
       notes,
-      h("h4", {}, "Raw data"),
+      h("h4", {}, (exp.method_inputs || []).some((i) => i.kind === "result") ? "What it reads" : "Raw data"),
       files,
       h(
         "p",
@@ -1936,38 +2659,60 @@ async function tabSettings(body, exp) {
         { class: "row-end sticky" },
         h(
           "button",
-          {
-            class: "layr-button danger ghost",
-            onclick: async () => {
-              if (
-                await openDialog({
-                  title: "Delete this experiment?",
-                  body: "Its runs and its rows in the results database go too. Raw files stay in the store.",
-                  buttons: [
-                    { label: "Cancel", id: false, kind: "ghost" },
-                    { label: "Delete", id: true, kind: "danger" },
-                  ],
-                })
-              ) {
-                try {
-                  await call("experiment_delete", { experiment: exp.id });
-                  go({ view: "home", exp: null });
-                } catch (err) {
-                  fail(err);
-                }
-              }
-            },
-          },
+          { class: "layr-button danger ghost", onclick: () => deleteExperiment(exp) },
           "Delete experiment",
         ),
         h("span", { class: "layr-spacer" }),
-        h("button", { class: "layr-button primary", onclick: saveAll }, "Save settings"),
+        h(
+          "button",
+          { class: "layr-button primary", onclick: saveAll, title: "Save, then calculate the experiment with the new settings" },
+          "Save and run",
+        ),
       ),
     ),
   );
   if (S.setting) {
     document.getElementById(`set-${S.setting}`)?.scrollIntoView({ block: "center" });
     S.setting = null;
+  }
+}
+
+/**
+ * Deletes the experiment after asking. When other experiments read its results the backend refuses, naming them:
+ * that sentence is shown, with "Delete anyway" (they then show it as missing).
+ */
+async function deleteExperiment(exp) {
+  const ok = await openDialog({
+    title: "Delete this experiment?",
+    body: "Its runs go too. Raw files stay in the store.",
+    buttons: [
+      { label: "Cancel", id: false, kind: "ghost" },
+      { label: "Delete", id: true, kind: "danger" },
+    ],
+  });
+  if (!ok) return;
+  const gone = () => go({ view: "home", exp: null });
+  try {
+    await call("experiment_delete", { experiment: exp.id });
+    return gone();
+  } catch (err) {
+    const refusal = cleanError(err);
+    if (!/read the results of/.test(refusal)) return fail(err);
+    const anyway = await openDialog({
+      title: "Other experiments read it",
+      body: h("p", {}, refusal.replace(/ \(force\)/, "").replace(/ \(e[0-9a-f]{8}\)/g, "")),
+      buttons: [
+        { label: "Keep it", id: false, kind: "ghost" },
+        { label: "Delete anyway", id: true, kind: "danger" },
+      ],
+    });
+    if (!anyway) return;
+    try {
+      await call("experiment_delete", { experiment: exp.id, force: true });
+      gone();
+    } catch (err2) {
+      fail(err2);
+    }
   }
 }
 
@@ -1982,7 +2727,7 @@ function editor(p, params) {
     return h("input", {
       class: "layr-input num",
       type: "number",
-      step: "any",
+      step: p.type === "integer" ? "1" : "any",
       value: v ?? "",
       placeholder: "empty: none",
       onchange: (e) => set(e.target.value === "" ? null : Number(e.target.value)),
@@ -2003,47 +2748,26 @@ function editor(p, params) {
         ),
     });
   }
-  if (p.type === "compounds")
-    return rowsEditor(
-      Object.entries(v || {}).map(([name, sp]) => ({ name, rt: sp.rt, tol: sp.rt_tolerance_min })),
-      [
-        ["name", "Compound", "text"],
-        ["rt", "Retention time (min)", "number"],
-        ["tol", "Own tolerance (min)", "number"],
-      ],
-      (rows) =>
-        set(
+  if (p.type === "rows") {
+    // a table typed in by hand, with the columns the method declares; empty optional cells are left out
+    if (p.problem) return h("div", { class: "layr-error small" }, p.problem);
+    const cols = p.columns || [];
+    const clean = (rows) =>
+      rows
+        .map((r) =>
           Object.fromEntries(
-            rows
-              .filter((r) => r.name)
-              .map((r) => [
-                r.name,
-                r.tol != null && r.tol !== "" ? { rt: r.rt, rt_tolerance_min: r.tol } : { rt: r.rt },
-              ]),
+            cols.filter((c) => r[c.id] !== undefined && r[c.id] !== null && r[c.id] !== "").map((c) => [c.id, r[c.id]]),
           ),
-        ),
-    );
-  if (p.type === "patterns")
+        )
+        .filter((r) => Object.keys(r).length);
     return rowsEditor(
-      (v || []).map((x) => ({ ...x })),
-      [
-        ["role", "Role", "text"],
-        ["regex", "Pattern (regular expression)", "text"],
-      ],
-      (rows) => set(rows.filter((r) => r.regex)),
-    );
-  if (p.type === "biomass") {
-    const isMap = v && typeof v === "object";
-    return rowsEditor(
-      isMap ? Object.entries(v).map(([sub, val]) => ({ sub, val })) : [{ sub: "*", val: v }],
-      [
-        ["sub", "Fed substrate (* = all)", "text"],
-        ["val", "gCDW/L", "number"],
-      ],
-      (rows) => {
-        const r = rows.filter((x) => x.sub && x.val != null && x.val !== "");
-        set(r.length === 1 && r[0].sub === "*" ? r[0].val : Object.fromEntries(r.map((x) => [x.sub, x.val])));
-      },
+      (Array.isArray(v) ? v : []).map((r) => ({ ...r })),
+      cols.map((c) => ({
+        id: c.id,
+        label: `${c.label || human(c.id)}${c.unit ? ` (${c.unit})` : ""}${c.optional ? " (optional)" : ""}`,
+        type: c.type,
+      })),
+      (rows) => set(clean(rows)),
     );
   }
   if (p.type === "object") {
@@ -2066,8 +2790,32 @@ function editor(p, params) {
   return h("input", { class: "layr-input", value: v ?? "", onchange: (e) => set(e.target.value || null) });
 }
 
+/** Rows typed in by hand: cols [{id, label, type: text | number | integer | boolean}]; onChange(rows) after each edit. */
 function rowsEditor(rows, cols, onChange) {
   const wrap = h("div", { class: "rows-editor" });
+  const cellInput = (r, c) => {
+    if (c.type === "boolean")
+      return h("input", {
+        type: "checkbox",
+        checked: !!r[c.id],
+        onchange: (e) => {
+          r[c.id] = e.target.checked;
+          onChange(rows);
+        },
+      });
+    const numeric = c.type === "number" || c.type === "integer";
+    return h("input", {
+      class: `layr-input ${numeric ? "num" : ""}`,
+      type: numeric ? "number" : "text",
+      step: c.type === "integer" ? "1" : "any",
+      value: r[c.id] ?? "",
+      "aria-label": c.label,
+      onchange: (e) => {
+        r[c.id] = numeric ? (e.target.value === "" ? null : Number(e.target.value)) : e.target.value;
+        onChange(rows);
+      },
+    });
+  };
   const draw = () => {
     put(
       wrap,
@@ -2077,29 +2825,14 @@ function rowsEditor(rows, cols, onChange) {
         h(
           "tr",
           {},
-          cols.map(([, label]) => h("th", {}, label)),
+          cols.map((c) => h("th", {}, c.label)),
           h("th"),
         ),
         rows.map((r, i) =>
           h(
             "tr",
             {},
-            cols.map(([k, , type]) =>
-              h(
-                "td",
-                {},
-                h("input", {
-                  class: `layr-input ${type === "number" ? "num" : ""}`,
-                  type: type === "number" ? "number" : "text",
-                  step: "any",
-                  value: r[k] ?? "",
-                  onchange: (e) => {
-                    r[k] = type === "number" ? (e.target.value === "" ? null : Number(e.target.value)) : e.target.value;
-                    onChange(rows);
-                  },
-                }),
-              ),
-            ),
+            cols.map((c) => h("td", {}, cellInput(r, c))),
             h(
               "td",
               {},
@@ -2107,7 +2840,7 @@ function rowsEditor(rows, cols, onChange) {
                 "button",
                 {
                   class: "layr-button small ghost icon",
-                  title: "Remove",
+                  title: "Remove this row",
                   onclick: () => {
                     rows.splice(i, 1);
                     onChange(rows);
@@ -2129,7 +2862,7 @@ function rowsEditor(rows, cols, onChange) {
             draw();
           },
         },
-        "+ Add",
+        "+ Add a row",
       ),
     );
   };
@@ -2137,16 +2870,19 @@ function rowsEditor(rows, cols, onChange) {
   return wrap;
 }
 
-// ------------------------------------------------------------------------------------------------ method (code)
+// ------------------------------------------------------------------------------------------------ flow & code
 
-// The method editor: the outline on the left, the code in the middle (CodeMirror 6 through editor.js), and on the right
-// the function at the cursor explained (its sentence, its formula drawn from the code, the last run's numbers) and the
-// style checker's messages. Help while typing comes from the backend (Jedi), the shown run's values sit at the ends of
-// the lines of the function at the cursor, its checks are folded. Saving makes a new version; a change Claude proposed
-// waits in a banner and is reviewed chunk by chunk.
+// The Flow & code tab: the flow on top (editable), a bar to fold the code away or bring it back (and to drag), and
+// under it the outline on the left, the code in the middle (CodeMirror 6 through editor.js) and on the right the
+// function at the cursor explained (its sentence, its formula drawn from the code, the shown run's numbers) and the
+// style checker's messages. Help while typing comes from the backend (Jedi); the shown run's values sit at the ends
+// of the lines of the function at the cursor, its checks are folded. A change (typed, or made in the flow) is tried
+// on the open experiment by itself (a trial run); Save makes a new version of the method, then the experiment runs
+// for real. A change Claude proposed waits in a banner and is reviewed chunk by chunk.
 //
-// The parts (banners, outline, editor with its status line, inspector, draft review) are drawn by their own functions
-// into `ME.els`, so another layout (the flow above the editor) can place them again.
+// `ME` lives as long as the workspace shows the same method: switching experiments or tabs keeps the editor, the
+// flow and unsaved code. Its parts (banners, flow, bar, outline, editor with its status line, inspector) are drawn by
+// their own functions into `ME.els`.
 let ME = null;
 let toolboxCache = null;
 
@@ -2159,12 +2895,14 @@ async function toolboxList() {
   return toolboxCache;
 }
 
-/** Ends the method screen: the flow, the editor, its hover card and a draft review are taken off the page. */
-function closeMethod() {
+/** Ends the workspace: the flow, the editor, its hover card and a draft review are taken off the page. */
+function closeWork() {
   if (!ME) return;
   ME.review?.merge?.destroy();
   ME.flow?.destroy();
   ME.ed?.destroy();
+  ME.rounds?.destroy();
+  for (const r of [ME.els?.flowRz, ME.els?.outlineRz, ME.els?.inspectorRz]) r?.destroy();
   clearTimeout(ME.checkTimer);
   clearTimeout(ME.cursorTimer);
   clearTimeout(ME.metaTimer);
@@ -2172,21 +2910,26 @@ function closeMethod() {
   ME = null;
 }
 
-// For the end-to-end test and for poking at it in the developer tools.
+// For the end-to-end tests and for poking at it in the developer tools.
 window.__lab = {
   editor: () => ME?.ed || null,
   merge: () => ME?.review?.merge || null,
-  flow: () => (S.view === "method" ? ME?.flow : EF?.flow) || null,
+  flow: () => ME?.flow || null,
+  rounds: () => ME?.rounds || null,
   format: () => formatCode(),
   claudeStep: (o) => claudeStep(o),
+  show: (target) => show(target),
+  panel: () => ({ ...S }),
   state: () =>
     ME && {
       dirty: ME.dirty,
       trialRun: ME.trialRun,
       trialNote: ME.trialNote?.text || "",
       busy: !!ME.busy || ME.inspecting > 0,
-      numbersExp: ME.numbersExp,
+      exp: ME.exp,
       fn: ME.fn,
+      code: S.code,
+      version: ME.m?.version,
     },
 };
 
@@ -2211,7 +2954,7 @@ function comparisonBlock(c, lead = null) {
       h("b", {}, c.summary || ""),
       c.experiment_title ? h("span", { class: "layr-muted" }, ` on ${c.experiment_title}`) : null,
     ),
-    // folded to one line until she asks: the method screen keeps its room for the flow and the code
+    // folded to one line until she asks: the workspace keeps its room for the flow and the code
     moved.length
       ? h("details", { class: "cmp-tables" }, h("summary", {}, "Which numbers"), moved.map((t) =>
       h(
@@ -2253,23 +2996,9 @@ function comparisonBlock(c, lead = null) {
   );
 }
 
-async function renderMethod(t) {
-  const [m, docs, exps] = await Promise.all([
-    call("method_get", { method: S.method }),
-    toolboxList(),
-    call("experiments"),
-  ]);
-  if (t !== token) return;
-  await checkAi();
-  layr.panel.setTitle(m.name).catch(() => {});
-  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: `${m.name} (method)` }]);
-  const mine = exps.filter((e) => e.method === m.id);
-  const keep = ME && ME.method === m.id && ME.dirty ? ME.ed.getValue() : null;
-  const keepAi = ME && ME.method === m.id ? ME.aiStep : null;
-  closeMethod();
-  const numbersExp = mine.some((e) => e.experiment === S.numbersExp)
-    ? S.numbersExp
-    : m.reference || mine.find((e) => e.last_run?.status === "done")?.experiment || null;
+/** The workspace's method is opened: the flow and the editor are mounted, the code's parts drawn. */
+function openWork(m, docs, mine, expObj) {
+  closeWork();
   ME = {
     method: m.id,
     m,
@@ -2277,40 +3006,37 @@ async function renderMethod(t) {
     dirty: false,
     messages: m.check || [],
     summary: m.summary,
-    fn: S.fn || null,
+    fn: null, // set by revealTarget from S.fn
     toolbox: docs,
-    exps: mine,
-    numbersExp,
-    pickedRun: null, // an earlier run picked in the flow
+    mine, // the experiments of this method
+    expObj, // the open experiment (experiment_get)
+    exp: S.exp, // the experiment whose data the flow and the code show
     trialRun: null, // the newest trial run of the code as it is in the editor
     trialRunSource: null, // the code that trial run calculated
     inspecting: 0, // explanations being fetched
     trialSource: m.source, // the code the shown numbers belong to (a trial run is made when it differs)
     trialNote: null,
-    flowSource: keep ?? m.source, // the code the flow was last drawn from
+    flowSource: m.source, // the code the flow was last drawn from
     flowSel: null,
-    aiStep: keepAi, // {fn}: a step Claude wrote, not saved yet
+    aiStep: null, // {fn}: a step Claude wrote, not saved yet
     ai: null,
     inside: new Map(), // "run or experiment|function" → {promise, value} of function_inside
+    shownInside: null, // function_inside of the function whose values the code shows
+    rounds: null, // the rounds tables of its loops (rounds.js), in roundsBox beside the code
+    roundsKey: null,
+    roundsBox: h("div", { class: "rounds-box" }),
     tickets: { hover: 0, values: 0, check: 0, trial: 0 },
     review: null,
     busy: false,
   };
-  const els = methodParts();
-  ME.els = els;
-  put(view, h("div", { class: "mv" }, els.banners, els.main));
-  layoutMethod();
-  ME.ed = mountMethodEditor(els.editor, keep ?? m.source);
-  ME.flow = mountMethodFlow(els.flow, keep ?? m.source);
-  methodActions();
+  ME.els = workParts();
+  layoutCode();
+  ME.ed = mountMethodEditor(ME.els.editor, m.source);
+  ME.flow = mountMethodFlow(ME.els.flow, m.source);
   drawBanners();
   drawOutline();
   drawLint();
   drawStatus();
-  if (keep) onMethodEdit();
-  const target = S.line || (ME.summary?.outline || []).find((x) => x.name === ME.fn)?.line;
-  if (target) setTimeout(() => ME?.ed.reveal(target), 30);
-  S.line = null;
   drawInspector();
   drawValues();
   lateCheck(m);
@@ -2327,58 +3053,143 @@ function lateCheck(m) {
     ME.metaTimer = setTimeout(() => refreshMethodMeta({ late: true }), 45000);
 }
 
-/** The method screen's parts, empty: each is filled by its own draw function. */
-function methodParts() {
+/** The workspace's parts, empty: each is filled by its own draw function. */
+function workParts() {
   const els = {
+    ws: h("div", { class: "ws" }),
+    tabs: h("div", { class: "tabs", role: "tablist" }),
+    wsBanners: h("div", { class: "ws-banners" }),
+    body: h("div", { class: "tab-body" }),
+    main: h("div", { class: "code-tab" }),
     banners: h("div", { class: "mv-banners" }),
-    main: h("div", { class: "mv-main" }),
     flow: h("div", { class: "mv-flow" }),
-    divider: h("div", { class: "mv-divider", title: "Drag to give the flow or the code more room" }),
+    bar: h("div", { class: "code-bar" }),
     outline: h("div", { class: "mv-outline" }),
     editor: h("div", { class: "mv-editor" }),
     status: h("div", { class: "mv-status small" }),
     inspector: h("div", { class: "mv-inspector" }),
   };
+  els.ws.append(els.tabs, els.wsBanners, els.body);
   els.middle = h("div", { class: "mv-middle" }, els.editor, els.status);
-  els.grid = h("div", { class: "mv-grid" }, els.outline, els.middle, els.inspector);
+  // the outline and the explanation scroll inside a frame that holds their resize strip
+  els.outlineCol = h("div", { class: "mv-col" }, els.outline);
+  els.inspectorCol = h("div", { class: "mv-col" }, els.inspector);
+  els.grid = h("div", { class: "mv-grid" }, els.outlineCol, els.middle, els.inspectorCol);
+  els.split = h("div", { class: "mv-split" }, els.flow, els.bar, els.grid);
+  // their widths: the outline's right edge and the explanation's left edge are dragged; the code takes the rest
+  const codeRoom = 320;
+  const col = (el, edge, place, other, min) =>
+    resizable(el, {
+      edge,
+      min,
+      max: () => els.grid.clientWidth - other().offsetWidth - codeRoom,
+      enabled: () => S.code && sideBySide(),
+      size: sizeOf(place),
+      apply: (px) =>
+        px == null ? els.grid.style.removeProperty(`--${place.slice(5)}-w`) : els.grid.style.setProperty(`--${place.slice(5)}-w`, `${px}px`),
+      title: "Drag to make it wider or narrower · double-click for the usual width",
+    });
+  els.outlineRz = col(els.outlineCol, "right", "work.outline", () => els.inspectorCol, 130);
+  els.inspectorRz = col(els.inspectorCol, "left", "work.inspector", () => els.outlineCol, 220);
+  // the bar between the flow and the code: its button folds the code away or brings it back; dragged (while the code
+  // shows) it gives the flow or the code more room (remembered as a share of the tab), a double click puts it back
+  const splitH = () => Math.max(1, els.split.clientHeight);
+  els.flowRz = resizable(els.flow, {
+    edge: "bottom",
+    handle: els.bar,
+    ignore: (e) => !!e.target.closest("button"),
+    enabled: () => S.code && sideBySide(),
+    min: 120,
+    max: () => splitH() - els.bar.offsetHeight - 160,
+    size: {
+      get: () => (S.flowFrac == null ? null : S.flowFrac * splitH()),
+      set: (px) => {
+        S.flowFrac = px == null ? null : +(px / splitH()).toFixed(4);
+        save();
+      },
+    },
+    measure: () => els.flow.offsetHeight,
+    apply: (px) => {
+      if (!S.code) return;
+      const f = px == null ? 0.42 : px / splitH();
+      els.split.style.gridTemplateRows = `minmax(120px, ${(f * 100).toFixed(1)}%) auto minmax(160px, 1fr)`;
+    },
+    title: "Drag to give the flow or the code more room · double-click to put it back in the middle",
+  });
   return els;
 }
 
-/** The flow on top, a divider she can drag (remembered), the outline, the code and the explanation under it. */
-function layoutMethod() {
+/** The flow, the bar and the code back in the tab (after a review took their place). */
+function layoutCode() {
+  put(ME.els.main, ME.els.banners, ME.els.split);
+  applyFold();
+}
+
+/** The code shown under the flow, or folded away: then the flow fills the tab and looks inside a box in its own
+ * side panel (unfolded, a box shows its function in the code). */
+function applyFold() {
   const els = ME.els;
-  const split = h("div", { class: "mv-split" }, els.flow, els.divider, els.grid);
-  put(els.main, split);
-  const apply = () => {
-    const f = Math.min(0.8, Math.max(0.15, Number(S.flowFrac) || 0.42));
-    split.style.gridTemplateRows = `minmax(120px, ${(f * 100).toFixed(1)}%) 7px minmax(160px, 1fr)`;
-  };
-  apply();
-  els.divider.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    els.divider.setPointerCapture(e.pointerId);
-    els.divider.classList.add("dragging");
-    const box = split.getBoundingClientRect();
-    const move = (ev) => {
-      S.flowFrac = (ev.clientY - box.top) / Math.max(1, box.height);
-      apply();
-    };
-    const up = () => {
-      els.divider.removeEventListener("pointermove", move);
-      els.divider.removeEventListener("pointerup", up);
-      els.divider.classList.remove("dragging");
-      apply();
-      save();
-    };
-    els.divider.addEventListener("pointermove", move);
-    els.divider.addEventListener("pointerup", up);
-  });
-  els.divider.addEventListener("dblclick", () => {
-    S.flowFrac = 0.42;
-    apply();
-    save();
-  });
+  els.split.classList.toggle("folded", !S.code);
+  els.split.style.gridTemplateRows = S.code ? "minmax(120px, 42%) auto minmax(160px, 1fr)" : "minmax(0, 1fr) auto";
+  els.grid.hidden = !S.code;
+  if (S.code) for (const r of [els.flowRz, els.outlineRz, els.inspectorRz]) r.refresh(); // the sizes she gave them
+  put(
+    els.bar,
+    h(
+      "button",
+      {
+        class: "layr-button small code-toggle",
+        "aria-expanded": S.code ? "true" : "false",
+        title: S.code ? "Fold the code away: the flow fills the tab" : "Show the method's code under the flow",
+        onclick: () => setCode(!S.code),
+      },
+      S.code ? "▾ Hide the code" : "▴ Show the code",
+    ),
+    S.code
+      ? h("span", { class: "code-grip", title: "Drag to give the flow or the code more room" })
+      : h("span", { class: "layr-muted small code-hint" }, "the outline, the code and what each function does"),
+    !S.code && ME.dirty ? h("span", { class: "dirty small" }, "Unsaved changes") : null,
+  );
+  ME.flow?.setInside(S.code ? "host" : "panel");
+}
+
+function setCode(on) {
+  if (!ME || S.code === !!on) return;
+  S.code = !!on;
+  save();
+  codeShown();
+}
+
+/** The code is shown or folded as S.code says (after setCode, or a link that changed S.code: see drawWork). */
+function codeShown() {
+  applyFold();
+  if (S.code) {
+    ME.ed.view.requestMeasure();
+    // what was picked in the flow while the code was folded
+    drawOutline();
+    drawInspector();
+    drawValues();
+    const line = ME.pendingLine || (ME.summary?.outline || []).find((x) => x.name === ME.fn)?.line;
+    ME.pendingLine = null;
+    if (line) setTimeout(() => ME?.ed.reveal(line, { select: false }), 30);
+  }
+}
+
+/** The function or line a link asked for (S.fn, S.line) is shown in the code, once. */
+function revealTarget() {
+  if (!ME) return;
+  const changed = S.fn && S.fn !== ME.fn;
+  if (changed) {
+    ME.fn = S.fn;
+    drawOutline();
+    drawInspector();
+    drawValues();
+  }
+  const line = S.line || (changed ? (ME.summary?.outline || []).find((x) => x.name === S.fn)?.line : null);
+  S.line = null;
+  if (!line) return;
+  if (S.code) setTimeout(() => ME?.ed.reveal(line), 30);
+  else ME.pendingLine = line;
 }
 
 // ---------- the flow above the code
@@ -2388,17 +3199,16 @@ function layoutMethod() {
  * code they belong to (`source`), so that numbers of other code are not passed off as this code's.
  */
 function dataRef() {
-  if (!ME?.numbersExp) return null;
+  if (!ME?.exp) return null;
   if (ME.trialRun) return { key: ME.trialRun, args: { run: ME.trialRun }, source: ME.trialRunSource };
-  if (ME.pickedRun) return { key: ME.pickedRun, args: { run: ME.pickedRun }, source: null };
-  return { key: ME.numbersExp, args: { experiment: ME.numbersExp }, source: ME.saved };
+  if (S.run) return { key: S.run, args: { run: S.run }, source: null };
+  return { key: ME.exp, args: { experiment: ME.exp }, source: ME.saved };
 }
 
 /** The code in the editor is being calculated (or will be after the pause): the numbers shown are of other code. */
 function numbersComing() {
   const ref = dataRef();
-  return !!ref && S.autoRecalc !== false && (ME.busy || ME.trialGoing) && ref.source !== ME.ed.getValue() &&
-    !ME.pickedRun;
+  return !!ref && S.autoRecalc !== false && (ME.busy || ME.trialGoing) && ref.source !== ME.ed.getValue() && !S.run;
 }
 
 function mountMethodFlow(host, source) {
@@ -2409,7 +3219,7 @@ function mountMethodFlow(host, source) {
     if (!ME || (ME.flow && ME.flow !== flow)) return;
     if (flow.graph && ME.ed) {
       cursorIn(ME.ed.cursor().line);
-      if (flow.graph.stale && S.autoRecalc !== false && ME.numbersExp && !ME.trialRun && !ME.pickedRun && !ME.busy)
+      if (flow.graph.stale && S.autoRecalc !== false && ME.exp && !ME.trialRun && !S.run && !ME.busy)
         recalc(ME.ed.getValue());
     } else if (tries < 80) setTimeout(() => sync(tries + 1), 250);
   };
@@ -2419,17 +3229,22 @@ function mountMethodFlow(host, source) {
     tex,
     method: ME.method,
     source,
-    experiment: ME.numbersExp,
-    run: null,
+    experiment: ME.exp,
+    run: S.run || null,
     editable: true,
-    inside: "host",
+    inside: S.code ? "host" : "panel",
+    picker: "runs", // the experiment is picked in the path at the top; the flow offers its earlier runs
     claude: AI.claude,
+    runNote: false, // the screen's banner says when the last run failed, with a link to the line
     figure: figureOf,
+    sizes: { get: (place) => sizeOf(`flow.${place}`).get(), set: (place, px) => sizeOf(`flow.${place}`).set(px) },
     onSource: (src, info) => flowEdited(src, info),
-    onSetting: (id, value) => flowSetting(id, value),
+    onSetting: (id, value) => settingChanged(id, value),
     onPick: (p) => flowPicked(p),
     onSelect: (s) => flowSelected(s),
     onOpen: (o) => flowOpened(o),
+    boxActions: (n) => boxActions(n),
+    copyLink: ({ fn }) => copyFunctionLink(fn),
   });
   return flow;
 }
@@ -2442,38 +3257,39 @@ function flowEdited(source, info) {
   if (info?.added?.length) ME.flowSel = info.added[info.added.length - 1];
 }
 
-/** A setting changed in a box of the method's flow: the picked experiment keeps it, and it is calculated again. */
-async function flowSetting(id, value) {
-  if (!ME?.numbersExp) return layr.ui.notify("Pick an experiment in the flow first: settings belong to it.", "info");
-  try {
-    await call("experiment_update", { experiment: ME.numbersExp, params: { [id]: value } });
-    recalc(ME.ed.getValue());
-  } catch (err) {
-    fail(err);
-  }
-}
-
-function flowPicked({ experiment, run }) {
+/** An earlier run (or the latest again) picked in the flow: the code's numbers and the other tabs follow it. */
+function flowPicked({ run }) {
   if (!ME) return;
-  ME.numbersExp = experiment || null;
-  S.numbersExp = ME.numbersExp;
-  ME.pickedRun = run || null;
+  if (run && run === ME.trialRun) return; // the trial run shown already
+  S.run = run || null;
   ME.trialRun = null;
   ME.trialSource = ME.dirty ? null : ME.saved;
   ME.trialNote = null;
   save();
   valuesChanged();
   drawInspector();
-  if (ME.dirty && S.autoRecalc !== false && experiment) settle();
+  drawStatus();
+  if (ME.expObj) put(ME.els.wsBanners, expBanners(ME.expObj, S.tab));
+  if (ME.dirty && S.autoRecalc !== false && !run) settle();
 }
 
-/** A box was selected: its function (or its recipe line) is shown in the editor. */
+/** A box was selected: its function (or its recipe line) is shown in the code (once the code is shown). */
 function flowSelected({ node, fn, line }) {
   if (!ME) return;
   if (ME.selFromEditor === node) return; // the editor's cursor selected it: nothing to move
   ME.flowSel = node;
   const own = fn && (ME.summary?.outline || []).find((f) => f.name === fn && f.kind !== "recipe");
   const toolbox = !own && fn && (ME.toolbox || []).some((t) => t.name === fn);
+  if (!S.code) {
+    // folded: the flow's own side panel shows it; the code follows when it is shown
+    if (own || toolbox) {
+      ME.fn = fn;
+      S.fn = fn;
+      save();
+    }
+    ME.pendingLine = own ? own.line : line || null;
+    return;
+  }
   if (own) jumpTo(own.line, own.name, { focus: false });
   else if (toolbox) {
     // a ready-made step: its line in the recipe is shown, and the step itself is explained (with its calls)
@@ -2487,19 +3303,13 @@ function flowSelected({ node, fn, line }) {
   } else if (line) {
     ME.ed.reveal(line);
     cursorIn(line, { fromFlow: true });
-  } else if (fn && (ME.toolbox || []).some((t) => t.name === fn)) {
-    ME.fn = fn;
-    S.fn = fn;
-    save();
-    drawOutline();
-    drawInspector();
-    drawValues();
   }
 }
 
 function flowOpened(o) {
   if (!ME) return;
   if (o.what === "function") {
+    setCode(true);
     if (o.created && o.fn) return cursorInFunction(o.fn);
     const own = o.fn && (ME.summary?.outline || []).find((f) => f.name === o.fn);
     const line = own?.line || (o.fn ? defLine(o.fn) : null) || o.line;
@@ -2507,11 +3317,24 @@ function flowOpened(o) {
     return;
   }
   if (o.what === "claude") return claudeStep(o);
-  if (o.what === "new-experiment") return newExperimentHere();
-  const exp = ME.numbersExp;
-  if (!exp) return layr.ui.notify("Pick an experiment in the flow first.", "info");
+  if (o.what === "new-experiment") return show({ view: "new", newMethod: ME.method });
+  if (o.what === "experiment") return show({ exp: o.experiment });
+  if (o.what === "sources") {
+    if (!ME.expObj) return layr.ui.notify("Pick an experiment above first: what it reads belongs to it.", "info");
+    return pickSources(ME.expObj, o.input);
+  }
   const tab = { results: "results", settings: "settings", corrections: "corrections", checks: "checks" }[o.what];
-  if (tab) go({ view: "experiment", exp, tab, table: o.table || null, setting: o.setting || null });
+  if (!tab) return;
+  if (!ME.expObj) return layr.ui.notify("Pick an experiment above first: results and settings belong to it.", "info");
+  show({ tab, result: o.table || undefined, setting: o.setting || undefined });
+}
+
+/**
+ * "Copy link" to a function of the method: with an experiment open, the step with that experiment's numbers;
+ * without one (or `codeOnly`), its code in the method.
+ */
+function copyFunctionLink(fn, { codeOnly = false } = {}) {
+  return copyLink(ME.expObj && !codeOnly ? { experiment: ME.expObj.id, function: fn } : { method: ME.method, function: fn });
 }
 
 /** The line of `def name(` in the editor, or null. */
@@ -2538,53 +3361,6 @@ function cursorInFunction(name) {
   save();
   drawOutline();
   drawInspector();
-}
-
-/**
- * The flow asked for an experiment for this method (it has a raw file and no experiment yet): she picks each file,
- * the experiment is made with the method as saved, calculated, and the flow shows its values.
- */
-async function newExperimentHere() {
-  try {
-    if (ME.dirty) {
-      const ok = await openDialog({
-        title: "Save the method first?",
-        body: "An experiment uses the method as it is saved. Save your changes as a new version, then pick the files.",
-        buttons: [
-          { label: "Cancel", id: false, kind: "ghost" },
-          { label: "Save…", id: true, kind: "primary" },
-        ],
-      });
-      if (!ok || !(await saveMethod())) return;
-    }
-    const inputs = (ME.flow?.graph?.inputs || []).filter((i) => i.kind !== "corrections");
-    if (!inputs.length) return layr.ui.notify("Add a raw file to the method first (+ Raw file in the flow).", "info");
-    const files = {};
-    for (const i of inputs) {
-      layr.ui.notify(`Choose the file for: ${i.label || i.id}`, "info");
-      const f = await pickAndStore(i.types || []);
-      if (!f) return;
-      files[i.id] = f;
-    }
-    const e = await call("experiment_create", { title: `${ME.m.name}: ${Object.values(files)[0].name}`,
-      method: ME.method, files });
-    ME.numbersExp = e.experiment;
-    S.numbersExp = e.experiment;
-    save();
-    setStatus("Calculating…");
-    const r = await call("run", { experiment: e.experiment, wait_s: 55 });
-    setStatus("");
-    if (r.status !== "done") layr.ui.notify(`The calculation stopped: ${cleanError(r.error)}`, "error");
-    if (!ME) return;
-    ME.trialRun = null;
-    ME.pickedRun = null;
-    ME.flow.update({ experiment: e.experiment, run: null, refresh: true });
-    valuesChanged();
-    drawInspector();
-  } catch (err) {
-    setStatus("");
-    fail(err);
-  }
 }
 
 const cleanError = (e) =>
@@ -2673,23 +3449,18 @@ function replaceFunction(source, name, code) {
 
 /** Claude's step as a change to review, in place of the flow and the code until she decides. */
 function reviewAiStep({ before, after, name, note, sentence }) {
-  const box = h("div", { class: "review-merge" });
+  const box = h("div", { class: "code-review-merge" });
   const counts = h("span", { class: "layr-muted small" });
   ME.review = { merge: null, ai: true };
-  const close = () => {
-    closeReview();
-    put(ME.els.main);
-    layoutMethod();
-    drawBanners();
-  };
+  const close = () => endReview();
   put(
     ME.els.main,
     h(
       "div",
-      { class: "review" },
+      { class: "code-review" },
       h(
         "div",
-        { class: "review-head" },
+        { class: "code-review-head" },
         h("div", {}, h("b", {}, `A new step written by Claude: ${name}`), h("div", { class: "layr-muted" }, sentence)),
         note ? aiAnswer(note) : null,
         h(
@@ -2707,7 +3478,7 @@ function reviewAiStep({ before, after, name, note, sentence }) {
       box,
       h(
         "div",
-        { class: "row-gap review-buttons" },
+        { class: "row-gap code-review-buttons" },
         h("button", { class: "layr-button ghost", onclick: close }, "Don't take it"),
         h("span", { class: "layr-spacer" }),
         h(
@@ -2756,7 +3527,7 @@ async function settle() {
     ME.busy = false;
     return;
   }
-  const trial = S.autoRecalc !== false && ME.numbersExp && source !== ME.trialSource;
+  const trial = S.autoRecalc !== false && ME.exp && source !== ME.trialSource;
   // the boxes are drawn from the new code at once when the recipe itself changed (a step added, a wire moved);
   // a change inside a step is drawn with the trial run's numbers, a moment later, in one go
   if (source !== ME.flowSource && (!trial || recipeOf(source) !== recipeOf(ME.flowSource))) {
@@ -2780,7 +3551,7 @@ function recipeOf(source) {
 
 /** A trial run of `source` on the picked experiment; only the newest matters. */
 async function recalc(source) {
-  if (!ME?.numbersExp) return;
+  if (!ME?.exp) return;
   const me = ME;
   me.trialSource = source;
   me.busy = true;
@@ -2804,7 +3575,7 @@ async function recalc(source) {
 }
 
 async function trialRun(source) {
-  const exp = ME.numbersExp;
+  const exp = ME.exp;
   const n = ++ME.tickets.trial;
   setTrialNote("calculating…", "run");
   let r;
@@ -2834,7 +3605,12 @@ async function trialRun(source) {
   if (r.run) {
     ME.trialRun = r.run;
     ME.trialRunSource = source;
-    ME.pickedRun = null;
+    if (S.run) {
+      // a change of the code is tried on the experiment as it is now, not on the earlier run that was picked
+      S.run = null;
+      save();
+      if (ME.expObj) put(ME.els.wsBanners, expBanners(ME.expObj, S.tab));
+    }
     ME.flowSource = source;
     // the flow, the values in the code and the explanation are fetched at once (not one after the other)
     ME.inside = new Map();
@@ -2844,7 +3620,7 @@ async function trialRun(source) {
   const total = (r.cache?.hits || 0) + (r.cache?.misses || 0);
   if (r.status === "done")
     setTrialNote(
-      `calculated just now${r.cache?.hits ? ` · ${r.cache.hits} of ${total} reused` : ""}`,
+      `calculated${r.cache?.hits ? ` · ${r.cache.hits} of ${total} reused` : ""}`,
       "ok",
     );
   else {
@@ -2967,14 +3743,23 @@ function cursorIn(line, { fromFlow = false } = {}) {
 
 const PAUSE_MS = 450;
 
+/** The code became changed or saved: the actions, the tabs (their dot), the banners and the code bar say so. */
+function dirtyChanged() {
+  if (!ME) return;
+  drawActions();
+  drawBanners();
+  applyFold();
+  if (S.view === "work" && view.contains(ME.els.ws)) {
+    drawTabs();
+    if (ME.expObj) put(ME.els.wsBanners, expBanners(ME.expObj, S.tab));
+  }
+}
+
 function onMethodEdit({ now = false } = {}) {
   if (!ME) return;
   const wasDirty = ME.dirty;
   ME.dirty = ME.ed.getValue() !== ME.saved;
-  if (wasDirty !== ME.dirty) {
-    methodActions();
-    drawBanners();
-  }
+  if (wasDirty !== ME.dirty) dirtyChanged();
   ME.busy = true;
   drawStatus();
   clearTimeout(ME.checkTimer);
@@ -3184,11 +3969,43 @@ async function drawValues() {
     ME.ed.setValues({});
     ME.ed.setFolds([]);
     ME.folds = 0;
+    ME.shownInside = null;
+    setRounds(null, null);
     drawStatus();
     return;
   }
   const got = await insideOf(ref, fn);
   if (!ME || ME.tickets.values !== n) return;
+  ME.shownInside = got;
+  setRounds(got, fn);
+  paintValues();
+}
+
+/**
+ * The rounds tables of the shown function's loops, in the explanation beside the code (rounds.js); a row picked there
+ * is the round the code shows. Kept while the same call of the same function in the same run is shown.
+ */
+function setRounds(got, fn) {
+  const key = got?.run ? `${got.run}|${fn}|${got.call?.id ?? ""}` : null;
+  if (ME.roundsKey === key) return;
+  ME.rounds?.destroy();
+  ME.roundsKey = key;
+  ME.rounds = key
+    ? createRounds({ call, args: { run: got.run }, f: got, fmt, height: sizeOf("work.rounds"), onChange: () => paintValues() })
+    : null;
+  put(
+    ME.roundsBox,
+    ME.rounds ? [h("h4", {}, ME.rounds.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), ME.rounds.el] : null,
+  );
+}
+
+/** The values of the function at the cursor at the ends of its lines (see drawValues), for the rounds picked. */
+function paintValues() {
+  if (!ME) return;
+  const got = ME.shownInside;
+  const fn = ME.fn;
+  const f = (ME.summary?.outline || []).find((x) => x.name === fn);
+  if (!f) return;
   const doc = ME.ed.getValue().split("\n");
   const ranLines = (got?.code || "").split("\n");
   // The function's place in the editor now (from the checker's outline) against its place in the run's copy.
@@ -3206,6 +4023,50 @@ async function drawValues() {
   for (const st of got?.statements || []) {
     const at = place(st.line);
     if (!at) continue;
+    const picked = ME.rounds?.at(st);
+    if (picked) {
+      // a line of a `for` loop: the round picked in its table beside the code
+      const list = [];
+      const words = roundWords(picked);
+      const of = words ? ` · ${words.title}` : "";
+      if (st.loop && words)
+        list.push({
+          name: "",
+          text: words.chip,
+          type: "none",
+          title: `The code shows ${words.title}: pick another round in the table beside the code`,
+          onClick: () => ME?.rounds?.reveal(st.line),
+        });
+      if (picked.kind === "full") {
+        for (const name of st.names)
+          if (name in (picked.round.values || {})) {
+            const chip = valueChip(name, picked.round.values[name], got.run);
+            list.push({ ...chip, title: (chip.title || name) + of });
+          }
+        if (picked.round.failed || picked.round.error)
+          list.push({ name: "", text: "stopped here", type: "none", title: cleanError(picked.round.error || got.error || "The step stopped at this line.") });
+      }
+      if (picked.kind === "light")
+        for (const [name, v] of Object.entries(picked.values)) {
+          const more = cellTitle(v, fmt);
+          list.push({
+            name,
+            text: cellText(v, fmt),
+            type: cellKind(v),
+            title: name + of + (more ? ` · ${more}` : "") + (more && v.preview == null ? " (whole values are kept for the first and last rounds)" : ""),
+          });
+        }
+      if (picked.kind === "inner")
+        list.push({
+          name: "",
+          text: `${picked.rounds} round${picked.rounds === 1 ? "" : "s"} in round ${picked.outer}`,
+          type: "none",
+          title: "This loop's rounds in that round: click to see them in its table",
+          onClick: picked.open,
+        });
+      if (list.length) values[at] = list;
+      continue;
+    }
     const first = (st.rounds || []).find((r) => !r.failed) || (st.rounds || [])[0];
     if (!first) continue;
     const extra = st.loop || st.n > 1 ? ` · round 1 of ${st.n}` : "";
@@ -3234,37 +4095,31 @@ async function drawValues() {
   drawStatus();
 }
 
-// ---------- the toolbar, the status line, the checker's marks
+// ---------- packages, the status line, the checker's marks
 
-function methodActions() {
-  if (!ME) return;
-  setActions([
-    h("button", { class: "layr-button ghost", onclick: () => go({ view: "guide" }) }, "Python guide"),
-    h("button", { class: "layr-button ghost", onclick: showVersions }, "Versions"),
-    h(
-      "button",
-      {
-        class: "layr-button ghost",
-        onclick: (e) =>
-          layr.ui.contextMenu(
-            [
-              { label: "Format the code (tidy layout)", icon: "format_align_left", run: formatCode },
-              { label: "Extra Python packages…", icon: "extension", run: editPackages },
-              "-",
-              {
-                label: "Folder that runs without layr (zip)",
-                icon: "folder_zip",
-                run: () => exportFolder(ME.numbersExp ? { experiment: ME.numbersExp } : { method: ME.method }),
-              },
-              { label: "Duplicate the method…", icon: "content_copy", run: () => duplicate(ME.m) },
-            ],
-            e,
-          ),
-      },
-      "More ▾",
-    ),
-    h("button", { class: "layr-button primary", disabled: !ME.dirty, onclick: () => saveMethod() }, "Save"),
-  ]);
+/** The experiments of this method other than the open one: they share its code. */
+const otherExperiments = () => (ME?.mine || []).filter((e) => e.experiment !== ME.exp);
+
+/** "Shared with 2 other experiments" in the status line: their names on hover, a click lists them to open one. */
+function sharedNote() {
+  const others = otherExperiments();
+  if (!others.length) return null;
+  return h(
+    "button",
+    {
+      class: "linklike shared-note",
+      title: `The method is shared: ${others.map((e) => e.title).join(", ")}. A saved change is theirs too (they ` +
+        "show their old results until they are run again).",
+      onclick: (e) =>
+        layr.ui.contextMenu(
+          others.map((x) => ({ label: `${x.title} · ${stateWord(x)}`, icon: "science", run: () => show({ exp: x.experiment, method: ME.method }) })),
+          e,
+        ),
+    },
+    ME.exp
+      ? `Shared with ${others.length} other experiment${others.length === 1 ? "" : "s"}`
+      : `Used by ${others.length} experiment${others.length === 1 ? "" : "s"}`,
+  );
 }
 
 /** The method's extra Python packages (REQUIREMENTS): installed for it before its first run. */
@@ -3325,6 +4180,7 @@ function drawStatus() {
           ? "Proposed by Claude: save to accept it"
           : `Saved · version ${ME.m.version}`,
     ),
+    sharedNote(),
     ME.folds
       ? h(
           "button",
@@ -3343,7 +4199,7 @@ function drawStatus() {
       : null,
     h(
       "label",
-      { class: "recalc-toggle", title: "After a change, calculate what it changed on the picked experiment" },
+      { class: "recalc-toggle", title: "After a change, try it on the open experiment by itself (nothing is saved)" },
       h("input", {
         type: "checkbox",
         checked: S.autoRecalc !== false,
@@ -3413,6 +4269,20 @@ function drawOutline() {
     ["helper", "Helpers"],
   ];
   const count = (name) => ME.messages.filter((x) => x.function === name).length;
+  // a function's menu (right-click, or its ⋯): links to it for a Wiki page
+  const menu = (e, f) => {
+    e.preventDefault();
+    e.stopPropagation();
+    layr.ui.contextMenu(
+      [
+        ME.expObj
+          ? { label: "Copy link to this step (with this experiment's numbers)", icon: "link", run: () => copyFunctionLink(f.name) }
+          : null,
+        { label: "Copy link to its code", icon: "link", run: () => copyFunctionLink(f.name, { codeOnly: true }) },
+      ].filter(Boolean),
+      e,
+    );
+  };
   put(
     ME.els.outline,
     groups.map(([kind, label]) => {
@@ -3429,11 +4299,17 @@ function drawOutline() {
               class: `ol-item ${f.name === ME.fn ? "active" : ""}`,
               title: f.sentence || "",
               onclick: () => jumpTo(f.line, f.name),
+              oncontextmenu: (e) => menu(e, f),
             },
             h("span", { class: "ol-name" }, f.name),
             count(f.name)
               ? h("span", { class: "lint-dot", title: `${count(f.name)} style notes` }, count(f.name))
               : null,
+            h(
+              "button",
+              { class: "ol-more", title: "Copy a link to it…", "aria-label": `Links to ${f.name}`, onclick: (e) => menu(e, f) },
+              "⋯",
+            ),
           ),
         ),
       );
@@ -3591,8 +4467,14 @@ async function decideDraft(decision, source) {
         : "Rejected",
       "success",
     );
+    if (decision === "reject" && ME.m.draft_only) {
+      closeWork();
+      return go({ view: "home", method: null, exp: null });
+    }
     closeReview();
-    if (decision === "reject" && ME.m.draft_only) go({ view: "home", method: null });
+    await refreshMethodMeta();
+    endReview();
+    if (decision === "accept") newVersionSaved();
     else render();
   } catch (err) {
     fail(err);
@@ -3609,7 +4491,7 @@ async function showDraft() {
     const d = (await call("draft_get", { method: ME.method })).draft;
     if (!d) return render();
     const before = ME.saved;
-    const box = h("div", { class: "review-merge" });
+    const box = h("div", { class: "code-review-merge" });
     const counts = h("span", { class: "layr-muted small" });
     const done = h("button", { class: "layr-button primary" }, "Accept");
     ME.review = { draft: d, merge: null };
@@ -3628,10 +4510,10 @@ async function showDraft() {
       ME.els.main,
       h(
         "div",
-        { class: "review" },
+        { class: "code-review" },
         h(
           "div",
-          { class: "review-head" },
+          { class: "code-review-head" },
           h(
             "div",
             {},
@@ -3658,8 +4540,8 @@ async function showDraft() {
         box,
         h(
           "div",
-          { class: "row-gap review-buttons" },
-          h("button", { class: "layr-button ghost", onclick: () => (closeReview(), render()) }, "Back to the code"),
+          { class: "row-gap code-review-buttons" },
+          h("button", { class: "layr-button ghost", onclick: () => endReview() }, "Back to the code"),
           h("span", { class: "layr-spacer" }),
           h("button", { class: "layr-button ghost", onclick: () => decideDraft("reject") }, "Reject it all"),
           done,
@@ -3680,19 +4562,44 @@ function closeReview() {
   ME.review = null;
 }
 
-/** Saves the code as a new version (she says what changed); true when it was saved. */
+/** A review is closed: the flow, the bar and the code are back in the tab. */
+function endReview() {
+  if (!ME) return;
+  closeReview();
+  layoutCode();
+  drawBanners();
+}
+
+/**
+ * Saves the code as a new version (she says what changed); true when it was saved. The method is shared by every
+ * experiment of it: the others say so until they are run again. The open experiment is then run for real by itself
+ * (its steps are remembered from the trial run, so it is quick).
+ */
 async function saveMethod() {
   if (!ME || !ME.dirty) return false;
   const source = ME.ed.getValue();
+  const others = otherExperiments();
   const note = h("input", {
     class: "layr-input",
-    placeholder: "e.g. Rates from 0-20 min instead of 0-30",
+    placeholder: "e.g. Scores from the mean instead of the sum",
     value: ME.aiStep ? `Added ${ME.aiStep.fn} (written by Claude, checked by me)` : ME.fn ? `Changed ${ME.fn}` : "",
   });
   setTimeout(() => note.select(), 30);
   const change = await openDialog({
     title: "Save a new version",
-    body: [h("label", { class: "layr-label" }, "What changed, and why? (for the version history)"), note],
+    body: [
+      h("label", { class: "layr-label" }, "What changed, and why? (for the version history)"),
+      note,
+      others.length
+        ? h(
+            "p",
+            { class: "layr-muted small" },
+            `The method is shared with ${others.length} other experiment${others.length === 1 ? "" : "s"} (` +
+              `${others.map((e) => e.title).join(", ")}): they show their old results until they are run again.`,
+          )
+        : null,
+      ME.expObj ? h("p", { class: "layr-muted small" }, `${ME.expObj.title} is run with the new version right after.`) : null,
+    ],
     buttons: [
       { label: "Cancel", id: null, kind: "ghost" },
       { label: "Save", kind: "primary", value: () => note.value.trim() || "Changed in the editor" },
@@ -3711,8 +4618,16 @@ async function saveMethod() {
     ME.saved = source;
     ME.dirty = ME.ed.getValue() !== source;
     ME.aiStep = null;
-    layr.ui.notify(`Saved as version ${r.version}`, "success");
+    layr.ui.notify(
+      `Saved as version ${r.version}` +
+        (others.length
+          ? ` · ${others.length} other experiment${others.length === 1 ? " is" : "s are"} out of date until run again`
+          : ""),
+      "success",
+    );
     await refreshMethodMeta();
+    dirtyChanged();
+    newVersionSaved();
     return true;
   } catch (err) {
     fail(err);
@@ -3720,21 +4635,35 @@ async function saveMethod() {
   }
 }
 
-// After a save or an event: new versions, drafts and comparisons, without touching the code being edited.
+/** A new version of the method was saved here (Save, an accepted draft, a version gone back to): the open
+ * experiment is calculated with it, for real (its steps are remembered from the trial runs, so it is quick). */
+function newVersionSaved() {
+  if (ME?.expObj && !ME.dirty) startRun(ME.expObj.id);
+  else render();
+}
+
+// After a save or an event: new versions, drafts and comparisons. Unsaved code stays; else the editor and the flow
+// follow the saved code (an accepted draft, a version gone back to, a change made by an agent).
 async function refreshMethodMeta({ late = false } = {}) {
   if (!ME) return;
   try {
     const m = await call("method_get", { method: ME.method });
-    if (!ME) return;
+    if (!ME || ME.method !== m.id) return;
     ME.m = m;
     if (!ME.dirty && m.source !== ME.ed.getValue()) {
       ME.ed.setValue(m.source, { keepHistory: true });
-      ME.dirty = false;
+      ME.messages = m.check || [];
+      ME.summary = m.summary;
+      ME.trialSource = m.source;
+      ME.flowSource = m.source;
+      ME.flow.update({ source: m.source });
       drawLint();
-      drawValues();
+      drawOutline();
+      valuesChanged();
+      drawInspector();
     }
     ME.saved = ME.dirty ? ME.saved : m.source;
-    methodActions();
+    drawActions();
     drawBanners();
     drawStatus();
     if (!late) lateCheck(m);
@@ -3799,7 +4728,9 @@ async function showVersions() {
                         if (r.saved)
                           layr.ui.notify(`Back to version ${v.version}: saved as version ${r.version}`, "success");
                         ME.dirty = false;
-                        render();
+                        await refreshMethodMeta();
+                        dirtyChanged();
+                        newVersionSaved();
                       } catch (err) {
                         fail(err);
                       }
@@ -3841,47 +4772,26 @@ async function drawInspector() {
         ),
       ]
     : [];
-  const shownExp = ME.exps.find((e) => e.experiment === ME.numbersExp);
-  const picker = ME.numbersExp
+  // where the numbers come from (the experiment is picked in the path at the top)
+  const shownExp = (ME.mine || []).find((e) => e.experiment === ME.exp);
+  const picker = ME.exp
     ? h(
         "div",
         { class: "numbers-from small" },
         "Numbers from ",
-        h("b", {}, shownExp?.title || "the picked experiment"),
+        h("b", {}, shownExp?.title || "the open experiment"),
         h(
           "span",
           { class: "layr-muted" },
-          ME.trialRun ? " (your change, calculated)" : ME.pickedRun ? " (an earlier run)" : " (its latest run)",
+          ME.trialRun ? " (your change, tried just now)" : S.run ? " (an earlier run)" : " (its latest run)",
         ),
-        ME.numbersExp
-          ? h(
-              "label",
-              { class: "ref-toggle", title: "Rerun it after every change and list the numbers that moved" },
-              h("input", {
-                type: "checkbox",
-                checked: ME.m.reference === ME.numbersExp,
-                onchange: async (e) => {
-                  try {
-                    await call("method_reference", {
-                      method: ME.method,
-                      experiment: e.target.checked ? ME.numbersExp : null,
-                    });
-                    await refreshMethodMeta();
-                  } catch (err) {
-                    fail(err);
-                  }
-                },
-              }),
-              " reference",
-            )
-          : null,
       )
     : h(
         "div",
-        { class: "layr-muted small" },
-        ME.exps.length
-          ? "Pick an experiment in the flow above: its numbers show here and in the code."
-          : "No experiment uses this method yet: its numbers show here after a run.",
+        { class: "layr-muted small numbers-from" },
+        (ME.mine || []).length
+          ? "No data: pick an experiment at the top to see its numbers here and in the code."
+          : "No experiment uses this method yet: make one (New experiment… at the top) to see numbers here.",
       );
   if (!name) {
     ME.inspectorFn = null;
@@ -3961,7 +4871,7 @@ async function drawInspector() {
         v.step.inputs,
         v.step.output,
         name,
-        ME.exps.find((e) => e.experiment === ME.numbersExp) ? { id: ME.numbersExp } : null,
+        ME.exp ? { id: ME.exp } : null,
       ),
     );
   if (coming) {
@@ -4031,9 +4941,10 @@ async function drawInspector() {
     }
     const err = (v.sample || []).find((c) => c.error);
     if (err) parts.push(h("div", { class: "banner danger" }, err.error));
-  } else if (ME.numbersExp) {
+  } else if (ME.exp) {
     parts.push(h("div", { class: "layr-muted small" }, "Not called in the last run (or it hasn't run yet)."));
   }
+  parts.push(ME.roundsBox); // its loops' rounds (drawValues fills it)
   if (mine.length)
     parts.push(
       h("h4", {}, "Style notes"),
@@ -4140,8 +5051,7 @@ async function duplicate(method) {
   try {
     const r = await call("method_create", { method: id.value.trim(), name: name.value.trim(), copy_of: method.id });
     if (!r.saved) return layr.ui.notify(r.messages.map((p) => p.message).join("; ") || r.note, "error");
-    closeMethod();
-    go({ view: "method", method: id.value.trim(), fn: null });
+    show({ method: id.value.trim(), exp: null });
   } catch (err) {
     fail(err);
   }
@@ -4180,136 +5090,22 @@ async function renderGuide(t) {
   );
 }
 
-// ------------------------------------------------------------------------------------------------ database
-
-async function renderDatabase(t) {
-  const tables = await call("database_tables");
-  if (t !== token) return;
-  setCrumbs([{ label: "Experiments", go: { view: "home" } }, { label: "Results database" }]);
-  setActions([]);
-  layr.panel.setTitle("Results database").catch(() => {});
-  if (!tables.length) {
-    put(
-      view,
-      h(
-        "div",
-        { class: "layr-empty" },
-        "Empty until an experiment has been run: every run adds its results here, to compare experiments over time.",
-      ),
-    );
-    return;
-  }
-  if (!S.dbTable || !tables.some((x) => x.table === S.dbTable))
-    S.dbTable = tables.find((x) => x.table === "activities")?.table || tables[0].table;
-  const data = await call("database_query", { table: S.dbTable, limit: 20000 });
-  if (t !== token) return;
-  const filterCols = data.columns
-    .filter((c) => {
-      if (c === "experiment_title") return true;
-      if (["experiment", "run", "run_finished"].includes(c)) return false;
-      const vals = new Set(data.rows.map((r) => r[c]));
-      return vals.size >= 2 && vals.size <= 30 && data.rows.some((r) => typeof r[c] === "string");
-    })
-    .slice(0, 7);
-  const filt = {};
-  const tbox = h("div", {});
-  const visible = () => data.rows.filter((r) => Object.entries(filt).every(([c, v]) => !v || String(r[c]) === v));
-  const draw = () => {
-    const rows = visible();
-    put(
-      tbox,
-      h(
-        "div",
-        { class: "filters" },
-        filterCols.map((c) =>
-          h(
-            "select",
-            {
-              class: "layr-select small",
-              onchange: (e) => {
-                filt[c] = e.target.value;
-                draw();
-              },
-            },
-            h("option", { value: "" }, `All ${c.replace("_", " ")}`),
-            [...new Set(data.rows.map((r) => String(r[c] ?? "")))]
-              .sort()
-              .map((v) => h("option", { value: v, selected: filt[c] === v }, v)),
-          ),
-        ),
-        h("span", { class: "layr-muted small" }, `${rows.length} rows`),
-      ),
-      table(
-        rows,
-        data.columns.filter((c) => c !== "run"),
-        { limit: 500 },
-      ),
-    );
-  };
-  const csv = async () => {
-    const rows = visible();
-    const esc = (v) => {
-      const s = fmt(v);
-      return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const text = [data.columns.join(","), ...rows.map((r) => data.columns.map((c) => esc(r[c])).join(","))].join("\n");
-    try {
-      const ref = await layr.files.saveAs({ name: `${S.dbTable}.csv`, types: [".csv"] });
-      if (ref) {
-        await layr.files.write(ref.id, text);
-        layr.ui.notify(`Saved ${ref.name}`, "success");
-      }
-    } catch (err) {
-      fail(err);
-    }
-  };
-  put(
-    view,
-    h(
-      "div",
-      { class: "page wide" },
-      h(
-        "p",
-        { class: "layr-muted" },
-        "The latest results of every experiment, side by side. Ask Claude to compare strains or conditions: it reads this database.",
-      ),
-      h(
-        "div",
-        { class: "section-head" },
-        h(
-          "select",
-          { class: "layr-select", onchange: (e) => go({ dbTable: e.target.value }) },
-          tables.map((x) =>
-            h(
-              "option",
-              { value: x.table, selected: x.table === S.dbTable },
-              `${x.table} (${x.experiments} experiments, ${x.rows} rows)`,
-            ),
-          ),
-        ),
-        h("span", { class: "layr-spacer" }),
-        h("button", { class: "layr-button", onclick: csv }, "Save as CSV…"),
-      ),
-      tbox,
-    ),
-  );
-  draw();
-}
-
 // ------------------------------------------------------------------------------------------------ main
 
 async function render() {
   const t = ++token;
   try {
-    if (S.view === "experiment" && S.exp) await renderExperiment(t);
-    else if (S.view === "method" && S.method) await renderMethod(t);
+    if (S.view === "work" && S.method) await renderWork(t);
     else if (S.view === "new") await renderNew(t, S.preset);
-    else if (S.view === "database") await renderDatabase(t);
     else if (S.view === "guide") await renderGuide(t);
-    else await renderHome(t);
+    else {
+      if (S.view !== "home") S.view = "home";
+      await renderHome(t);
+    }
   } catch (err) {
     if (t !== token) return;
-    if (/No experiment|No method/.test(err?.message || "")) {
+    if (/No experiment|No method|no method/.test(err?.message || "")) {
+      closeWork();
       go({ view: "home", exp: null, method: null });
       return;
     }
@@ -4318,8 +5114,8 @@ async function render() {
       h(
         "div",
         { class: "layr-empty" },
-        h("div", { class: "layr-error" }, err?.message || String(err)),
-        h("button", { class: "layr-button", onclick: () => go({ view: "home" }) }, "Back to the experiments"),
+        h("div", { class: "layr-error" }, cleanError(err)),
+        h("button", { class: "layr-button", onclick: () => show({ view: "home" }) }, "Back to the experiments"),
       ),
     );
   }
@@ -4360,28 +5156,44 @@ try {
   );
   throw err;
 }
-const opened = layr.files.current?.();
-if (opened && !(layr.info.state || {}).openedFile) {
+/** A file the panel was opened with: stored, and a new experiment started from it (once per file). */
+async function openedWith(file) {
+  if (!file?.id || file.id === S.openedFile) return false;
   try {
-    const f = await storeFileRef(opened);
-    S.preset = f;
-    S.view = "new";
-    layr.panel.setState({ ...S, openedFile: opened.id }).catch(() => {});
+    S.preset = await storeFileRef(file);
+    S.openedFile = file.id;
+    S.newMethod = null;
+    return true;
   } catch (err) {
     fail(err);
+    return false;
   }
+}
+if (await openedWith(layr.files.current?.())) {
+  S.view = "new";
+  save();
 }
 checkAi();
 try {
-  layr.connections.onChange?.(() => checkAi().then(() => S.view === "method" && drawInspector()));
+  layr.connections.onChange?.(() => checkAi().then(() => S.view === "work" && drawInspector()));
 } catch {
   // an older layr: checked once
 }
+// A link opens the panel again at a place: its params are a show() target.
+layr.panel.onParams?.(async (p) => {
+  if (!p || !Object.keys(p).length) return;
+  if (p.ref) return openRef(p.ref); // a layr://research/open/… link (a reference in a Wiki page)
+  if (p.file) {
+    if (await openedWith(p.file)) go({ view: "new" });
+    return;
+  }
+  show(p);
+});
 layr.events.on("research:lab", (ev) => {
   if (ev.what === "run" && ev.trial) {
-    // A trial run (the method screen calculating a change): it lights up its step, and it is not the experiment's
-    // new latest run, so nothing else is redrawn.
-    if (S.view === "method" && ME && ev.experiment === ME.numbersExp)
+    // A trial run (a change of the code being tried): it lights up its step, and it is not the experiment's new
+    // latest run, so nothing else is redrawn.
+    if (S.view === "work" && ME && ev.experiment === ME.exp)
       ME.flow?.setRunning(!ev.finished && ev.step ? { step: ev.step } : null);
     return;
   }
@@ -4392,23 +5204,24 @@ layr.events.on("research:lab", (ev) => {
       live.step = ev.step;
       setStatus(`Calculating: ${human(ev.step)}`);
     }
-    if (S.view === "experiment" && EF?.exp === ev.experiment) EF.flow.setRunning({ step: ev.step });
+    if (S.view === "work" && ME?.exp === ev.experiment) ME.flow?.setRunning({ step: ev.step });
   }
   // while the panel's own run is going, the screen is drawn again when it's done
   if (live && (ev.what === "run" || ev.experiment === live.exp)) return;
   if (ev.what === "run" && !ev.finished) return;
-  if (S.view === "method") {
+  if (S.view === "work" && ME) {
     if ((ev.method && ev.method === S.method) || ev.what === "comparison") refreshMethodMeta();
-    if (ev.what === "run" && ME && ev.experiment === ME.numbersExp && !ME.trialRun && !ME.pickedRun) {
+    if (ev.what === "run" && ev.experiment === ME.exp && !ME.trialRun && !S.run) {
       ME.flow?.update({});
       valuesChanged();
     }
+    if (!ev.experiment || ev.experiment === S.exp || ME.mine.some((e) => e.experiment === ev.experiment)) render();
     return;
   }
-  if (S.view === "home" || (S.view === "experiment" && (!ev.experiment || ev.experiment === S.exp))) render();
+  if (S.view === "home") render();
 });
 window.addEventListener("resize", () => {
-  if (String(S.tab).startsWith("page:") && S.view === "experiment" && !PG.editing()) {
+  if (String(S.tab).startsWith("page:") && S.view === "work" && !PG.editing()) {
     clearTimeout(window.__rz);
     window.__rz = setTimeout(render, 250);
   }
@@ -4417,3 +5230,5 @@ window.addEventListener("beforeunload", (e) => {
   if (ME?.dirty) e.preventDefault();
 });
 render();
+// started by a link to a place (a reference in a Wiki page): it goes there
+if (layr.info.params?.ref) openRef(layr.info.params.ref);

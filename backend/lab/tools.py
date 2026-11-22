@@ -1,4 +1,4 @@
-"""MCP tools for methods (Python files), experiments, runs, corrections, explanations and the results database.
+"""MCP tools for methods (Python files), experiments, runs, corrections and explanations.
 
 Rules the tools enforce (also in the server's instructions for agents):
 - Numbers come only from runs: an agent reads results with result_table / provenance and cites the run id.
@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import json
+import logging
 import os
 import threading
 import urllib.parse
@@ -28,24 +30,30 @@ import pandas as pd
 from mcp.server.fastmcp import Context, FastMCP, Image
 from pydantic import Field
 
-from . import checker, compare, methodfile, packages, standalone
+from . import checker, compare, examples, methodfile, packages, standalone
 from . import explain as explainer
+from . import sources as sources_mod
 from . import pages as declarations
 from .errors import LabError
-from .gcassay_import import corrections_from, params_from_config, parse_yaml
 from .runner import Pool, Runner, experiment_inputs
-from .store import Store, method_name, new_id, now, records, step_output
+from .store import Store, jsonable, method_name, new_id, now, records, step_output
 
 LIVE: dict[str, dict[str, Any]] = {}  # experiment id -> the run in progress
 TRIALS: dict[str, dict[str, Any]] = {}  # experiment id -> the trial run in progress (an unsaved source or settings)
 TRIAL_ASKED: dict[str, int] = {}  # experiment id -> how many trial runs were asked for (only the newest waits)
 TASKS: set[asyncio.Future] = set()
-GAML_LOCK = threading.Lock()
+CURVES: dict[str, Any] = {}  # a raw file's curves (or table) by file and settings, so dragging a region stays fast
+CURVES_LOCK = threading.Lock()
+CURVES_KEPT = 3
+SOURCES_HELP = ("Results of other experiments, for the method's inputs that read them (their Inputs: line ends in "
+                "[result]): {input id: [{\"experiment\": id, \"result\": a table it returns, e.g. \"scores\", or "
+                "\"step:<function>\"}, ...]}, one or several experiments; `result` may be left out when the input "
+                "names the one it expects ([result: scores]). The experiments lists each one's tables.")
 
 
 def thin(t: np.ndarray, y: np.ndarray, start: float | None, end: float | None, points: int) -> np.ndarray:
     """The indexes of a curve's points between start and end, at most about `points` of them (each bucket keeps its
-    lowest and highest point, so peaks survive)."""
+    lowest and highest point, so sharp rises and falls survive)."""
     lo = t[0] if start is None else start
     hi = t[-1] if end is None else end
     idx = np.flatnonzero((t >= lo) & (t <= hi))
@@ -123,11 +131,12 @@ def copy_from_toolbox(source: str, name: str) -> str:
     import importlib
     import inspect
 
-    import toolbox
+    from toolbox import registry
 
-    if name not in toolbox.__all__:
-        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(toolbox.__all__)}.")
-    obj = getattr(toolbox, name)
+    found = registry.find(name)
+    if found is None:
+        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(registry.everything())}.")
+    obj = found[1]
     if not inspect.isfunction(obj):
         raise LabError(f"`{name}` is not a function: only functions can be copied (import it as it is).")
     module = importlib.import_module(obj.__module__)
@@ -199,13 +208,15 @@ def analysis(table_file, value_column="value", group_column="group", control="co
 '''
 
 
-def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
+def register(mcp: FastMCP, data_dir: Path, emit, pool: Pool | None = None) -> Store:
+    """Adds the lab's tools to `mcp`. Starts no calculation process: the first run starts one, or the server warms
+    `pool` when it runs (server.py)."""
     store = Store(data_dir / "lab")
+    if store.started_fresh:
+        logging.getLogger("research").warning("the data of an earlier version was cleared: %s starts fresh", store.root)
     packages.configure(store.root)
-    pool = Pool()
+    pool = pool or Pool()
     runner = Runner(store, pool)
-    threading.Thread(target=pool.warm, daemon=True).start()
-    gaml_cache: dict[str, Any] = {}
 
     def changed(what: str, **data: Any) -> None:
         emit("research:lab", {"what": what, **data})
@@ -224,8 +235,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         try:
             m = methodfile.parse(method_of(e)["source"])
         except (LabError, SyntaxError):
-            return declarations.normalize_kinds(declarations.LEGACY_CORRECTIONS)
-        return declarations.correction_kinds(m.constants, methodfile.takes_corrections(m))
+            return {}
+        return declarations.correction_kinds(m.constants)
 
     def experiment_summary(e: dict) -> dict:
         try:
@@ -301,8 +312,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     def methods() -> list[dict[str, Any]]:
-        """The analysis methods (Python files): id, name, latest version, number of steps, raw file inputs, built in
-        or not, whether an AI draft waits for the user, the reference experiment."""
+        """The analysis methods (Python files): id, name, latest version, number of steps, inputs (raw files, kind
+        file, and results of other experiments, kind result), built in or not, whether an AI draft waits for the
+        user, the reference experiment."""
         return store.list_methods()
 
     def method_view(method: str, version: int | None = None) -> dict[str, Any]:
@@ -319,12 +331,13 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 "draft": None if not draft else {k: v for k, v in draft.items() if k != "source"}}
 
     @mcp.tool()
-    def method_get(method: Annotated[str, Field(description="Method id, e.g. gc-activity-assay.")],
+    def method_get(method: Annotated[str, Field(description="Method id, e.g. survey-scores.")],
                    version: Annotated[int | None, Field(description="A version; default the latest.")] = None
                    ) -> dict[str, Any]:
         """A method in full: its Python source, the outline of its functions (recipe, steps, formulas, helpers),
-        its settings and inputs (from the recipe's signature and docstring), the style checker's messages, its
-        versions, its reference experiment and a pending AI draft (if any)."""
+        its settings and inputs (from the recipe's signature and docstring; summary.inputs: [{id, label, kind: file
+        (types: extensions) | result (result: the table name it expects, or null), optional}]), the style checker's
+        messages, its versions, its reference experiment and a pending AI draft (if any)."""
         return method_view(method, version)
 
     @mcp.tool()
@@ -658,10 +671,17 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     @mcp.tool()
     def toolbox_docs(name: Annotated[str | None, Field(description="One toolbox function; default all.")] = None
                      ) -> dict[str, Any]:
-        """The toolbox's ready-made functions (reading GAML and tables, peaks, straight lines, flags, plots):
-        {functions: [{name, signature, sentence, docstring text, formulas, code}]}. Methods import them:
-        `from toolbox import fit_line`."""
-        return {"functions": [explainer.toolbox_view(name)] if name else explainer.toolbox_docs()}
+        """The toolbox's ready-made functions (reading tables, straight lines, flags, ready-made steps and charts)
+        and those of its add-ons (sub-packages for one kind of data or instrument): {functions: [{name, module,
+        signature, sentence, docstring text, formulas, code}], groups: [{module, title, sentence, functions: [names]}]
+        (the toolbox first, then each add-on), readers: [{function, module, label, extensions, out, param}] (the
+        functions that read a raw file, for "add a raw file")}. Methods import them from their module:
+        `from toolbox import fit_line`, `from toolbox.<add-on> import ...`."""
+        from toolbox import registry
+
+        if name:
+            return {"functions": [explainer.toolbox_view(name)]}
+        return {"functions": explainer.toolbox_docs(), "groups": registry.groups(), "readers": registry.readers()}
 
     @mcp.tool()
     def toolbox_copy(name: Annotated[str, Field(description="The toolbox function to copy.")],
@@ -685,8 +705,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         = None,
         inputs: Annotated[dict[str, list[str] | None] | None, Field(
             description="step: the step's inputs by parameter name, each with the columns its table had in the last "
-                        "run (null: not a table), e.g. {\"peaks\": [\"injection\", \"area\"], \"window_min\": "
-                        "null}.")] = None,
+                        "run (null: not a table), e.g. {\"cultures\": [\"culture\", \"time_h\", \"od600\"], "
+                        "\"window_h\": null}.")] = None,
         request: Annotated[str | None, Field(description="step: what the step should do, in the user's words.")]
         = None,
     ) -> dict[str, Any]:
@@ -768,8 +788,9 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         return store.add_file(p)
 
     @mcp.tool()
-    async def file_import(path: Annotated[str, Field(description="Absolute path of a file on this PC (GAML, CSV, "
-                                                                 "TSV, Excel).")]) -> dict[str, Any]:
+    async def file_import(path: Annotated[str, Field(description="Absolute path of a file on this PC (a table such "
+                                                                 "as CSV or Excel, an instrument's export...).")]
+                          ) -> dict[str, Any]:
         """Copy a raw data file into the plugin's store (by checksum; the original is never changed). Returns a file
         reference to give experiment_create / experiment_update as an input."""
         return await asyncio.to_thread(import_path, path)
@@ -777,7 +798,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     @mcp.tool()
     async def file_fetch(url: Annotated[str, Field(description="A layr file address from the Research panel "
                                                                "(layr.files.url).")],
-                         name: Annotated[str, Field(description="The file's name, e.g. run5.gaml.")]
+                         name: Annotated[str, Field(description="The file's name, e.g. plate5.csv.")]
                          ) -> dict[str, Any]:
         """For the Research panel: store a file the user picked, read through layr's file route. Returns its file
         reference."""
@@ -811,7 +832,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     async def upload_finish(upload: Annotated[str, Field(description="Upload id.")],
-                            name: Annotated[str, Field(description="The file's name, e.g. run5.gaml.")]
+                            name: Annotated[str, Field(description="The file's name, e.g. plate5.csv.")]
                             ) -> dict[str, Any]:
         """For the Research panel: put a sent file into the store; returns its file reference."""
         if not upload.startswith("u") or not upload[1:].isalnum():
@@ -830,18 +851,40 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             return [], []
         return methodfile.settings(m), methodfile.inputs(m)
 
+    def linked(e: dict, everyone: list[dict], by_id: dict[str, dict], runs: sources_mod.Runs) -> dict[str, Any]:
+        """How an experiment is tied to others: the tables its latest run has (to pick from), what it reads, who
+        reads it, and why it is out of date."""
+        returned, steps = sources_mod.tables(runs.latest(e))
+        return {"results": returned, "step_results": steps,
+                "reads": [{"input": i, "experiment": s["experiment"], "result": s["result"]}
+                          for i, chosen in sources_mod.picks(e).items() for s in chosen],
+                "read_by": sources_mod.readers(e["id"], everyone),
+                "outdated": sources_mod.outdated(store, e, by_id, runs)}
+
     @mcp.tool()
     def experiments() -> list[dict[str, Any]]:
-        """All experiments (a method applied to raw files): id, title, method, files, last run (status, QC flag
-        counts), proposed corrections waiting for the user."""
-        return [experiment_summary(e) for e in store.list_experiments()]
+        """All experiments (a method applied to raw files, or to results of other experiments): id, title, method,
+        files, last run (status, QC flag counts), proposed corrections waiting for the user; `results` (the tables
+        its latest run returned) and `step_results` (its steps' tables, `step:<function>`) to pick from for an input
+        that reads other experiments; `reads` [{input, experiment, result}] and `read_by` [{experiment, title,
+        input}]; `outdated` [{input, experiment, title, reason}]: a source changed since its latest run (run it
+        again to see it; nothing reruns by itself)."""
+        everyone = store.list_experiments()
+        by_id = {e["id"]: e for e in everyone}
+        runs = sources_mod.Runs(store)
+        return [{**experiment_summary(e), **linked(e, everyone, by_id, runs)} for e in everyone]
 
     @mcp.tool()
     def experiment_get(experiment: Annotated[str, Field(description="Experiment id, like e1a2b3c4d.")]
                        ) -> dict[str, Any]:
         """One experiment in full: method, files (with checksums), settings (with the method's defaults for the
-        rest), corrections with reasons and status, last run."""
+        rest), corrections with reasons and status, last run. For each input that reads other experiments,
+        `sources` {input: [{experiment, result, title, method, missing, last_run: {id, status, finished} | null,
+        has_result}]}; `results`, `step_results`, `reads`, `read_by` and `outdated` as in experiments."""
         e = store.get_experiment(experiment)
+        everyone = store.list_experiments()
+        by_id = {x["id"]: x for x in everyone}
+        runs = sources_mod.Runs(store)
         decl: dict[str, Any] = {}
         try:
             m = method_of(e)
@@ -864,57 +907,41 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         corrections = [{**c, "what": declarations.describe(kinds, c)} for c in e.get("corrections") or []]
         return {**e, "corrections": corrections, "inputs": {**(e.get("inputs") or {}), **files},
                 "resolved_params": resolved, "method_params": settings, "method_inputs": inputs,
-                "running": experiment in LIVE, "method_problem": problem, **decl}
+                "running": experiment in LIVE, "method_problem": problem, **decl,
+                "sources": sources_mod.view(store, e, inputs, by_id, runs), **linked(e, everyone, by_id, runs)}
 
     def _apply_files(e: dict, inputs: list[dict], files: dict[str, Any] | None) -> None:
         ids = [i["id"] for i in inputs]
         for k, v in (files or {}).items():
             if k not in ids:
-                if k == "raw" and len(ids) == 1:  # the 0.2 name of the GC method's file
-                    k = ids[0]
-                else:
-                    raise LabError(f"The method has no input '{k}'. Inputs: {', '.join(ids) or 'none'}.")
+                raise LabError(f"The method has no input '{k}'. Inputs: {', '.join(ids) or 'none'}.")
             if isinstance(v, str):
                 v = import_path(v)
             if not isinstance(v, dict) or not v.get("path"):
                 raise LabError(f"Input {k}: give a path on this PC or a file reference from file_import.")
             e.setdefault("inputs", {})[k] = v
 
-    @mcp.tool()
-    async def experiment_create(
-        title: Annotated[str, Field(description="Title, e.g. 'Activity assay 06 - VLB120 ΔalkB'.")],
-        method: Annotated[str, Field(description="Method id (methods lists them).")] = "gc-activity-assay",
-        files: Annotated[dict[str, Any] | None, Field(
-            description="Raw files per method input: {input id (e.g. gaml_file): absolute path on this PC, or a file "
-                        "reference}.")] = None,
-        params: Annotated[dict[str, Any] | None, Field(description="Settings (the rest use the method's "
-                                                                   "defaults).")] = None,
-        gcassay_config: Annotated[str | None, Field(
-            description="Instead: path of a gcassay experiment config (YAML); its settings, raw file and "
-                        "corrections file are taken over.")] = None,
-        corrections: Annotated[list[dict[str, Any]] | None, Field(
-            description="Corrections to start with (as gcassay_settings returns them); from an agent they are "
-                        "only proposed.")] = None,
-        ctx: Context | None = None,
-    ) -> dict[str, Any]:
-        """Create an experiment: a method plus its raw files and settings. Then run it with run."""
-        m = store.get_method(method)
-        _, inputs = form(m)
-        e = {"id": new_id("e"), "title": title.strip() or "Experiment", "method": method, "inputs": {},
-             "params": {}, "corrections": [], "created": now(), "created_by": _who(ctx)}
-        if gcassay_config:
-            cfgp = Path(gcassay_config).expanduser()
-            cfg = parse_yaml(cfgp.read_text("utf-8"), "gcassay config")
-            p, info = params_from_config(cfg)
-            e["params"].update(p)
-            if info.get("raw_file") and not files:
-                files = {"raw": str((cfgp.parent / info["raw_file"]).resolve())}
-            if info.get("corrections"):
-                cp = (cfgp.parent / info["corrections"]).resolve()
-                if cp.exists():
-                    e["corrections"] = corrections_from(parse_yaml(cp.read_text("utf-8"), "corrections file"))
-        e["params"].update(params or {})
-        user = _is_user(ctx)
+    def checked_params(settings: list[dict], given: dict[str, Any] | None, base: dict[str, Any] | None = None
+                       ) -> dict[str, Any]:
+        """`base` with the given settings put over it (null: back to the method's default), each checked against
+        the method's settings (a rows setting row by row)."""
+        out = dict(base or {})
+        by_id = {s["id"]: s for s in settings}
+        for k, v in (given or {}).items():
+            if k not in by_id:
+                raise LabError(f"The method has no setting '{k}'. Settings: {', '.join(sorted(by_id))}.")
+            if v is None:
+                out.pop(k, None)
+                continue
+            try:
+                out[k] = methodfile.check_value(by_id[k], v)
+            except ValueError as err:
+                raise LabError(str(err)) from None
+        return out
+
+    def add_corrections(e: dict, corrections: list[dict] | None, user: bool, by: str) -> None:
+        """Corrections to start an experiment with, each checked against the method's kinds (from an agent they
+        are only proposed)."""
         kinds = kinds_of(e)
         for c in corrections or []:
             if not str(c.get("reason", "")).strip():
@@ -926,7 +953,32 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 raise LabError(str(err)) from None
             e["corrections"].append({"kind": c["kind"], **fields, "reason": str(c["reason"]).strip(),
                                      "id": new_id("c"), "status": "approved" if user else "proposed",
-                                     "by": c.get("by") or _who(ctx), "at": c.get("at") or now()})
+                                     "by": c.get("by") or by, "at": c.get("at") or now()})
+
+    @mcp.tool()
+    async def experiment_create(
+        title: Annotated[str, Field(description="Title, e.g. 'Growth curves 06 - wild type and mutant'.")],
+        method: Annotated[str, Field(description="Method id (methods lists them).")],
+        files: Annotated[dict[str, Any] | None, Field(
+            description="Raw files per method input: {input id (e.g. plate_file): absolute path on this PC, or a "
+                        "file reference}.")] = None,
+        params: Annotated[dict[str, Any] | None, Field(description="Settings (the rest use the method's "
+                                                                   "defaults).")] = None,
+        corrections: Annotated[list[dict[str, Any]] | None, Field(
+            description="Corrections to start with, each {kind, its fields..., reason}; from an agent they are only "
+                        "proposed.")] = None,
+        sources: Annotated[dict[str, list[dict[str, Any]]] | None, Field(description=SOURCES_HELP)] = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Create an experiment: a method plus its raw files (or the results of other experiments it reads) and
+        settings. Then run it with run."""
+        m = store.get_method(method)
+        settings, inputs = form(m)
+        e = {"id": new_id("e"), "title": title.strip() or "Experiment", "method": method, "inputs": {},
+             "params": checked_params(settings, params), "corrections": [], "created": now(),
+             "created_by": _who(ctx)}
+        add_corrections(e, corrections, _is_user(ctx), _who(ctx))
+        e["sources"] = sources_mod.check(store, e, inputs, sources)
         e["changed"] = now()
         await asyncio.to_thread(_apply_files, e, inputs, files)
         store.save_experiment(e)
@@ -947,9 +999,11 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         notes: Annotated[str | None, Field(description="Free notes about the experiment.")] = None,
         methods_text: Annotated[str | None, Field(description="A Methods paragraph to keep with the experiment "
                                                               "(goes into its reports).")] = None,
+        sources: Annotated[dict[str, list[dict[str, Any]] | None] | None, Field(
+            description=SOURCES_HELP + " Replaces the picks of each input given; null or [] clears one.")] = None,
     ) -> dict[str, Any]:
-        """Change an experiment's title, settings, raw files, method (or pinned version), notes or Methods
-        paragraph. Run again to see the effect."""
+        """Change an experiment's title, settings, raw files, the results of other experiments it reads, method (or
+        pinned version), notes or Methods paragraph. Run again to see the effect."""
         e = store.get_experiment(experiment)
         if method is not None:
             store.get_method(method)
@@ -961,15 +1015,13 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         settings, inputs = form(m)
         if title is not None:
             e["title"] = title.strip() or e["title"]
-        known = {s["id"] for s in settings}
-        for k, v in (params or {}).items():
-            if k not in known:
-                raise LabError(f"The method has no setting '{k}'. Settings: {', '.join(sorted(known))}.")
-            if v is None:
-                e.setdefault("params", {}).pop(k, None)
-            else:
-                e.setdefault("params", {})[k] = v
+        e["params"] = checked_params(settings, params, e.get("params"))
         _apply_files(e, inputs, files)
+        if method is not None or method_version is not None:  # another method: the picks it can't use go
+            takes = {i["id"] for i in inputs if i["kind"] == "result"}
+            e["sources"] = {k: v for k, v in sources_mod.picks(e).items() if k in takes}
+        if sources is not None:
+            e["sources"] = sources_mod.check(store, e, inputs, sources)
         if notes is not None:
             e["notes"] = notes
         if methods_text is not None:
@@ -980,29 +1032,39 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         return experiment_get(experiment)
 
     @mcp.tool()
-    def gcassay_settings(config: Annotated[str, Field(description="The text of a gcassay experiment config "
-                                                                  "(YAML).")],
-                         corrections: Annotated[str | None, Field(description="The text of its corrections file "
-                                                                              "(YAML), if any.")] = None
-                         ) -> dict[str, Any]:
-        """Read a gcassay config (and corrections file) into this plugin's settings and corrections, without
-        saving anything (the panel uses it to fill an experiment)."""
-        p, info = params_from_config(parse_yaml(config, "gcassay config"))
-        corr = corrections_from(parse_yaml(corrections, "corrections file")) if corrections else []
-        return {"params": p, "title": info["title"], "raw_file": info.get("raw_file"), "corrections": corr}
-
-    @mcp.tool()
-    def experiment_delete(experiment: Annotated[str, Field(description="Experiment id.")]) -> dict[str, Any]:
-        """Delete an experiment, its runs and its rows in the results database (raw files stay in the store)."""
-        store.get_experiment(experiment)
+    def experiment_delete(experiment: Annotated[str, Field(description="Experiment id.")],
+                          force: Annotated[bool, Field(description="Delete it even when other experiments read its "
+                                                                   "results (they then show it as missing).")] = False
+                          ) -> dict[str, Any]:
+        """Delete an experiment and its runs (raw files stay in the store). When other experiments read its results
+        it is refused, naming them (remove it from their inputs first), unless `force`."""
+        e = store.get_experiment(experiment)
+        everyone = store.list_experiments()
+        readers = [r for r in sources_mod.readers(experiment, everyone) if r["experiment"] != experiment]
+        if readers and not force:
+            names = ", ".join(f"'{r['title'] or r['experiment']}' ({r['experiment']})"
+                              for r in {r["experiment"]: r for r in readers}.values())
+            raise LabError(f"Other experiments read the results of '{e.get('title') or experiment}': {names}. Remove "
+                           "it from their inputs first, or delete it anyway (force): they then show it as missing.")
         store.delete_experiment(experiment)
         for m in store.list_methods():
             if m.get("reference") == experiment:
                 store.set_method_settings(m["id"], reference=None)
         changed("experiment", experiment=experiment, deleted=True)
-        return {"deleted": experiment}
+        for r in {r["experiment"] for r in readers}:
+            changed("sources", experiment=r, source=experiment, deleted=True)
+        return {"deleted": experiment, "readers": readers}
 
     # ------------------------------------------------------------------ running
+
+    def announce_readers(exp_id: str, run: dict) -> None:
+        """Tell the panels that the experiments reading this one have a source with a new run."""
+        try:
+            readers = sources_mod.readers(exp_id, store.list_experiments())
+        except (LabError, OSError):
+            return
+        for r in {r["experiment"] for r in readers if r["experiment"] != exp_id}:
+            changed("sources", experiment=r, source=exp_id, run=run.get("id"), status=run.get("status"))
 
     def start_run(exp_id: str, time_limit_s: float | None, fresh: bool = False, trial: dict | None = None
                   ) -> asyncio.Future:
@@ -1038,6 +1100,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             run = f.result() if not f.exception() else None
             changed("run", experiment=exp_id, run=(run or {}).get("id"), status=(run or {}).get("status", "failed"),
                     finished=True, **extra)
+            if run and not trial:  # the experiments reading this one may be out of date now: their screens redraw
+                announce_readers(exp_id, run)
 
         fut.add_done_callback(done)
         TASKS.add(fut)
@@ -1052,16 +1116,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             parsed(source)
             method = {**method, "source": source if source.endswith("\n") else source + "\n", "draft": True,
                       "version": None}
-        params = dict(e.get("params") or {})
-        if settings:
-            known = {s["id"] for s in form(method)[0]}
-            for k, v in settings.items():
-                if k not in known:
-                    raise LabError(f"The method has no setting '{k}'. Settings: {', '.join(sorted(known))}.")
-                if v is None:
-                    params.pop(k, None)
-                else:
-                    params[k] = v
+        params = checked_params(form(method)[0], settings, e.get("params"))
         return {"method": method, "params": params}
 
     def run_brief(run: dict) -> dict:
@@ -1069,9 +1124,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
                 "started": run["started"], "finished": run.get("finished"), "method": run["method"],
                 "summary": run.get("summary"), "trial": run.get("trial", False), "ms": run.get("ms"),
                 "fresh": bool(run.get("fresh")), "cache": run.get("cache"), "reason": run.get("reason"),
-                "settings": run.get("settings"), "notes": run.get("notes") or [],
-                "legacy": bool(run.get("steps")) and not any(s.get("function") for s in run.get("steps") or []),
-                "steps": [{"function": s.get("function") or s.get("id"), "kind": s.get("kind"),
+                "settings": run.get("settings"), "notes": run.get("notes") or [], "sources": run.get("sources") or {},
+                "steps": [{"function": s.get("function"), "kind": s.get("kind"),
                            "status": s.get("status"),
                            "ms": s.get("ms"), "error": s.get("error"),
                            "table": {"rows": step_output(s).get("rows"), "columns": step_output(s).get("columns")}
@@ -1102,8 +1156,8 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         its result is reused and its status is `cached` (fresh=true calculates everything). Returns the run: status,
         each step's status and table, QC flag counts, and for a failed run the method's line and what went wrong.
         Read numbers with result_table, explanations with explain, the flow with its values with flow_get.
-        With `source` or `settings` it is a trial run: it doesn't become the experiment's latest run, doesn't go to
-        the results database and saves nothing; give its run id to flow_get / function_inside / result_table to see
+        With `source` or `settings` it is a trial run: it doesn't become the experiment's latest run and saves
+        nothing; give its run id to flow_get / function_inside / result_table to see
         its values. Only the newest trial of an experiment waits: an older one still waiting comes back
         `replaced`."""
         wait = max(0.0, min(wait_s, 55))
@@ -1175,12 +1229,12 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     def result_table(
-        table: Annotated[str, Field(description="An output name (activities, concentrations, time_course, peaks, "
-                                                "calibration, flags ...) or 'step:<function>' for a step's table.")],
+        table: Annotated[str, Field(description="An output name (scores, rates, flags ...) or 'step:<function>' "
+                                                "for a step's table.")],
         run: Annotated[str | None, Field(description="Run id.")] = None,
         experiment: Annotated[str | None, Field(description="Or an experiment id: its latest run.")] = None,
         where: Annotated[dict[str, Any] | None, Field(description="Keep rows whose column equals the value (a list: "
-                                                                  "any of them), e.g. {\"compound\": \"HAME\"}.")]
+                                                                  "any of them), e.g. {\"group\": \"urban\"}.")]
         = None,
         columns: Annotated[list[str] | None, Field(description="Only these columns.")] = None,
         limit: Annotated[int, Field(description="Rows to return (max 2000).")] = 100,
@@ -1221,11 +1275,11 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     @mcp.tool()
     def provenance(
-        table: Annotated[str, Field(description="The table the number is in (e.g. concentrations).")],
-        where: Annotated[dict[str, Any], Field(description="Columns that pick one row, e.g. {\"injection\": 12, "
-                                                           "\"compound\": \"HHAME\"}.")],
-        column: Annotated[str | None, Field(description="The number's column, e.g. conc_mM (default: the last "
-                                                        "number column).")] = None,
+        table: Annotated[str, Field(description="The table the number is in (e.g. rates).")],
+        where: Annotated[dict[str, Any], Field(description="Columns that pick one row, e.g. {\"culture\": \"A3\", "
+                                                           "\"time_h\": 4}.")],
+        column: Annotated[str | None, Field(description="The number's column, e.g. growth_rate_per_h (default: the "
+                                                        "last number column).")] = None,
         run: Annotated[str | None, Field(description="Run id.")] = None,
         experiment: Annotated[str | None, Field(description="Or an experiment id: its latest run.")] = None,
     ) -> dict[str, Any]:
@@ -1235,106 +1289,108 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         r = pick_run(run, experiment)
         return explainer.provenance(store, r, table, where, column)
 
-    # ------------------------------------------------------------------ chromatograms and corrections
+    # ------------------------------------------------------------------ curves and corrections
 
-    def sequence_of(e: dict, input_id: str | None = None):
+    def resolved_settings(e: dict, m: methodfile.Method) -> dict[str, Any]:
+        """The experiment's settings: its own values, the method's defaults for the rest."""
+        values = {s["id"]: s["default"] for s in methodfile.settings(m)}
+        values.update(e.get("params") or {})
+        return values
+
+    def remembered(key: str, compute):
+        """A raw file's curves (or its table), kept for the last few files and settings asked for."""
+        with CURVES_LOCK:
+            if key in CURVES:
+                return CURVES[key]
+        value = compute()
+        with CURVES_LOCK:
+            while len(CURVES) >= CURVES_KEPT:
+                CURVES.pop(next(iter(CURVES)))
+            CURVES[key] = value
+        return value
+
+    def table_curve(df: pd.DataFrame, what: str, item: Any, item_column: str | None, x: str, y: str
+                    ) -> tuple[np.ndarray, np.ndarray, None]:
+        """One item's points from a table with one row per point (x and y columns, a column naming the item)."""
+        if not item_column:
+            raise LabError("Say which column of the table names the curves (its item column).")
+        missing = [c for c in (item_column, x, y) if c not in df.columns]
+        if missing:
+            raise LabError(f"The table {what} has no column {', '.join(missing)}. Columns: "
+                           f"{', '.join(map(str, df.columns))}.")
+        part = df[explainer.equals(df[item_column], item)][[x, y]].apply(pd.to_numeric, errors="coerce").dropna()
+        part = part.sort_values(x)
+        return part[x].to_numpy(float), part[y].to_numpy(float), None
+
+    def file_curve(e: dict, input_id: str, item: Any, item_column: str | None, x: str | None, y: str | None
+                   ) -> tuple[np.ndarray, np.ndarray, str | None]:
+        """One curve from a raw file of the experiment: a table file read like a table of the run (item, x and y
+        columns), any other file by the curve reader registered for its kind (toolbox/registry.py)."""
         import toolbox
+        from toolbox import registry
+        from toolbox.tables import TABLE_EXTENSIONS
 
         try:
             m = methodfile.parse(method_of(e)["source"])
-            file_params = [p for p in (m.recipe_function.params if m.recipe_function else []) if p.endswith("_file")]
-            channel = (e.get("params") or {}).get("channel", (m.recipe_function.defaults if m.recipe_function else
-                                                               {}).get("channel"))
-        except (LabError, SyntaxError):
-            file_params, channel = [], (e.get("params") or {}).get("channel")
-        files = experiment_inputs(e, file_params or list((e.get("inputs") or {}).keys())[:1])
-        if input_id and input_id not in files:
+        except SyntaxError as err:
+            raise LabError(f"The method can't be read (line {err.lineno}): {err.msg}.") from err
+        params = [p for p in (m.recipe_function.params if m.recipe_function else []) if p.endswith("_file")]
+        files = experiment_inputs(e, params)
+        if input_id not in files:
             raise LabError(f"The experiment has no file for the input '{input_id}'.")
-        gaml = files.get(input_id) if input_id else None
-        gaml = gaml or next((f for f in files.values()
-                             if str(f.get("name", f.get("path", ""))).lower().endswith(".gaml")),
-                            None) or next(iter(files.values()), None)
-        if not gaml:
-            raise LabError("This experiment has no GC sequence file.")
-        toolbox.cache.use(store.root / "cache")
-        with GAML_LOCK:
-            key = f"{gaml['path']}:{channel}"
-            if key not in gaml_cache:
-                gaml_cache.clear()
-                gaml_cache[key] = toolbox.read_gaml(store.path(gaml["path"]), channel if isinstance(channel, str)
-                                                    else None)
-            return gaml_cache[key]
+        f = files[input_id]
+        path = store.path(f["path"])
+        st = path.stat()
+        ext = Path(f.get("name") or path.name).suffix.lower()
+        where = f"{path}|{st.st_size}|{st.st_mtime_ns}"
+        if x and y and ext in TABLE_EXTENSIONS:
+            df = remembered(f"table|{where}", lambda: toolbox.read_table(path))
+            return table_curve(df, f.get("name") or input_id, item, item_column, x, y)
+        reader = registry.curve_reader(ext)
+        if reader is None:
+            hint = "; a table file needs the x and y columns" if ext in TABLE_EXTENSIONS else ""
+            raise LabError(f"No curves can be read from a {ext or 'nameless'} file: the toolbox has no curve reader "
+                           f"for it{hint}.")
+        settings = resolved_settings(e, m)
+        key = f"curves|{where}|{ext}|{json.dumps(jsonable(settings), sort_keys=True, default=str)}"
 
-    @mcp.tool()
-    async def chromatogram(
-        experiment: Annotated[str, Field(description="Experiment id (a GC experiment).")],
-        injection: Annotated[int, Field(description="Injection number (as in Chromeleon).")],
-        start_min: Annotated[float | None, Field(description="From this time (min); default the start.")] = None,
-        end_min: Annotated[float | None, Field(description="To this time (min); default the end.")] = None,
-        points: Annotated[int, Field(description="At most this many points (min/max kept per bucket).")] = 1200,
-    ) -> dict[str, Any]:
-        """A stretch of one injection's raw trace (time in min, signal in pA), thinned to `points`, with the peaks
-        the latest run found in that stretch (start, end, baseline, area, status) and this injection's corrections."""
-        e = store.get_experiment(experiment)
-        seq = await asyncio.to_thread(sequence_of, e)
-        inj = next((i for i in seq if i.number == injection), None)
-        if inj is None:
-            raise LabError(f"No injection {injection} (1-{len(seq)}).")
-        t, y = inj.time_min, inj.signal_pa
-        idx = thin(t, y, start_min, end_min, points)
-        peaks = []
-        if e.get("last_run"):
-            try:
-                pk = store.run_table(e["last_run"]["id"], "peaks")
-                pk = pk[pk.injection == injection]
-                cols = [c for c in ["compound", "status", "rt_expected", "rt_tolerance", "rt", "start", "end", "area",
-                                    "height", "snr", "baseline_start_y", "baseline_end_y", "note", "vendor_rt",
-                                    "vendor_area"] if c in pk.columns]
-                peaks = records(pk[cols])
-            except (LabError, KeyError, AttributeError):
-                peaks = []
-        return {"injection": injection, "name": inj.name, "time": [round(float(v), 5) for v in t[idx]],
-                "signal": [round(float(v), 5) for v in y[idx]], "peaks": peaks,
-                "corrections": [c for c in e.get("corrections") or [] if str(c.get("injection")) == str(injection)]}
+        def read() -> dict[str, Any]:
+            toolbox.cache.use(store.root / "cache")
+            return {str(jsonable(c["item"])): c for c in reader(path, settings)}
+
+        found = remembered(key, read).get(str(jsonable(item)))
+        if found is None:
+            raise LabError(f"The file {f.get('name') or input_id} has no curve {item}.")
+        return np.asarray(found["x"], float), np.asarray(found["y"], float), found.get("name")
 
     @mcp.tool()
     async def curve(
         experiment: Annotated[str, Field(description="Experiment id.")],
-        item: Annotated[Any, Field(description="Which curve: the item's value (an injection number, a sample "
-                                               "name...).")],
+        item: Annotated[Any, Field(description="Which curve: the item's value (a sample name, a culture, a "
+                                               "number...).")],
         table: Annotated[str | None, Field(description="A table of the run with one row per point (an output name "
                                                        "or 'step:<function>').")] = None,
         item_column: Annotated[str | None, Field(description="The table's column naming the curve.")] = None,
         x: Annotated[str | None, Field(description="The table's x column.")] = None,
         y: Annotated[str | None, Field(description="The table's y column.")] = None,
-        file: Annotated[str | None, Field(description="Or: a raw file input of the experiment (a GAML sequence); "
-                                                      "item is then the injection number.")] = None,
+        file: Annotated[str | None, Field(description="Or: a raw file input of the experiment. A table file (CSV, "
+                                                      "Excel...) is read with item_column, x and y; any other kind "
+                                                      "by the toolbox's curve reader for it.")] = None,
         start: Annotated[float | None, Field(description="From this x; default the start.")] = None,
         end: Annotated[float | None, Field(description="To this x; default the end.")] = None,
         points: Annotated[int, Field(description="At most this many points (min/max kept per bucket).")] = 1200,
         run: Annotated[str | None, Field(description="A run id (default the experiment's latest).")] = None,
     ) -> dict[str, Any]:
         """One curve, for a page's review card: from a table of the run (x and y columns, one curve per item), or
-        from a raw GC sequence file. Thinned to `points`."""
+        from a raw file of the experiment. Thinned to `points`: {item, name, x, y}."""
         e = store.get_experiment(experiment)
         if file:
-            seq = await asyncio.to_thread(sequence_of, e, file)
-            inj = next((i for i in seq if str(i.number) == str(item)), None)
-            if inj is None:
-                raise LabError(f"No injection {item} (1-{len(seq)}).")
-            xs, ys, name = np.asarray(inj.time_min, float), np.asarray(inj.signal_pa, float), inj.name
+            xs, ys, name = await asyncio.to_thread(file_curve, e, file, item, item_column, x, y)
         else:
             if not (table and item_column and x and y):
                 raise LabError("Give the table with its item, x and y columns (or a raw file).")
             r = pick_run(run, experiment)
-            df = store.run_table(r["id"], table)
-            missing = [c for c in (item_column, x, y) if c not in df.columns]
-            if missing:
-                raise LabError(f"The table {table} has no column {', '.join(missing)}. Columns: "
-                               f"{', '.join(map(str, df.columns))}.")
-            part = df[explainer.equals(df[item_column], item)][[x, y]].apply(pd.to_numeric, errors="coerce").dropna()
-            part = part.sort_values(x)
-            xs, ys, name = part[x].to_numpy(float), part[y].to_numpy(float), None
+            xs, ys, name = table_curve(store.run_table(r["id"], table), table, item, item_column, x, y)
         if not len(xs):
             return {"item": item, "x": [], "y": [], "name": name}
         idx = thin(xs, ys, start, end, points)
@@ -1367,19 +1423,12 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
     @mcp.tool()
     def correction_propose(
         experiment: Annotated[str, Field(description="Experiment id.")],
-        kind: Annotated[str, Field(description="One of the kinds the method declares (correction_kinds lists them; "
-                                               "the GC assay's: rename, exclude, manual_integration).")],
+        kind: Annotated[str, Field(description="One of the kinds the method declares (correction_kinds lists "
+                                               "them).")],
         reason: Annotated[str, Field(description="Why, in a sentence a reviewer understands. Required.")],
         fields: Annotated[dict[str, Any] | None, Field(description="The kind's fields, e.g. {\"respondent\": 17} or "
-                                                                   "{\"injection\": 12, \"compound\": \"PROD\", "
-                                                                   "\"start_min\": 6.41, \"end_min\": 6.55}.")]
-        = None,
-        injection: Annotated[int | None, Field(description="GC kinds: the injection number (or put it in "
-                                                           "fields).")] = None,
-        compound: Annotated[str | None, Field(description="GC kinds: the compound.")] = None,
-        start_min: Annotated[float | None, Field(description="manual_integration: peak start (min).")] = None,
-        end_min: Annotated[float | None, Field(description="manual_integration: peak end (min).")] = None,
-        new_name: Annotated[str | None, Field(description="rename: the correct injection name.")] = None,
+                                                                   "{\"culture\": \"A3\", \"start_h\": 2.5, "
+                                                                   "\"end_h\": 6}.")] = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Record a correction with its reason. From the user's own panel it applies at the next run; from an AI
@@ -1390,10 +1439,6 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
             raise LabError("Every correction needs a reason.")
         e = store.get_experiment(experiment)
         given = dict(fields or {})
-        for k, v in (("injection", injection), ("compound", compound), ("start_min", start_min),
-                     ("end_min", end_min), ("new_name", new_name)):
-            if v is not None and k not in given:
-                given[k] = v
         kinds = kinds_of(e)
         try:
             checked = declarations.check_correction(kinds, kind, given)
@@ -1440,26 +1485,7 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
         changed("corrections", experiment=experiment)
         return {"correction": c}
 
-    # ------------------------------------------------------------------ database and export
-
-    @mcp.tool()
-    def database_tables() -> list[dict[str, Any]]:
-        """The PhD-wide results database: one table per kept method output (activities, time_course,
-        concentrations ...), each with the latest run of every experiment; rows, experiments, columns."""
-        return store.db_tables()
-
-    @mcp.tool()
-    def database_query(
-        table: Annotated[str, Field(description="Table name (database_tables lists them).")],
-        where: Annotated[dict[str, Any] | None, Field(description="Column equals value (or any of a list), e.g. "
-                                                                  "{\"compound\": \"HAME\", \"strain\": \"WT\"}.")]
-        = None,
-        limit: Annotated[int, Field(description="Max rows.")] = 500,
-    ) -> dict[str, Any]:
-        """Rows across all experiments, to compare strains, conditions and assays over the PhD. Each row says which
-        experiment and run it came from."""
-        df = store.db_query(table, where, limit)
-        return {"table": table, "rows": records(df), "columns": [str(c) for c in df.columns]}
+    # ------------------------------------------------------------------ export
 
     @mcp.tool()
     async def export(
@@ -1526,35 +1552,56 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
              "source": explainer.run_source(store, r) or ""}
         return await asyncio.to_thread(standalone.make_notebook, store, m, e, r)
 
-    @mcp.tool()
-    def lab_sample(which: Annotated[Literal["gc", "survey"], Field(
-                       description="gc: a made-up GC activity assay · survey: a made-up attitude survey (scale "
-                                   "scores, reliability, group means, a regression)")] = "gc",
-                   ctx: Context | None = None) -> dict[str, Any]:
-        """Create an example experiment to try the methods without real data: the GC one (a made-up activity assay:
-        substrate SUB turned into product PROD, internal standard octanol) or the survey one (160 made-up
-        respondents answering six 1-5 items)."""
-        from .sample import make_sample, make_survey_sample
+    @mcp.tool(name="examples")
+    def examples_list() -> dict[str, Any]:
+        """The example experiments `lab_sample` can make, to try the plugin without real data: {examples: [{id,
+        title, description, method}]}."""
+        return {"examples": examples.listing()}
 
-        if which == "survey":
-            f = make_survey_sample(store)
-            e = {"id": new_id("e"), "title": "Example: made-up attitude survey", "method": "survey-scores",
-                 "inputs": {"answers_file": f}, "params": {}, "corrections": [], "created": now(),
-                 "created_by": _who(ctx)}
-            store.save_experiment(e)
-            if not store.method_settings("survey-scores").get("reference"):
-                store.set_method_settings("survey-scores", reference=e["id"])
-            changed("experiment", experiment=e["id"])
-            return experiment_summary(e)
-        f = make_sample(store)
-        e = {"id": new_id("e"), "title": "Example: made-up GC activity assay", "method": "gc-activity-assay",
-             "inputs": {"gaml_file": f}, "params": dict(SAMPLE_PARAMS), "corrections": [], "created": now(),
-             "created_by": _who(ctx)}
+    def example_experiment(title: str, method: str, files, settings: dict | None, corrections: list | None,
+                           picks: dict | None, who: str) -> dict:
+        """One experiment of an example, saved: its made-up raw files stored, its settings, corrections and the
+        results of other experiments it reads. The first one made for a method becomes its reference."""
+        m = store.get_method(method)
+        settings_form, inputs = form(m)
+        e = {"id": new_id("e"), "title": title, "method": method, "inputs": examples.stored_files(store, files),
+             "params": checked_params(settings_form, settings), "corrections": [], "created": now(),
+             "created_by": who}
+        add_corrections(e, corrections, True, "the example")
+        e["sources"] = sources_mod.check(store, e, inputs, picks)
         store.save_experiment(e)
-        if not store.method_settings("gc-activity-assay").get("reference"):
-            store.set_method_settings("gc-activity-assay", reference=e["id"])
+        if not store.method_settings(method).get("reference"):
+            store.set_method_settings(method, reference=e["id"])
         changed("experiment", experiment=e["id"])
-        return experiment_summary(e)
+        return e
+
+    @mcp.tool()
+    async def lab_sample(which: Annotated[str, Field(description="Which example: its id, as the examples tool lists "
+                                                                 "them.")],
+                         ctx: Context | None = None) -> dict[str, Any]:
+        """Create an example experiment with made-up raw files, to try a method without real data. The first
+        example made for a method becomes its reference experiment. An example that compares experiments first
+        makes and runs the experiments it reads: their ids come back in `made`."""
+        ex = examples.get(which)
+        who = _who(ctx)
+        made: dict[str, str] = {}
+        for key, spec in (getattr(ex, "SOURCES", None) or {}).items():
+            e = await asyncio.to_thread(example_experiment, spec["title"], spec["method"], spec.get("files"),
+                                        spec.get("settings"), spec.get("corrections"), None, who)
+            run = await asyncio.to_thread(runner.run, e, method_of(e))
+            changed("run", experiment=e["id"], run=run["id"], status=run["status"], finished=True)
+            if run["status"] != "done":
+                raise LabError(f"The example's experiment '{spec['title']}' didn't run: "
+                               f"{(run.get('error') or {}).get('message')}")
+            made[key] = e["id"]
+        picks = {i: [{"experiment": made[p["source"]], "result": p["result"]} for p in chosen]
+                 for i, chosen in (getattr(ex, "PICKS", None) or {}).items()}
+        e = await asyncio.to_thread(example_experiment, ex.EXPERIMENT, ex.METHOD, getattr(ex, "files", None),
+                                    getattr(ex, "SETTINGS", None), getattr(ex, "CORRECTIONS", None), picks, who)
+        out = experiment_summary(e)
+        if made:
+            out["made"] = list(made.values())
+        return out
 
     # ------------------------------------------------------------------ the flow, inside a run, code help
     from . import code_tools, flow_tools, inside_tools
@@ -1567,18 +1614,3 @@ def register(mcp: FastMCP, data_dir: Path, emit) -> Store:
 
     return store
 
-
-SAMPLE_PARAMS = {
-    "compounds": {"SUB": {"rt": 3.62}, "octanol": {"rt": 5.13}, "PROD": {"rt": 6.47}},
-    "internal_standard": "octanol",
-    "sample_patterns": [
-        {"role": "sample", "regex": r"^Act\.Assay_(?P<strain>[A-Za-z0-9]+)_(?P<time_min>\d+)min_R(?P<replicate>\d+)_"
-                                    r"(?P<substrate>[A-Z]+)$"},
-        {"role": "standard", "regex": r"^GC_std_(?P<std_conc_mM>[\d.]+)mM (?P<std_series>[A-Z])$"},
-        {"role": "blank", "regex": r"^ether$"},
-    ],
-    "cal_max_conc_mM": 2.0,
-    "concentration_factor": 1.0,
-    "rate_window_min": [0, 30],
-    "biomass_gcdw_per_l": 0.5,
-}

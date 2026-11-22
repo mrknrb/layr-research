@@ -590,7 +590,7 @@ select.fl-field {
 .fl-res:hover {
   text-decoration: underline;
 }
-/* the host's actions at a box's foot ("Review the peaks", "See the checks") */
+/* the host's actions at a box's foot ("Open Overview", "See the checks") */
 .fl-acts {
   display: flex;
   flex-wrap: wrap;
@@ -799,6 +799,7 @@ select.fl-field {
 
 /* ---------- the side panel ---------- */
 .fl-side {
+  position: relative; /* its resize strip (resize.js) sits on its left edge */
   width: 470px;
   max-width: 55%;
   border-left: 1px solid var(--border);
@@ -819,13 +820,20 @@ select.fl-field {
   border-left: 0;
 }
 .fl-sh {
+  position: relative;
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 5px 6px 5px 10px;
+  /* the close button keeps the top right corner; the buttons wrap under the title when they don't fit beside it */
+  padding: 5px 38px 5px 10px;
   border-bottom: 1px solid var(--border);
   min-height: 38px;
   flex-wrap: wrap;
+}
+.fl-sh > .fl-close {
+  position: absolute;
+  top: 7px;
+  right: 6px;
 }
 .fl-st {
   font-size: 13px;
@@ -1241,7 +1249,458 @@ img.fl-fig {
 :root[data-theme="light"] .fl-node {
   box-shadow: 0 1px 3px rgb(20 24 33 / 0.12);
 }
-/* a low flow (above the code on the method screen): the overview map would cover the boxes */
+/* a low flow (above the code in the workspace): the overview map would cover the boxes */
 .fl.short .fl-mini {
   display: none;
+}
+
+/* ---------- resizable edges (resize.js): a thin strip on the edge, or a bar under a box; shown on hover ---------- */
+.rz {
+  position: absolute;
+  z-index: 12;
+  touch-action: none;
+  user-select: none;
+}
+.rz-left,
+.rz-right {
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+}
+.rz-left {
+  left: -4px;
+}
+.rz-right {
+  right: -4px;
+}
+.rz-top {
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 9px;
+  cursor: row-resize;
+}
+/* the line on the edge and a grip in its middle: hidden until the pointer is on it */
+.rz-x::before,
+.rz-x::after,
+.rz-top::before,
+.rz-top::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  background: var(--accent);
+}
+.rz-x::before {
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 3px;
+}
+.rz-x::after {
+  top: 50%;
+  left: 1px;
+  width: 7px;
+  height: 34px;
+  margin-top: -17px;
+  border-radius: 4px;
+}
+.rz-top::before {
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 3px;
+}
+.rz-top::after {
+  left: 50%;
+  top: 1px;
+  height: 7px;
+  width: 34px;
+  margin-left: -17px;
+  border-radius: 4px;
+}
+.rz:hover::before,
+.rz:hover::after,
+.rz.dragging::before,
+.rz.dragging::after,
+.rz:focus-visible::before,
+.rz:focus-visible::after {
+  opacity: 1;
+}
+.rz:focus-visible {
+  outline: none;
+}
+/* a bar under a box (its height): a quiet grip always, the accent on hover */
+.rz-bar {
+  position: relative;
+  height: 9px;
+  margin: 0 0 2px;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+.rz-bar::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 30px;
+  margin-left: -15px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.12s, width 0.12s, margin 0.12s;
+}
+.rz-bar:hover::after,
+.rz-bar.dragging::after,
+.rz-bar:focus-visible::after {
+  background: var(--accent);
+  width: 60px;
+  margin-left: -30px;
+}
+.rz-bar:focus-visible {
+  outline: none;
+}
+.rz-bar[hidden],
+.rz[hidden] {
+  display: none;
+}
+/* while dragging, the whole page keeps the resize cursor and selects no text */
+:root.rz-dragging-x,
+:root.rz-dragging-x * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+:root.rz-dragging-y,
+:root.rz-dragging-y * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+/* ---------- the rounds of a loop (rounds.js): a table under the code, a row per round ---------- */
+.rt-all {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.rt-help {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+}
+.rt {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  min-width: 0;
+}
+.rt.inner {
+  margin-left: calc(var(--rt-depth, 1) * 14px);
+}
+.rt-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 2px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.rt-body[hidden] {
+  display: none;
+}
+.rt:has(> .rt-body[hidden]) > .rt-head {
+  border-bottom: none;
+  border-radius: var(--radius);
+}
+.rt-fold {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.rt-fold::before {
+  content: "▸";
+}
+.rt-fold[aria-expanded="true"]::before {
+  content: "▾";
+}
+.rt-fold:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.rt-code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rt.inner .rt-code::before {
+  content: "↳ ";
+  color: var(--fg-dim);
+  font-weight: 400;
+}
+.rt-count {
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.rt-count::before {
+  content: "· ";
+}
+.rt-space {
+  flex: 1;
+}
+.rt-copy {
+  flex: none;
+}
+.rt-notes:empty {
+  display: none;
+}
+.rt-notes {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px 0;
+}
+.rt-note,
+.rt-filter {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.rt-note {
+  color: var(--fg-dim);
+}
+.rt-note.warn {
+  color: var(--warning);
+}
+.rt-note.bad {
+  color: var(--danger);
+}
+.rt-filter {
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.rt-filter code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.rt-link {
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rt-link:hover {
+  text-decoration: underline;
+}
+.rt-scroll {
+  overflow: auto;
+  max-height: 266px;
+  margin: 6px 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  overscroll-behavior: contain;
+}
+.rt-scroll:focus-visible {
+  border-color: var(--accent);
+}
+.rt-scroll + .rz-bar {
+  margin: 0 8px;
+}
+table.rt-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  min-width: 100%;
+}
+.rt-table th,
+.rt-table td {
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  line-height: 21px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.rt-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-3);
+  font-weight: 600;
+}
+.rt-table th.num,
+.rt-table td.num {
+  text-align: right;
+}
+.rt-table th.loop {
+  font-family: var(--font);
+}
+.rt-mono {
+  font-family: var(--font-mono);
+}
+.rt-unit {
+  color: var(--fg-dim);
+  font-weight: 400;
+}
+.rt-cutmark {
+  color: var(--warning);
+}
+/* the round: the first column, kept in view when the table scrolls sideways */
+.rt-table .rt-k {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  text-align: right;
+}
+.rt-table th.rt-k {
+  z-index: 3;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-family: var(--font);
+}
+.rt-table .rt-k + .rt-k {
+  position: static;
+}
+.rt-table td.rt-k.last {
+  border-right: 1px solid var(--border);
+}
+.rt-table tbody tr[data-k] {
+  cursor: pointer;
+}
+.rt-table tbody tr[data-k]:hover td {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.rt-table tbody tr[data-k]:hover td.rt-k {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-2));
+}
+/* the round the code shows */
+.rt-table tbody tr[data-k].on td {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg));
+}
+.rt-table tbody tr[data-k].on td.rt-k {
+  background: color-mix(in srgb, var(--accent) 32%, var(--bg-2));
+  color: var(--fg);
+  font-weight: 700;
+}
+.rt-table tbody tr[data-k].on td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.rt-table tbody tr[data-k].failed td {
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+}
+.rt-table tbody tr[data-k].failed td.rt-k {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, var(--bg-2));
+}
+.rt-table tbody tr[data-k].failed.on td {
+  background: color-mix(in srgb, var(--danger) 24%, var(--bg));
+}
+/* a line that didn't run in that round: a faint dot */
+.rt-table td.rt-none {
+  background-image: radial-gradient(circle, var(--fg-dim) 1px, transparent 1.4px);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 6px 6px;
+  opacity: 0.8;
+}
+.rt-table td.shape {
+  color: var(--fg-dim);
+}
+.rt-table tr.rt-pad td {
+  height: auto;
+  padding: 0;
+  border: none;
+}
+.rt-table tr.rt-wait td {
+  color: var(--fg-dim);
+}
+.rt-blank {
+  color: var(--fg-dim);
+}
+.rt-inner {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.rt-inner:hover {
+  text-decoration: underline;
+}
+.rt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  justify-content: space-between;
+  padding: 0 8px 6px;
+  font-size: 11.5px;
+  color: var(--fg);
+}
+.rt-foot:empty {
+  display: none;
+}
+.rt-dim {
+  color: var(--fg-dim);
+}
+
+/* ---------- a result of other experiments: its box and its side panel ---------- */
+
+.fl-node.src.from {
+  width: 204px;
+}
+.fl-node.src.from .fl-file {
+  white-space: normal;
+}
+.fl-srcs {
+  margin: 4px 0;
+  padding-left: 16px;
+}
+.fl-srcpicks {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+.fl-srcchip {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.fl-srcchip:hover,
+.fl-srcchip:focus-visible {
+  border-color: var(--accent);
+}
+.fl-srcchip b {
+  font-weight: 600;
 }

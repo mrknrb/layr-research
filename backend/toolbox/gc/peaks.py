@@ -22,7 +22,7 @@ from typing import NamedTuple
 import numpy as np
 from scipy.signal import find_peaks, peak_widths, savgol_filter
 
-from . import cache
+from .. import cache
 from .gaml import Injection
 
 

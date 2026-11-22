@@ -19,12 +19,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-from lab import inside_tools, values  # noqa: E402
+from lab import examples, inside_tools, values  # noqa: E402
 from lab.errors import LabError  # noqa: E402
 from lab.runner import Pool, Runner, prune_runs  # noqa: E402
-from lab.sample import make_sample  # noqa: E402
 from lab.store import Store, new_id, now  # noqa: E402
-from lab.tools import SAMPLE_PARAMS  # noqa: E402
 
 PLANTS = Path(__file__).resolve().parent.parent / "sample" / "plant_growth.csv"
 LAST = float(PLANTS.read_text("utf-8").strip().splitlines()[-1].split(",")[3])  # the last plant's height
@@ -90,8 +88,9 @@ def lab(tmp_path_factory):
     plants = {"id": new_id("e"), "title": "plants", "method": "inside", "inputs": {"table_file": store.add_file(PLANTS)},
               "params": {}, "corrections": [], "created": now()}
     store.save_experiment(plants)
-    gc = {"id": new_id("e"), "title": "gc", "method": "gc-activity-assay", "inputs": {"gaml_file": make_sample(store)},
-          "params": dict(SAMPLE_PARAMS), "corrections": [], "created": now()}
+    example = examples.get("gc")
+    gc = {"id": new_id("e"), "title": "gc", "method": example.METHOD, "inputs": examples.stored_files(store, example),
+          "params": dict(example.SETTINGS), "corrections": [], "created": now()}
     store.save_experiment(gc)
     yield SimpleNamespace(store=store, runner=runner, plants=plants, gc=gc,
                           inside={"id": "inside", "version": 1, "name": "Inside", "source": INSIDE},
@@ -171,6 +170,326 @@ def test_the_failed_round_is_kept(lab):
     assert seen["n"] == 3 and [r["round"] for r in seen["rounds"]] == [1, 2, 3]
     assert seen["rounds"][-1]["failed"] and seen["rounds"][-1]["values"]["seen"]["length"] == 2
     assert broken["error"].startswith("KeyError")
+
+
+LOOPS = '''"""Loops"""
+
+import pandas as pd
+
+
+def simple(n):
+    """A simple loop."""
+    total = 0
+    for i in range(n):
+        total += i
+        label = f"r{i}"
+        part = pd.DataFrame({"a": [i, i]})
+        if i % 2 == 0:
+            even = i
+    return total
+
+
+def nested(outer, inner):
+    """Loops in a loop."""
+    cells = []
+    for row in range(outer):
+        width = row + inner
+        for col in range(width):
+            cell = row * 10 + col
+            cells.append(cell)
+        last = len(cells)
+    return cells
+
+
+def broken(n, stop):
+    """Fails in round `stop` + 1."""
+    seen = []
+    for i in range(n):
+        x = 100 // (stop - i)
+        seen.append(x)
+    return seen
+
+
+def recipe(n=500, outer=3, inner=2, stop=-1, big=0):
+    """Run them."""
+    total = simple(n)
+    cells = nested(outer, inner)
+    seen = broken(5, stop)
+    many = simple(big)
+    return {"total": total, "cells": cells, "seen": seen, "many": many}
+'''
+
+
+def line_of(text: str, after: int = 0) -> int:
+    return next(i + 1 for i, t in enumerate(LOOPS.splitlines()) if i + 1 > after and t.strip().startswith(text))
+
+
+SIMPLE, OUTER, INNER, X = line_of("for i in range(n)"), line_of("for row in"), line_of("for col in"), line_of("x = 1")
+BROKEN = line_of("for i in range(n)", OUTER)
+
+
+def loops_experiment(store, **params) -> dict:
+    exp = {"id": new_id("e"), "title": "loops", "method": "loops", "inputs": {}, "params": params,
+           "corrections": [], "created": now()}
+    store.save_experiment(exp)
+    return exp
+
+
+LOOPS_METHOD = {"id": "loops", "version": 1, "name": "Loops", "source": LOOPS}
+
+
+def rounds_of(mcp, run: dict, function: str, line: int, **kw) -> dict:
+    return call(mcp, "loop_rounds", {"run": run["id"], "function": function, "line": line, **kw})
+
+
+def test_every_round_of_a_loop_is_kept(lab):
+    run = lab.runner.run(loops_experiment(lab.store), LOOPS_METHOD, fresh=True)
+    assert run["status"] == "done", run.get("error")
+    mcp = tools_on(lab.store)
+    got = rounds_of(mcp, run, "simple", SIMPLE, limit=600)
+    assert got["total"] == got["kept"] == 500 and not got["cut"] and len(got["rows"]) == 500
+    assert [(c["name"], c["kind"]) for c in got["columns"]] == \
+        [("i", "number"), ("total", "number"), ("label", "text"), ("part", "shape"), ("even", "number")]
+    table = {"kind": "table", "rows": 2, "columns": 1}
+    rows = {r[0]: r for r in got["rows"]}
+    assert rows[1] == [1, 0, 0, "r0", table, 0]
+    assert rows[4] == [4, 3, 6, "r3", table, None]  # `even = i` runs only in even rounds: blank here
+    assert rows[250] == [250, 249, 249 * 250 // 2, "r249", table, None]
+    assert rows[497] == [497, 496, 496 * 497 // 2, "r496", table, 496]
+    assert rows[500] == [500, 499, 499 * 500 // 2, "r499", table, None]
+    page = rounds_of(mcp, run, "simple", SIMPLE, offset=248, limit=3)
+    assert [r[0] for r in page["rows"]] == [249, 250, 251] and page["rows"][1] == rows[250]
+    with pytest.raises(Exception, match="isn't the first line of a loop"):
+        asyncio.run(mcp.call_tool("loop_rounds", {"run": run["id"], "function": "simple", "line": SIMPLE - 1}))
+    # function_inside: the same shape as before, and per statement its loop, how many rounds kept, and the cut
+    inside = call(mcp, "function_inside", {"run": run["id"], "function": "simple"})
+    st = {tuple(s["names"]): s for s in inside["statements"]}
+    assert st[("i",)]["loop"] and st[("i",)]["loop_line"] is None and st[("i",)]["all"] == 500
+    assert st[("even",)]["loop_line"] == SIMPLE and st[("even",)]["all"] == 250 and st[("even",)]["n"] == 250
+    assert not st[("even",)]["cut"] and [r["round"] for r in st[("total",)]["rounds"]] == [1, 2, 3, 498, 499, 500]
+    assert "every" not in inside and all("values" not in s for s in inside["statements"])  # no long lists there
+    rec = record(lab.store, run)
+    assert rec["version"] == 3 and rec["every"]["kept"] > 0 and rec["every"]["cut"] == 0
+    simple = inside_of(lab.store, run, "simple")
+    assert "at" not in simple["every"][str(SIMPLE + 1)]  # ran in every round: round i is simply the i-th value
+    assert simple["every"][str(SIMPLE + 5)]["at"][:3] == [1, 3, 5]  # `even = i`: the rounds it ran in
+    assert str(SIMPLE - 1) not in simple["every"]  # `total = 0` ran once, outside the loop
+
+
+def test_loops_inside_loops(lab):
+    run = lab.runner.run(loops_experiment(lab.store), LOOPS_METHOD, fresh=True)
+    mcp = tools_on(lab.store)
+    outer = rounds_of(mcp, run, "nested", OUTER)
+    assert [c["name"] for c in outer["columns"]] == ["row", "width", "for col in range(width)", "last"]
+    assert outer["columns"][2]["kind"] == "loop" and "outer" not in outer
+    loop = {"kind": "loop", "line": INNER}
+    assert outer["rows"] == [[1, 0, 2, {**loop, "rounds": 2}, 2], [2, 1, 3, {**loop, "rounds": 3}, 5],
+                             [3, 2, 4, {**loop, "rounds": 4}, 9]]
+    inner = rounds_of(mcp, run, "nested", INNER)
+    assert inner["total"] == inner["kept"] == 9 and inner["outer"]["line"] == OUTER and inner["outer"]["total"] == 3
+    assert [c["name"] for c in inner["columns"]] == ["col", "cell", "cells"]
+    assert inner["rows"][0] == [1, 1, 0, 0, {"kind": "list", "length": 1, "preview": "0"}]
+    # outer round 3, round 2: the list as it was in that round
+    assert inner["rows"][6] == [3, 2, 1, 21, {"kind": "list", "length": 7, "preview": "0, 1, 10, 11, 12, 20, 21"}]
+    assert [r[:2] for r in inner["rows"]] == [[1, 1], [1, 2], [2, 1], [2, 2], [2, 3], [3, 1], [3, 2], [3, 3], [3, 4]]
+
+
+def test_a_loop_that_fails_keeps_its_rounds(lab):
+    run = lab.runner.run(loops_experiment(lab.store, stop=2), LOOPS_METHOD, fresh=True)
+    assert run["status"] == "failed" and run["error"]["function"] == "broken"
+    mcp = tools_on(lab.store)
+    got = rounds_of(mcp, run, "broken", BROKEN)
+    assert got["total"] == 3 and [c["name"] for c in got["columns"]] == ["i", "x", "seen"]
+    assert got["rows"] == [[1, 0, 50, {"kind": "list", "length": 1, "preview": "50"}],
+                           [2, 1, 100, {"kind": "list", "length": 2, "preview": "50, 100"}], [3, 2, None, None]]
+    assert got["failed"]["round"] == 3 and got["failed"]["line"] == X and "ZeroDivisionError" in got["failed"]["error"]
+    x = by_line(inside_of(lab.store, run, "broken"))[("x",)]
+    assert x["n"] == 3 and x["all"] == 2 and [r["round"] for r in x["rounds"]] == [1, 2, 3] and x["rounds"][-1]["failed"]
+
+
+ROWS = '''"""Rows"""
+
+import numpy as np
+import pandas as pd
+
+
+def answers(table):
+    """Go through the answers row by row."""
+    scores = []
+    for row in table.to_dict("records"):
+        values = [row["q1"], row["q2"], row["q3"]]
+        mean = np.mean(values)
+        pair = (row["respondent"], mean)
+        seen = {row["respondent"], row["group"]}
+        nested = {"row": row}
+        many = list(range(row["respondent"] + 12))
+        long = [row["note"]] * 12
+        scores.append(mean)
+    return scores
+
+
+def recipe(n=4):
+    """Run it."""
+    table = pd.DataFrame({"respondent": range(1, n + 1), "q1": [3] * n, "q2": [4.5] * n, "q3": [np.int64(2)] * n,
+                          "group": ["A", "B"] * (n // 2), "ok": [True] * n, "when": [pd.Timestamp("2024-05-01")] * n,
+                          "note": ["a fairly long note, " * 2] * n, "nothing": [None] * n})
+    scores = answers(table)
+    return {"scores": scores}
+'''
+
+ROWS_METHOD = {"id": "rows", "version": 1, "name": "Rows", "source": ROWS}
+ROWS_LOOP = next(i + 1 for i, t in enumerate(ROWS.splitlines()) if t.strip().startswith("for row in"))
+
+
+def rows_experiment(store, **params) -> dict:
+    exp = {"id": new_id("e"), "title": "rows", "method": "rows", "inputs": {}, "params": params,
+           "corrections": [], "created": now()}
+    store.save_experiment(exp)
+    return exp
+
+
+def test_small_lists_and_dicts_keep_a_preview_of_their_content(lab):
+    from lab.recorder import PREVIEW_TEXT
+
+    run = lab.runner.run(rows_experiment(lab.store), ROWS_METHOD, fresh=True)
+    assert run["status"] == "done", run.get("error")
+    got = rounds_of(tools_on(lab.store), run, "answers", ROWS_LOOP)
+    names = [c["name"] for c in got["columns"]]
+    assert names == ["row", "values", "mean", "pair", "seen", "nested", "many", "long", "scores"]
+    assert {c["name"]: c["kind"] for c in got["columns"]}["row"] == "shape"  # still a size, now with its content
+    first = dict(zip(names, got["rows"][0][1:]))
+    assert first["row"] == {"kind": "dict", "length": 9, "preview": "respondent=1, q1=3, q2=4.5, q3=2, group=A, ok=True, "
+                            "when=2024-05-01T00:00:00, …"}
+    assert len(first["row"]["preview"]) <= PREVIEW_TEXT
+    assert first["values"] == {"kind": "list", "length": 3, "preview": "3, 4.5, 2"}
+    assert first["pair"] == {"kind": "list", "length": 2, "preview": "1, 3.16667"}
+    assert first["seen"]["length"] == 2 and sorted(first["seen"]["preview"].split(", ")) == ["1", "A"]
+    assert first["nested"] == {"kind": "dict", "length": 1}  # not plain inside: its size only
+    assert first["many"] == {"kind": "list", "length": 13}  # more than 12 items: its size only
+    assert first["long"]["length"] == 12 and first["long"]["preview"].endswith(", …")
+    assert first["scores"] == {"kind": "list", "length": 1, "preview": "3.16667"}
+    last = dict(zip(names, got["rows"][-1][1:]))
+    assert last["many"] == {"kind": "list", "length": 16} and last["scores"]["preview"].count(",") == 3
+
+
+def test_a_preview_counts_against_the_budget(tmp_path):
+    from lab.recorder import Inside, Recorder, load, light_count
+    from lab.values import ValueStore
+
+    source = ROWS.replace("def recipe(n=4)", "def recipe(n=400)")
+    path = tmp_path / "rows.py"
+    path.write_text(source, "utf-8")
+    kept = {}
+    for budget in (10**6, 1500):
+        inside = Inside(source, str(path), ValueStore(tmp_path / str(budget)), all_budget=budget)
+        rec = Recorder(inside=inside)
+        module = load(source, path, rec, {}, "recipe")
+        inside.start()
+        try:
+            module.recipe()
+        finally:
+            inside.stop()
+        report = inside.report(rec.report()["calls"])
+        every = next(c for c in report["calls"].values() if c["function"] == "answers")["every"]
+        kept[budget] = (report["every"], every)
+    big, small = kept[10**6], kept[1500]
+    values = sum(len(col) for e in big[1].values() for col in e["values"].values())
+    assert big[0]["kept"] >= light_count(big[1]) > values  # previews count more than one value each
+    assert small[0]["cut"] >= 1 and small[0]["kept"] <= 1500 + 10  # one statement may pass it by its last previews
+
+
+def test_a_loop_longer_than_the_rounds_kept(lab):
+    from lab.recorder import ALL_ROUNDS
+
+    big = ALL_ROUNDS + 5
+    run = lab.runner.run(loops_experiment(lab.store, n=2, big=big), LOOPS_METHOD, fresh=True)
+    assert run["status"] == "done", run.get("error")
+    mcp = tools_on(lab.store)
+    second = [c["id"] for c in calls_of(lab.store, run)["calls"] if c["function"] == "simple"][1]
+    got = rounds_of(mcp, run, "simple", SIMPLE, call=second, offset=ALL_ROUNDS - 2, limit=50)
+    assert got["total"] == big and got["kept"] == ALL_ROUNDS and got["cut"] and "first 10000 rounds" in got["why"]
+    assert [r[0] for r in got["rows"]] == [ALL_ROUNDS - 1, ALL_ROUNDS] and got["rows"][-1][1] == ALL_ROUNDS - 1
+    st = by_line(inside_of(lab.store, run, "simple", 1))
+    assert st[("total",)]["n"] == big and st[("total",)]["all"] == ALL_ROUNDS and st[("total",)]["cut"] == "rounds"
+    assert [r["round"] for r in st[("total",)]["rounds"]][-1] == big  # the full last rounds are still there
+
+
+def in_process_runner(store, **job_extra):
+    """A runner calculating in this very process, with more settings given to the job."""
+    import importlib
+
+    out = sys.stdout
+    worker = importlib.import_module("lab.worker")
+    sys.stdout = out  # the worker sends its answers on the real stdout; here it is called in this process
+
+    class InProcess:
+        def run(self, job, progress=None, time_limit_s=None):
+            return worker.run_job({**job, **job_extra})
+
+        def close(self):
+            pass
+
+    return Runner(store, InProcess())
+
+
+def test_a_statement_that_runs_once_uses_no_budget(tmp_path):
+    from lab.recorder import Inside, Recorder, load
+    from lab.values import ValueStore
+
+    source = ("def once(x):\n    a = x + 1\n    b = a * 2\n    return b\n\n\n"
+              "def recipe():\n    total = 0\n    for i in range(40):\n        total += once(i)\n    return total\n")
+    path = tmp_path / "once.py"
+    path.write_text(source, "utf-8")
+    inside = Inside(source, str(path), ValueStore(tmp_path / "values"), all_budget=81)
+    rec = Recorder(inside=inside)
+    module = load(source, path, rec, {}, "recipe")
+    inside.start()
+    try:
+        module.recipe()
+    finally:
+        inside.stop()
+    report = inside.report(rec.report()["calls"])
+    # the loop's 40 rounds of `i` and `total` fit; `total = 0` and the 40 calls' `a` and `b` cost nothing
+    assert report["every"]["cut"] == 0 and report["every"]["kept"] == 80, report["every"]
+
+
+def test_the_light_values_have_a_budget_per_run(tmp_path):
+    store = Store(tmp_path / "lab")
+    runner = in_process_runner(store, all_budget=700)
+    run = runner.run(loops_experiment(store), LOOPS_METHOD, fresh=True)
+    assert run["status"] == "done", run.get("error")
+    rec = record(store, run)
+    assert rec["every"]["budget"] == 700 and rec["every"]["kept"] <= 700 and rec["every"]["cut"] >= 1
+    simple = by_line(inside_of(store, run, "simple"))
+    assert all(s["n"] in (250, 500) for s in simple.values() if s.get("loop_line") or s.get("loop"))  # all counted
+    assert simple[("i",)]["cut"] == "budget" and 100 < simple[("i",)]["all"] < 500
+    got = rounds_of(tools_on(store), run, "simple", SIMPLE, limit=1000)
+    assert got["cut"] and "as many values" in got["why"] and got["kept"] == simple[("i",)]["all"]
+    nested = by_line(inside_of(store, run, "nested"))
+    assert nested[("row",)]["cut"] == "budget" and "all" not in nested[("row",)]  # the budget was used up before
+
+
+def test_a_remembered_step_shows_the_same_rounds(lab):
+    exp = loops_experiment(lab.store, n=40)
+    fresh = lab.runner.run(exp, LOOPS_METHOD, fresh=True)
+    moved = {**LOOPS_METHOD, "source": LOOPS.replace("import pandas as pd\n", "import pandas as pd\n\nNOTE = 1\n"),
+             "version": None}  # every line two further down, no step changed
+    again = lab.runner.run(exp, moved, trial=True)
+    assert statuses(again)["simple"] == statuses(again)["nested"] == "cached", statuses(again)
+    mcp = tools_on(lab.store)
+    for function, line in (("simple", SIMPLE), ("nested", OUTER), ("nested", INNER)):
+        a = rounds_of(mcp, fresh, function, line)
+        b = rounds_of(mcp, again, function, line + 2)
+        moved_rows = [[{**v, "line": v["line"] + 2} if isinstance(v, dict) and v.get("kind") == "loop" else v
+                       for v in row] for row in a["rows"]]  # an inner loop's column names its line
+        assert a["rows"] and moved_rows == b["rows"] and a["total"] == b["total"], (function, line)
+        assert [(c["name"], c["line"] + 2, c["kind"]) for c in a["columns"]] == \
+            [(c["name"], c["line"], c["kind"]) for c in b["columns"]]
+    ia = call(mcp, "function_inside", {"run": fresh["id"], "function": "nested"})
+    ib = call(mcp, "function_inside", {"run": again["id"], "function": "nested"})
+    assert ib["call"]["cached"]
+    assert [(s["names"], s["loop_line"] and s["loop_line"] + 2, s["all"]) for s in ia["statements"]] == \
+        [(s["names"], s["loop_line"], s["all"]) for s in ib["statements"]]
 
 
 def test_values_get_a_size_budget(lab, tmp_path):
@@ -554,33 +873,6 @@ def test_figures_are_stored_once_and_shown_returned_or_not(lab):
     assert inside["returned"]["file"] == steps["heights_figure"]["output"]["file"]
 
 
-def test_the_results_database_after_remembered_runs(lab):
-    exp = {**lab.gc, "id": new_id("e"), "title": "gc db"}
-    lab.store.save_experiment(exp)
-
-    def activities():
-        df = lab.store.db_query("activities", limit=100000)
-        return df[df.experiment == exp["id"]]
-
-    x = lab.runner.run(exp, lab.method)
-    assert set(activities().run) == {x["id"]}
-    again = lab.runner.run(exp, lab.method)  # every table the same: only the run's id and time change
-    rows = activities()
-    assert set(rows.run) == {again["id"]} and len(rows) == len(lab.store.run_table(x["id"], "activities"))
-    other = {**exp, "params": {**exp["params"], "biomass_gcdw_per_l": 0.3}}
-    lab.store.save_experiment(other)
-    y = lab.runner.run(other, lab.method)
-    values_y = sorted(activities().activity_U_per_gCDW.dropna())
-    lab.store.save_experiment(exp)
-    back = lab.runner.run(exp, lab.method)  # remembered from the first run, but the database holds y's numbers
-    assert set(statuses(back).values()) == {"cached"}
-    rows = activities()
-    assert set(rows.run) == {back["id"]} and sorted(rows.activity_U_per_gCDW.dropna()) != values_y
-    assert sorted(rows.activity_U_per_gCDW.dropna()) == \
-        sorted(lab.store.run_table(back["id"], "activities").activity_U_per_gCDW.dropna())
-    assert y["id"] not in set(rows.run)
-
-
 def test_a_function_called_many_times_keeps_its_first_calls_inside(lab):
     source = INSIDE.replace("    for value in table.height_cm:\n", "    for value in list(table.height_cm) * 2:\n")
     run = lab.runner.run(lab.plants, {**lab.inside, "source": source}, fresh=True)
@@ -615,7 +907,6 @@ def test_a_trial_run_of_an_unsaved_source(lab):
     assert trial["status"] == "done" and trial["trial"] and trial["method"]["version"] is None
     assert statuses(trial)["walk"] == "done" and statuses(trial)["read_table"] == "cached"
     assert lab.store.get_experiment(lab.plants["id"]).get("last_run") == before
-    assert trial["id"] not in set(lab.store.db_query("walked")["run"])  # not in the results database
     assert inside_of(lab.store, trial, "walk")["args"]["factor"] == 3
 
 

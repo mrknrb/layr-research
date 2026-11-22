@@ -23,7 +23,7 @@ def wires_without_value(g: dict) -> list:
 
 async def test_flow_end_to_end(tmp_path: Path):
     async with server(tmp_path) as s:
-        exp = value(await s.call_tool("lab_sample", {}))
+        exp = value(await s.call_tool("lab_sample", {"which": "gc"}))
         eid = exp["experiment"]
         first = value(await s.call_tool("run", {"experiment": eid}))
         assert first["status"] == "done", first
@@ -105,7 +105,7 @@ async def test_a_step_that_gives_a_number_in_a_trial_run(tmp_path: Path):
     """A new step that returns a number (not a table), tried in a trial run: the run reports it, and the trial's
     calls are explained from the trial itself (explain_function and function_inside count the same calls)."""
     async with server(tmp_path) as s:
-        eid = value(await s.call_tool("lab_sample", {}))["experiment"]
+        eid = value(await s.call_tool("lab_sample", {"which": "gc"}))["experiment"]
         value(await s.call_tool("run", {"experiment": eid}))
         edit = value(await s.call_tool("flow_edit", {"experiment": eid, "ops": [
             {"op": "new_function", "name": "count_rows", "params": ["table"], "sentence": "How many rows.",
@@ -148,7 +148,7 @@ async def test_with_a_hub_a_remembered_run_comes_back_at_once_and_no_tool_waits(
             except OSError:
                 time.sleep(0.1)
         async with server(tmp_path / "home", f"http://127.0.0.1:{port}/mcp") as s:
-            eid = value(await s.call_tool("lab_sample", {}))["experiment"]
+            eid = value(await s.call_tool("lab_sample", {"which": "gc"}))["experiment"]
             src = value(await s.call_tool("method_get", {"method": "gc-activity-assay"}))["source"]
             value(await s.call_tool("run", {"experiment": eid}))
             for args in ({"experiment": eid, "source": src}, {"experiment": eid}):
@@ -172,3 +172,21 @@ async def test_with_a_hub_a_remembered_run_comes_back_at_once_and_no_tool_waits(
     finally:
         hub.kill()
         hub.wait()
+
+
+async def test_every_example_is_listed_made_and_runs(tmp_path: Path):
+    """The examples come from their registry (lab/examples/): each one is made through the server and its run is
+    done; an unknown example is refused with the ones there are."""
+    from test_server import error_text
+
+    async with server(tmp_path) as s:
+        listed = value(await s.call_tool("examples", {}))["examples"]
+        assert [e["id"] for e in listed] == ["survey", "gc", "compare"]
+        assert all(e["title"] and e["description"] and e["method"] for e in listed)
+        for e in listed:
+            made = value(await s.call_tool("lab_sample", {"which": e["id"]}))
+            assert made["method"] == e["method"]
+            run = value(await s.call_tool("run", {"experiment": made["experiment"]}))
+            assert run["status"] == "done", (e["id"], run.get("error"))
+        unknown = await s.call_tool("lab_sample", {"which": "nope"})
+        assert "Examples: survey, gc, compare" in error_text(unknown)

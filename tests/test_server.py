@@ -48,6 +48,21 @@ def error_text(result: Any) -> str:
     return " ".join(c.text for c in result.content if c.type == "text")
 
 
+def test_import_starts_no_worker(tmp_path: Path):
+    """`import server` (tests, tools) starts no calculation process; only running the server warms one."""
+    import subprocess
+
+    code = ("import time\nfrom lab import runner\nstarted = []\n"
+            "runner.Worker.__init__ = lambda self: started.append(1)\n"
+            "import server\ntime.sleep(0.5)\nprint(len(started), server.POOL._warm)")
+    env = {**os.environ, "LAYR_DATA_DIR": str(tmp_path)}
+    env.pop("LAYR_HUB_URL", None)
+    out = subprocess.run([sys.executable, "-c", code], cwd=PLUGIN / "backend", env=env, capture_output=True, text=True,
+                         timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["0", "None"], out.stdout
+
+
 async def test_tools_have_descriptions(tmp_path: Path):
     async with server(tmp_path) as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}

@@ -1,1 +1,2 @@
-"""The Research plugin's methods engine: explainable, reusable analysis methods (see docs in engine.py)."""
+"""The Research plugin's methods engine: methods as plain Python files, experiments, runs and their explanations
+(the README's file map says which module does what)."""

@@ -1,7 +1,7 @@
 """Remembering slow results on disk, so a rerun takes a fraction of the time.
 
-Reading a GC sequence (a GAML file of 100 MB) and integrating every peak are the slow parts of an analysis. Their
-results depend only on their inputs, so they are kept: in memory while the calculation process runs, and on disk
+Reading a large raw file and measuring many small things in it can be the slow parts of an analysis. Their results
+depend only on their inputs, so a toolbox function can keep them: in memory while the calculation process runs, and on disk
 (in the folder given to `use`) for the next start. A result is found again by a fingerprint of its inputs; different
 inputs give a different fingerprint, so a remembered result is never one for other inputs.
 
@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 _lock = threading.RLock()
 _folder: Path | None = None
-_big: dict[str, Any] = {}  # name -> object; at most BIG_IN_MEMORY of them (GAML sequences are large)
+_big: dict[str, Any] = {}  # name -> object; at most BIG_IN_MEMORY of them (whole raw files are large)
 _entries: dict[str, dict[str, Any]] = {}  # namespace -> {key: value}
 _changed: set[str] = set()
 BIG_IN_MEMORY = 2
@@ -60,7 +60,7 @@ def _read(path: Path) -> Any:
 
 
 def remember_big(name: str, compute: Callable[[], Any]) -> Any:
-    """One large result (a parsed GAML file), by name: from memory, from disk, or computed and kept."""
+    """One large result (a whole file read), by name: from memory, from disk, or computed and kept."""
     with _lock:
         if name in _big:
             return _big[name]
@@ -91,7 +91,7 @@ def _namespace(namespace: str) -> dict[str, Any]:
             except Exception:
                 data = {}
         _entries[namespace] = data
-        if len(_entries) > 8:  # keep a few sequences' peaks in memory
+        if len(_entries) > 8:  # keep a few namespaces in memory
             oldest = next(iter(_entries))
             if oldest != namespace and oldest not in _changed:
                 _entries.pop(oldest)
@@ -99,7 +99,7 @@ def _namespace(namespace: str) -> dict[str, Any]:
 
 
 def remember(namespace: str, key: str, compute: Callable[[], Any]) -> Any:
-    """One of many small results (a peak), by namespace (the sequence) and key (its inputs' fingerprint)."""
+    """One of many small results, by namespace (e.g. the file they come from) and key (its inputs' fingerprint)."""
     with _lock:
         data = _namespace(namespace)
         if key in data:

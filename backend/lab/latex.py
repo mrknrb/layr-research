@@ -1,7 +1,7 @@
 """Python code drawn as typeset math: LaTeX that both KaTeX (the panel) and matplotlib's mathtext (reports) draw.
 
-A formula function's body becomes equations: `return rate_mM_per_min * 1000 / biomass_gCDW_per_L` in a function
-`specific_activity` is drawn as specific activity = rate·1000 / biomass, with the units from the names
+A formula function's body becomes equations: `return rate_mM_per_min * 1000 / cells_g_per_L` in a function
+`specific_rate` is drawn as specific rate = rate·1000 / cells, with the units from the names
 (`rate_mM_per_min` → rate [mM/min]). With a recorded call's numbers the same equation is drawn again with the
 numbers put in. Only drawing happens here: the numbers come from the run, nothing is computed for the result.
 """

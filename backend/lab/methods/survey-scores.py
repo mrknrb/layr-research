@@ -11,9 +11,6 @@ import statsmodels.formula.api as smf
 
 from toolbox import flag, flags_table, read_table
 
-# The results kept in the results database, to compare surveys and waves.
-DATABASE = ["scores", "group_means", "model"]
-
 ITEMS = ["q1", "q2", "q3", "q4", "q5", "q6"]
 REVERSED = ["q3", "q5"]
 

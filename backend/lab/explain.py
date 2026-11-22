@@ -235,19 +235,20 @@ def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, An
     import importlib
     import inspect
 
-    import toolbox
+    from toolbox import registry
 
-    obj = getattr(toolbox, name, None)
-    if obj is None or name not in toolbox.__all__:
-        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(toolbox.__all__)}.")
+    found = registry.find(name)
+    if found is None:
+        raise LabError(f"The toolbox has no `{name}`. It has: {', '.join(registry.everything())}.")
+    imported_from, obj = found
     doc = methodfile.parse_doc(inspect.getdoc(obj) or "")
     try:
         source = inspect.getsource(obj)
     except (OSError, TypeError):
         source = ""
     module = getattr(obj, "__module__", "toolbox")
-    view = {"name": name, "kind": "toolbox", "module": module, "sentence": doc.sentence, "text": doc.text,
-            "code": source, "signature": plain_signature(name, obj) if callable(obj) else name,
+    view = {"name": name, "kind": "toolbox", "module": module, "import": imported_from, "sentence": doc.sentence,
+            "text": doc.text, "code": source, "signature": plain_signature(name, obj) if callable(obj) else name,
             "formulas": [{"latex": f["latex"], "from": "docstring", "code": f["code"]}
                          for f in latex.draw_formula_lines(doc.formula)],
             "is_function": inspect.isfunction(obj)}
@@ -261,9 +262,10 @@ def toolbox_view(name: str, calls: dict[str, Any] | None = None) -> dict[str, An
 
 
 def toolbox_docs() -> list[dict[str, Any]]:
-    import toolbox
+    """Every function of the toolbox and its add-ons (see toolbox_view); `import` says where a method imports it."""
+    from toolbox import registry
 
-    return [toolbox_view(n) for n in toolbox.__all__]
+    return [toolbox_view(n) for n in registry.everything()]
 
 
 # ---------------------------------------------------------------------------------------------------- runs
@@ -489,6 +491,66 @@ def column_creator(run: dict[str, Any], column: str) -> dict[str, Any] | None:
     return None
 
 
+@lru_cache(maxsize=8)
+def _source_table(path: str, mtime: float):
+    import pandas as pd
+
+    try:
+        return pd.read_csv(path)
+    except (OSError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+
+
+def source_step(store: Store, run: dict[str, Any], v: float, ctx_row: dict[str, Any] | None,
+                hints: list[str]) -> dict[str, Any] | None:
+    """When a number came in through a result input (lab/sources.py): the experiment, run, table, row and column it
+    came from, so the panel can open it there. None when no stacked table of the run holds it."""
+    import pandas as pd
+
+    from .compare import _keys
+    from .sources import when
+
+    for input_id, rec in (run.get("sources") or {}).items():
+        path = store.run_dir(run["id"]) / str(rec.get("file") or "")
+        if not rec.get("file") or not path.is_file():
+            continue
+        df = _source_table(str(path), path.stat().st_mtime)
+        numeric = [c for c in df.columns if c not in ("experiment", "experiment_id")
+                   and pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+        numeric.sort(key=lambda c: (c not in hints, hints.index(c) if c in hints else 0))
+        for col in numeric:
+            rows = df[(df[col] - v).abs() <= 1e-9 * max(1.0, abs(v))]
+            for k, x in (ctx_row or {}).items():  # the same experiment, respondent, group... as the row asked about
+                if k in rows.columns and k != col and x is not None and not isinstance(x, float):
+                    narrower = rows[equals(rows[k], x)]
+                    if len(narrower):
+                        rows = narrower
+            if not len(rows):
+                continue
+            row = jsonable(rows.iloc[0].to_dict())
+            src = next((f for f in rec.get("from") or [] if f.get("experiment") == row.get("experiment_id")
+                        and f.get("label", f.get("title")) == row.get("experiment")), None) or \
+                next((f for f in rec.get("from") or [] if f.get("experiment") == row.get("experiment_id")), None)
+            if src is None:
+                continue
+            own = {k: x for k, x in row.items() if not k.startswith(("experiment", "from_experiment"))}
+            where: dict[str, Any] = {}
+            try:
+                original = store.run_table(src["run"], src["result"])
+                keys = _keys(original, original) or []
+                where = {k: own.get(k) for k in keys if k in own}
+            except LabError:
+                pass
+            if not where:  # no column tells its rows apart: every text or whole number of the row
+                where = {k: x for k, x in own.items() if isinstance(x, (str, int)) and not isinstance(x, bool)}
+            return {"kind": "source", "function": None, "input": input_id, "experiment": src["experiment"],
+                    "title": src.get("title"), "run": src["run"], "finished": src.get("finished"),
+                    "result": src["result"], "where": where, "column": col, "value": v,
+                    "sentence": f"This number came in from the experiment '{src.get('title')}': its table "
+                                f"{src['result']}, run {src['run']} ({when(src.get('finished'))}), column {col}."}
+    return None
+
+
 def provenance(store: Store, run: dict[str, Any], table: str, where: dict[str, Any], column: str | None = None,
                value: float | None = None, depth: int = 4, max_nodes: int = 10) -> dict[str, Any]:
     """Where one number of a run's table came from: the chain of recorded calls that produced it."""
@@ -524,7 +586,7 @@ def provenance(store: Store, run: dict[str, Any], table: str, where: dict[str, A
     seen_calls: set[int] = set()
     settings = set(method.recipe_function.params if method.recipe_function else [])
 
-    def follow(v: float, ctx_row: dict[str, Any] | None, level: int) -> None:
+    def follow(v: float, ctx_row: dict[str, Any] | None, level: int, hints: list[str]) -> None:
         if level > depth or len(out["chain"]) >= max_nodes:
             return
         found = _candidates(store, run["id"], float(v))
@@ -533,6 +595,11 @@ def provenance(store: Store, run: dict[str, Any], table: str, where: dict[str, A
         if level == 0 and inside is not None:  # the number's column was made by this step: look only inside it
             found = [(c, w) for c, w in found if c["id"] in inside]
         if not found:
+            # no call of this run made it: it may have come in from another experiment (a result input)
+            if run.get("sources") and not any(n.get("kind") == "source" for n in out["chain"]):
+                step = source_step(store, run, float(v), ctx_row, hints)
+                if step is not None:
+                    out["chain"].append({**step, "level": level})
             return
         found.sort(key=lambda cw: _score(cw[0], cw[1], ctx_row, method))
         call, where = found[0]
@@ -547,9 +614,9 @@ def provenance(store: Store, run: dict[str, Any], table: str, where: dict[str, A
                 continue
             if float(xv) in SKIP_VALUES or k in settings or _close(float(xv), float(v)):
                 continue
-            follow(float(xv), ctx_row, level + 1)
+            follow(float(xv), ctx_row, level + 1, [k])
 
-    follow(float(value), row, 0)
+    follow(float(value), row, 0, [column] if column else [])
     if not out["chain"]:
         maker = creator["function"] if creator else table_maker(store, run, table)
         out["note"] = ("No separate formula returned this number: it was worked out inside the step "

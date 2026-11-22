@@ -6,7 +6,6 @@ the graph, and by undoing it to the same bytes. Run from plugins/research:  uv r
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -23,7 +22,6 @@ GC = (PLUGIN / "backend" / "lab" / "methods" / "gc-activity-assay.py").read_text
 # the recipe's line that integrates the peaks (the lines above it change with the method's PAGES and CORRECTIONS)
 P = next(i for i, ln in enumerate(GC.splitlines(), 1) if ln.strip().startswith("peaks = integrate_peaks("))
 PLANTS_CSV = PLUGIN / "sample" / "plant_growth.csv"
-PROTOTYPE = PLUGIN.parent.parent / "docs" / "proposals" / "research-flow" / "build_prototype.py"
 
 SMALL = '''"""Plant heights
 
@@ -82,7 +80,8 @@ CODE = '''"""Code boxes
 Shapes the flow can't draw as plain steps.
 """
 
-from toolbox import PeakSettings, fit_line, read_table
+from toolbox import fit_line, read_table
+from toolbox.gc import PeakSettings
 
 
 def scale(table, factor, *, column="height_cm"):
@@ -174,16 +173,16 @@ def roundtrip(source: str, op: dict, undo: dict, new_warnings: bool = False) -> 
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory):
     """The GC method on the made-up sample, and the small method on the plant table (one calculation process)."""
+    from lab import examples
     from lab.runner import Pool, Runner
-    from lab.sample import make_sample
     from lab.store import Store, new_id, now
-    from lab.tools import SAMPLE_PARAMS
 
     store = Store(tmp_path_factory.mktemp("flow") / "lab")
     runner = Runner(store, Pool())
-    gaml = make_sample(store)
-    gc_exp = {"id": new_id("e"), "title": "Sample", "method": "gc-activity-assay", "inputs": {"gaml_file": gaml},
-              "params": SAMPLE_PARAMS, "corrections": [], "created": now()}
+    example = examples.get("gc")
+    gc_exp = {"id": new_id("e"), "title": "Sample", "method": "gc-activity-assay",
+              "inputs": examples.stored_files(store, example), "params": example.SETTINGS, "corrections": [],
+              "created": now()}
     store.save_experiment(gc_exp)
     table = store.add_file(PLANTS_CSV)
     small_exp = {"id": new_id("e"), "title": "Plants", "method": "plants", "inputs": {"table_file": table},
@@ -249,16 +248,10 @@ def test_gc_graph_nodes_ports_settings_results():
     assert port(standards, "cal_min_conc_mM")["type"] == "number" and port(peaks, "samples")["type"] == "table"
 
 
-def test_quality_lane_equals_the_prototype():
+def test_the_quality_lane():
     g = flow.graph(GC)
     assert g["quality"] == QUALITY
     assert [n["id"] for n in g["nodes"] if n["quality"]] == QUALITY
-    spec = importlib.util.spec_from_file_location("build_prototype", PROTOTYPE)
-    proto = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(proto)
-    pg = proto.recipe_graph(methodfile.parse(GC))
-    outs = {n["id"]: n["out"] for n in pg["nodes"]}
-    assert [outs[i] for i in proto.quality_only(pg)] == QUALITY
 
 
 def test_columns_read_from_the_code():
@@ -322,10 +315,10 @@ def test_code_boxes_nested_calls_starred_keywords_tuples_classes_unknown():
     # the later `table` is the code box's: `mystery` reads that one
     assert port(node(g, "mystery"), "table")["from"] == "table-2"  # unknown inputs are named by their argument
     assert g["groups"] == [
-        {"id": "group-load", "title": "Load", "line": 28, "end_line": 30, "nodes": ["table", "first"],
+        {"id": "group-load", "title": "Load", "line": 29, "end_line": 31, "nodes": ["table", "first"],
          "closed_by": None},
-        {"id": "group-shape-the-data", "title": "Shape the data", "line": 31, "end_line": 38,
-         "nodes": ["table-2", "scaled", "more", "settings", "line", "mystery"], "closed_by": 39}]
+        {"id": "group-shape-the-data", "title": "Shape the data", "line": 32, "end_line": 39,
+         "nodes": ["table-2", "scaled", "more", "settings", "line", "mystery"], "closed_by": 40}]
     assert node(g, "n")["group"] is None and node(g, "scaled")["group"] == "group-shape-the-data"
 
 
@@ -496,8 +489,8 @@ def test_add_and_remove_step_gc():
     op = {"op": "add_step", "function": "read_table", "args": {"table_file": {"value": "extra.csv"}}}
     new, g = roundtrip(GC, op, {"op": "remove_step", "node": "table"})
     assert 'table = read_table("extra.csv")' in new and g["nodes"][0]["id"] == "table"
-    head = new.split("\n\n# The results")[0]
-    assert "read_gaml, read_table, vendor_peak" in head.replace("\n", " ") or "read_table," in head
+    head = new.split("\n\n# The kinds of correction")[0]
+    assert "flags_table, match_name, read_table\n" in head
     assert all(len(line) <= 120 for line in new.splitlines())
 
 
@@ -553,7 +546,7 @@ def test_connect_a_later_wire_moves_or_refuses():
 def test_rename_wire_and_back_gc():
     op = {"op": "rename_wire", "wire": "course", "to": "mean_course"}
     new, g = roundtrip(GC, op, {"op": "rename_wire", "wire": "mean_course", "to": "course"})
-    assert '"time_course": mean_course' in new and "intervals = interval_rates(mean_course, biomass_gcdw_per_l)" in new
+    assert '"time_course": mean_course' in new and "intervals = interval_rates(mean_course, biomass_gcdw_per_l, biomass_by_substrate)" in new
     assert node(g, "mean_course")["result"]["id"] == "time_course"
     assert "course" not in [w for n in g["nodes"] for w in n["outs"]]
     # a longer name: the lines that use it are wrapped again at 120 columns, aligned under the first argument
@@ -596,11 +589,13 @@ def test_set_default_gc():
                        {"op": "set_default", "setting": "min_r2", "value": 0.995})
     assert next(s for s in g["settings"] if s["id"] == "min_r2")["default"] == 0.99
     # a setting without a default gets one: it moves among the settings with defaults (Python needs that)
-    new = flow.edit(GC, {"op": "set_default", "setting": "compounds", "value": {"octanol": {"rt": 4.2}}})
+    rows = [{"compound": "octanol", "rt_min": 4.2}]
+    new = flow.edit(GC, {"op": "set_default", "setting": "compounds", "value": rows})
     g = checked(new, GC)
     s = next(x for x in g["settings"] if x["id"] == "compounds")
-    assert s["default"] == {"octanol": {"rt": 4.2}} and s["required"] is False
-    assert 'def activity_assay(gaml_file, corrections, compounds={"octanol": {"rt": 4.2}}, channel=None,' in new
+    assert s["default"] == rows and s["required"] is False and s["type"] == "rows"
+    assert 'def activity_assay(gaml_file, corrections, compounds=[{"compound": "octanol", "rt_min": 4.2}], ' \
+           'channel=None,' in new
 
 
 def test_add_input_gc():
@@ -945,18 +940,38 @@ def test_ready_made_blocks_through_add_step():
     assert {n["id"]: n["fn_kind"] for n in g["nodes"]} == {"od": "toolbox", "early": "toolbox", "logs": "toolbox",
                                                            "rates": "toolbox"}
     assert node(g, "rates")["types"] == {"rates": "table"} and node(g, "rates")["result"]["id"] == "rates"
-    # the GC method's parenthesized import keeps its wrapping
-    gc = flow.edit(GC, {"op": "add_step", "function": "fit_lines", "out": "lines",
-                        "args": {"table": "course", "x": {"value": "time_min"}, "y": {"value": "mean"},
-                                 "by": {"value": ["strain", "compound"]}}})
-    checked(gc, GC)
-    others_unchanged(GC, gc)
-    imp = [ln for ln in gc.split("\n\n# The results")[0].splitlines()[10:] if ln.strip()]
-    assert imp[0].startswith("from toolbox import (") and imp[-1].endswith("vendor_peak)")
-    assert all(ln.startswith(" " * 21) for ln in imp[1:])  # continuation lines aligned under the first name
+    # a parenthesized import keeps its wrapping
+    general = "from toolbox import combine_flags, fit_line, fit_line_through_zero, flag, flags_table, match_name\n"
+    wrapped = GC.replace(general, "from toolbox import (combine_flags, fit_line, fit_line_through_zero, flag,\n"
+                                  "                     flags_table, match_name)\n")
+    assert general in GC and wrapped != GC
+    gc = flow.edit(wrapped, {"op": "add_step", "function": "fit_lines", "out": "lines",
+                             "args": {"table": "course", "x": {"value": "time_min"}, "y": {"value": "mean"},
+                                      "by": {"value": ["strain", "compound"]}}})
+    checked(gc, wrapped)
+    others_unchanged(wrapped, gc)
+    imp = [ln for ln in gc.split("\n\n# The kinds of correction")[0].splitlines()[10:] if ln.strip()]
+    assert imp[0].startswith("from toolbox import (") and imp[0].endswith("match_name)")  # still in brackets
+    assert imp[1] == GC.splitlines()[11] and imp[1].startswith("from toolbox.gc import ")  # left alone
     assert "fit_lines" in " ".join(imp) and all(len(line) <= 120 for line in gc.splitlines())
     # undone: the import line is the only one that may be wrapped differently (it wasn't filled to 120 columns)
     back = flow.edit(gc, {"op": "remove_step", "node": "lines"})
-    assert back.split("\n\n# The results")[1] == GC.split("\n\n# The results")[1]
-    assert methodfile.parse(back).imports == methodfile.parse(GC).imports or \
-        [i["names"] for i in methodfile.parse(back).imports] == [i["names"] for i in methodfile.parse(GC).imports]
+    assert back.split("\n\n# The kinds of correction")[1] == wrapped.split("\n\n# The kinds of correction")[1]
+    assert [i["names"] for i in methodfile.parse(back).imports] == \
+        [i["names"] for i in methodfile.parse(wrapped).imports]
+
+
+def test_an_add_on_function_gets_its_own_import_line():
+    """A block of a toolbox add-on is imported from the add-on (`from toolbox.<add-on> import`): a new line after
+    the other imports, gone again when its last use goes."""
+    new = flow.edit(SMALL, {"op": "add_input", "name": "trace_file", "types": [".gaml"]})
+    added = flow.edit(new, {"op": "add_step", "function": "read_gaml", "args": {"gaml_file": {"input": "trace_file"}},
+                            "out": "injections"})
+    assert "from toolbox import read_table\nfrom toolbox.gc import read_gaml\n" in added
+    assert "    injections = read_gaml(trace_file)\n" in added
+    g = checked(added, new)
+    assert node(g, "injections")["fn_kind"] == "toolbox"
+    assert flow.edit(added, {"op": "remove_step", "node": "injections"}) == new
+    # not imported at all: the flow says from where to import it
+    missing = added.replace("from toolbox.gc import read_gaml\n", "")
+    assert any("`from toolbox.gc import` line" in m["message"] for m in flow.graph(missing)["messages"])

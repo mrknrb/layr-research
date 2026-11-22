@@ -27,7 +27,7 @@ A small method.
 
 import pandas as pd
 
-DATABASE = ["out"]
+COLUMNS = ["value"]
 
 
 def double(table):
@@ -57,7 +57,7 @@ def test_write_adds_replaces_and_removes_only_that_assignment():
     value_ = [{"title": "Overview", "cards": [{"card": "table", "table": "out", "title": "Doubled values"}]}]
     added = pages.write(SMALL, "PAGES", value_)
     assert added.count("PAGES = ") == 1 and pages.COMMENTS["PAGES"] in added
-    assert added.index("PAGES") > added.index("DATABASE") and added.index("PAGES") < added.index("def double")
+    assert added.index("PAGES") > added.index("COLUMNS") and added.index("PAGES") < added.index("def double")
     assert methodfile.parse(added).constants["PAGES"] == value_
     assert [ln for ln in added.splitlines() if not ln.startswith(("PAGES", "#"))] == \
         SMALL.splitlines()[:8] + [""] + SMALL.splitlines()[8:]  # nothing else changed
@@ -106,14 +106,20 @@ def test_correction_kinds_are_checked_and_typed():
         pages.check_correction(kinds, "window", {"start_s": 5, "end_s": 2, "sample": "a"})
     with pytest.raises(ValueError, match="no kind of correction 'nope'"):
         pages.check_correction(kinds, "nope", {})
-    with pytest.raises(ValueError, match="takes no corrections"):
+    with pytest.raises(ValueError, match="declares no kinds of correction, so there is no 'drop'"):
         pages.check_correction({}, "drop", {"respondent": 1})
     a = {"kind": "recode", "respondent": 3, "item": "q2", "answer": 4.0}
     assert pages.same_target(kinds, a, {**a, "answer": 1.0}) and not pages.same_target(kinds, a, {**a, "item": "q3"})
     assert pages.describe(kinds, a) == "Recode: respondent 3, item q2, answer 4.0"
-    legacy = pages.correction_kinds({}, takes_corrections=True)
-    assert set(legacy) == {"rename", "exclude", "manual_integration"}
-    assert pages.correction_kinds({}, takes_corrections=False) == {}
+    assert pages.correction_kinds({}) == {}  # a method that declares no kinds has none (no defaults)
+
+
+def test_a_method_that_takes_corrections_but_declares_none_has_no_kinds():
+    src = SMALL.replace("def recipe(table_file):", "def recipe(table_file, corrections):")
+    summary = methodfile.summary(methodfile.parse(src))
+    assert summary["takes_corrections"] and summary["corrections"] == {}
+    with pytest.raises(ValueError, match="declares no kinds of correction"):
+        pages.check_correction(summary["corrections"], "exclude", {"row": 1})
 
 
 def test_checker_reads_the_declarations():
@@ -122,6 +128,17 @@ def test_checker_reads_the_declarations():
     msgs = [m["message"] for m in checker.check(bad)["messages"]]
     assert any("unknown kind ('graph')" in m for m in msgs) and any("`nope`" in m for m in msgs)
     assert any("REQUIREMENTS" in m for m in msgs)
+    reviews = pages.write(SMALL, "PAGES", [{"title": "R", "cards": [
+        {"card": "review", "regions": "out", "curve": {"file": "other_file"}},
+        {"card": "review", "regions": "out", "curve": {"table": "out"}},
+        {"card": "review", "regions": "out"}]}])
+    msgs = [m["message"] for m in checker.check(reviews)["messages"]]
+    assert any("`other_file`, which isn't an input" in m for m in msgs)
+    assert any("needs its x and y columns" in m for m in msgs)
+    assert any("say where its curves come from" in m for m in msgs)
+    fine = pages.write(SMALL, "PAGES", [{"title": "R", "cards": [
+        {"card": "review", "regions": "out", "curve": {"file": "table_file", "x": "a", "y": "b"}}]}])
+    assert not [m for m in checker.check(fine)["messages"] if "PAGES" in m["message"] or "card" in m["message"]]
     needs = pages.write(SMALL.replace("import pandas as pd", "import pandas as pd\nimport pingouin_xyz"),
                         "REQUIREMENTS", ["pingouin_xyz"])
     res = checker.check(needs)
@@ -150,13 +167,15 @@ def test_builtin_methods_declare_their_pages_and_corrections():
 
 
 def test_flags_name_any_item_and_survey_formats(tmp_path: Path):
-    gc = flags_table([flag("warning", "peak", "wide", 3, "SUB")])
-    assert list(gc.columns) == ["level", "category", "injection", "compound", "message"]
-    assert list(flags_table([]).columns) == list(gc.columns)
+    two = flags_table([flag("warning", "growth", "slow", culture="A3", day=2)])
+    assert list(two.columns) == ["level", "category", "culture", "day", "message"]
+    assert list(flags_table([]).columns) == ["level", "category", "message"]
     survey = flags_table([flag("warning", "answers", "missing", respondent=17)])
     assert list(survey.columns) == ["level", "category", "respondent", "message"]
-    both = combine_flags(survey, flags_table([flag("error", "answers", "empty", respondent=4)]))
+    both = combine_flags(survey, flags_table([flag("error", "answers", "empty", respondent=4)]),
+                         flags_table([flag("warning", "answers", "few", respondent=3)]))
     assert list(both.columns) == ["level", "category", "respondent", "message"] and both.level[0] == "error"
+    assert list(both.respondent) == [4, 3, 17]  # errors first; then by the first thing a flag is about
     pyreadstat = pytest.importorskip("pyreadstat")
     df = pd.DataFrame({"respondent": [1.0, 2.0], "q1": [1.0, 5.0]})
     pyreadstat.write_sav(df, str(tmp_path / "s.sav"), variable_value_labels={"q1": {1.0: "disagree", 5.0: "agree"}})
@@ -240,15 +259,22 @@ async def test_survey_example_pages_corrections_and_text_results(tmp_path: Path)
         cv = value(await s.call_tool("curve", {"experiment": eid, "item": "urban", "table": "scores",
                                                "item_column": "group", "x": "age", "y": "score"}))
         assert len(cv["x"]) > 20 and cv["x"] == sorted(cv["x"])
+        # ... or from a raw file that is a table, with the same columns
+        raw = value(await s.call_tool("curve", {"experiment": eid, "item": "rural", "file": "answers_file",
+                                                "item_column": "group", "x": "age", "y": "q1"}))
+        assert len(raw["x"]) > 10 and raw["x"] == sorted(raw["x"]) and raw["name"] is None
+        no_columns = await s.call_tool("curve", {"experiment": eid, "item": "rural", "file": "answers_file"})
+        assert "needs the x and y columns" in error_text(no_columns)
 
 
 async def test_gc_corrections_still_work_through_the_declared_kinds(tmp_path: Path):
     async with server(tmp_path) as s:
-        exp = value(await s.call_tool("lab_sample", {}))
+        exp = value(await s.call_tool("lab_sample", {"which": "gc"}))
         eid = exp["experiment"]
         c = value(await s.call_tool("correction_propose", {"experiment": eid, "kind": "manual_integration",
-                                                           "injection": 20, "compound": "PROD", "start_min": 6.44,
-                                                           "end_min": 6.5, "reason": "valley"}, meta=USER))
+                                                           "fields": {"injection": 20, "compound": "PROD",
+                                                                      "start_min": 6.44, "end_min": 6.5},
+                                                           "reason": "valley"}, meta=USER))
         assert c["correction"]["injection"] == 20 and c["correction"]["start_min"] == 6.44
         again = value(await s.call_tool("correction_propose", {"experiment": eid, "kind": "manual_integration",
                                                                "fields": {"injection": 20, "compound": "PROD",
@@ -258,11 +284,78 @@ async def test_gc_corrections_still_work_through_the_declared_kinds(tmp_path: Pa
         status = {x["id"]: x["status"] for x in got["corrections"]}
         assert status[c["correction"]["id"]] == "replaced" and status[again["correction"]["id"]] == "approved"
         wrong = await s.call_tool("correction_propose", {"experiment": eid, "kind": "manual_integration",
-                                                         "injection": 20, "compound": "PROD", "start_min": 6.5,
-                                                         "end_min": 6.4, "reason": "x"}, meta=USER)
+                                                         "fields": {"injection": 20, "compound": "PROD",
+                                                                    "start_min": 6.5, "end_min": 6.4},
+                                                         "reason": "x"}, meta=USER)
         assert "end_min must come after start_min" in error_text(wrong)
         run = value(await s.call_tool("run", {"experiment": eid}))
         assert run["status"] == "done"
         cv = value(await s.call_tool("curve", {"experiment": eid, "item": 20, "file": "gaml_file", "start": 6.3,
                                                "end": 6.6, "points": 300}))
         assert 100 < len(cv["x"]) <= 320 and cv["name"].startswith("Act.Assay")
+
+
+# ---------------------------------------------------------------------------------------------------- curve readers
+
+XYZ_METHOD = '''"""Traces
+
+Curves from a made-up kind of file.
+"""
+
+
+def recipe(trace_file):
+    """Traces.
+
+    Inputs:
+        trace_file: Traces [.xyz]
+
+    Returns:
+        out: Nothing
+    """
+    return {"out": trace_file}
+'''
+
+
+def test_curve_readers_are_registered_by_extension(tmp_path: Path, monkeypatch):
+    """A kind of file the core can't read gives its curves through the reader the toolbox (or an add-on) registered
+    for its extension, with the experiment's settings; the core only asks the registry, and remembers the curves."""
+    import asyncio
+    import json
+
+    from mcp.server.fastmcp import FastMCP
+
+    from lab import tools
+    from lab.store import new_id, now
+    from toolbox import registry
+
+    calls = []
+
+    def xyz_curves(path, settings):
+        calls.append(settings)
+        rows = [line.split(",") for line in Path(path).read_text("utf-8").split()]
+        return [{"item": int(r[0]), "name": f"trace {r[0]}", "x": [0, 1, 2], "y": [float(v) for v in r[1:]]}
+                for r in rows]
+
+    monkeypatch.setattr(registry, "_curve_readers", {**registry._curve_readers})
+    registry.register_curve_reader("xyz", xyz_curves)
+    assert registry.curve_reader(".XYZ") is xyz_curves and registry.curve_reader(".nope") is None
+    monkeypatch.setattr(tools.Pool, "warm", lambda self: None)  # no calculation process for this test
+    mcp = FastMCP("test")
+    store = tools.register(mcp, tmp_path, lambda *a: None)
+    store.save_method("traces", XYZ_METHOD, "you", "test")
+    (tmp_path / "t.xyz").write_text("1,5,6,7\n2,1,2,3\n", "utf-8")
+    exp = {"id": new_id("e"), "title": "t", "method": "traces", "inputs": {"trace_file": store.add_file(
+        tmp_path / "t.xyz")}, "params": {}, "corrections": [], "created": now()}
+    store.save_experiment(exp)
+
+    def call(args):
+        result = asyncio.run(mcp.call_tool("curve", {"experiment": exp["id"], "file": "trace_file", **args}))
+        content = result[1] if isinstance(result, tuple) else result
+        return content.get("result", content) if isinstance(content, dict) else json.loads(content[0].text)
+
+    got = call({"item": 2})
+    assert got == {"item": 2, "name": "trace 2", "x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]}
+    assert call({"item": "1", "start": 1})["y"] == [6.0, 7.0]
+    assert len(calls) == 1  # read once, then remembered
+    with pytest.raises(Exception, match="has no curve 9"):
+        call({"item": 9})

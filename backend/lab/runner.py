@@ -1,5 +1,5 @@
 """Running an experiment: its settings and files go to the calculation process (lab/worker.py), the answer becomes
-a run (run.json, tables, figures, the record of every call), and the results database is updated.
+a run (run.json, tables, figures, the record of every call).
 
 The calculation process is started ahead of time and kept warm, so a run doesn't wait for pandas and SciPy to load.
 One run at a time; `stop()` ends it (the process is killed and a fresh one started), and so does the time limit.
@@ -7,7 +7,11 @@ One run at a time; `stop()` ends it (the process is killed and a fresh one start
 A step whose code and inputs are the same as in an earlier run isn't calculated again (`<store>/cache/steps/`, see
 lab/recorder.py's StepCache): it is marked "cached" in the run's steps. `fresh=True` calculates every step (the
 reference comparison and anything that proves numbers use it). A trial run (`trial=True`, also of an unsaved
-source) doesn't become the experiment's latest run or go to the results database.
+source) doesn't become the experiment's latest run.
+
+A result input (results of other experiments, lab/sources.py) is stacked into one table before the run starts and
+written to the run's `sources/<input>.csv`; the calculation process reads it into a DataFrame for the recipe, and
+run.json's `sources` says what was read. A source that can't be read stops the run before it starts.
 
 Runs pile up: `prune_runs` (every few runs) keeps the newest `TRIAL_KEEP` trial runs of each experiment and lets
 only the newest `INSIDE_KEEP` runs of each experiment (and its latest run) keep the values inside their steps
@@ -17,12 +21,9 @@ only the newest `INSIDE_KEEP` runs of each experiment (and its latest run) keep 
 from __future__ import annotations
 
 import functools
-import hashlib
 import json
 import os
 import queue
-import re
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -200,14 +201,9 @@ def approved_corrections(exp: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def experiment_inputs(exp: dict[str, Any], file_params: list[str]) -> dict[str, Any]:
-    """The experiment's raw file for each file input; an experiment from before 0.3 has its one file as "raw"."""
+    """The experiment's raw file for each file input it has one for."""
     given = {k: v for k, v in (exp.get("inputs") or {}).items() if isinstance(v, dict)}
-    out = {p: given[p] for p in file_params if p in given}
-    missing = [p for p in file_params if p not in out]
-    spare = [k for k in given if k not in file_params]
-    if len(missing) == 1 and len(spare) == 1:
-        out[missing[0]] = given[spare[0]]
-    return out
+    return {p: given[p] for p in file_params if p in given}
 
 
 @functools.lru_cache(maxsize=8)
@@ -217,7 +213,10 @@ def _parse(source: str) -> methodfile.Method:
 
 
 def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
-    """What the recipe gets from this experiment: {recipe, kinds, args, params (shown), inputs, notes}."""
+    """What the recipe gets from this experiment: {recipe, kinds, args, params (shown), inputs, notes, tables (each
+    result input's stacked table and what it read, lab/sources.py)}."""
+    from .sources import gather
+
     try:
         parsed = _parse(source)
     except SyntaxError as e:
@@ -226,6 +225,7 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     if fn is None:
         raise LabError("The method has no recipe function to run.")
     files = [p for p in fn.params if p.endswith("_file")]
+    results = methodfile.result_inputs(parsed)
     inputs = experiment_inputs(exp, files)
     given = exp.get("params") or {}
     args: dict[str, Any] = {}
@@ -233,6 +233,8 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     for p in fn.params:
         if p == "corrections":
             args[p] = approved_corrections(exp)
+        elif p in results:
+            continue  # a table, given to the calculation process as a file (below)
         elif p in files:
             f = inputs.get(p)
             if f is None:
@@ -257,8 +259,9 @@ def resolve(store: Store, exp: dict[str, Any], source: str) -> dict[str, Any]:
     labels = fn.doc.returns
     from .pages import requirements
 
+    tables = gather(store, exp, results, {p for p in results if p in fn.defaults})
     return {"recipe": fn.name, "kinds": kinds, "args": args, "params": shown, "inputs": inputs, "notes": notes,
-            "labels": labels, "database": parsed.database, "requirements": requirements(parsed.constants)}
+            "labels": labels, "requirements": requirements(parsed.constants), "tables": tables}
 
 
 def versions_here() -> dict[str, str]:
@@ -285,7 +288,7 @@ class Runner:
             reason: str | None = None, fresh: bool = False) -> dict[str, Any]:
         """Run `method` (a stored version, a draft, or any {"id", "source"} such as an unsaved source in the editor)
         on an experiment. A trial run (a comparison after a change, a recalculation while editing) is kept apart: it
-        doesn't become the experiment's latest run or go to the results database. `fresh` calculates every step
+        doesn't become the experiment's latest run. `fresh` calculates every step
         instead of reusing remembered ones (it still remembers them for the next run)."""
         store = self.store
         info = resolve(store, exp, method["source"])
@@ -301,9 +304,20 @@ class Runner:
         rdir = store.run_dir(run["id"])
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "method.py").write_text(method["source"], "utf-8", newline="\n")
+        tables: dict[str, str] = {}  # each result input's stacked table, read by the calculation process
+        if info["tables"]:
+            from .sources import fingerprint
+
+            (rdir / "sources").mkdir(exist_ok=True)
+            run["sources"] = {}
+            for name, got in info["tables"].items():
+                rel = f"sources/{name}.csv"
+                got["table"].to_csv(rdir / rel, index=False)
+                run["sources"][name] = {**got["record"], "file": rel, "fingerprint": fingerprint(rdir / rel)}
+                tables[name] = str(rdir / rel)
         store.save_run(run)
         job = {"job": "run", "source": str(rdir / "method.py"), "run_dir": str(rdir), "recipe": info["recipe"],
-               "kinds": info["kinds"], "args": info["args"], "cache_dir": str(store.root / "cache"),
+               "kinds": info["kinds"], "args": info["args"], "tables": tables, "cache_dir": str(store.root / "cache"),
                "step_cache": str(store.root / "cache" / "steps") if self.remember_steps else None,
                "fresh": fresh, "inside": self.record_inside, "experiment": exp["id"]}
 
@@ -344,13 +358,7 @@ class Runner:
         run.pop("step", None)
         run["finished"] = now()
         run["summary"] = self._summary(run, rdir)
-        if run["status"] == "done" and not trial:
-            try:
-                self._database(exp, run, rdir, info["database"])
-            finally:
-                store.save_run(run)
-        else:
-            store.save_run(run)
+        store.save_run(run)
         if not trial:
             e = store.get_experiment(exp["id"])
             e["last_run"] = {"id": run["id"], "status": run["status"], "started": run["started"],
@@ -380,46 +388,6 @@ class Runner:
             except (OSError, pd.errors.EmptyDataError, AttributeError):
                 summary["flags"] = {}
         return summary
-
-    def _database(self, exp: dict[str, Any], run: dict[str, Any], rdir: Path, database: list[str] | None) -> None:
-        """The run's result tables into the results database. A table whose file is the same as the one the
-        experiment's latest run put there (a rerun from remembered steps) only gets the new run's id and time."""
-        previous = {}
-        last = (self.store.get_experiment(exp["id"]).get("last_run") or {}) if exp.get("id") else {}
-        if last.get("id") and last.get("status") == "done":
-            try:
-                previous = self.store.get_run(last["id"]).get("database") or {}
-            except (LabError, OSError, ValueError):
-                previous = {}
-        written = {}
-        for name, o in run["outputs"].items():
-            if o.get("kind") != "table" or (database is not None and name not in database):
-                continue
-            try:
-                digest = hashlib.sha256((rdir / o["file"]).read_bytes()).hexdigest()
-            except OSError:
-                continue
-            written[name] = digest
-            if previous.get(name) == digest and self._same_rows(name, exp, run):
-                continue
-            try:
-                df = pd.read_csv(rdir / o["file"])
-            except pd.errors.EmptyDataError:
-                continue
-            self.store.db_write(name, exp, run, df)
-        run["database"] = written
-
-    def _same_rows(self, table: str, exp: dict[str, Any], run: dict[str, Any]) -> bool:
-        """Give the experiment's rows of a results table the new run's id and time; False when it has none there."""
-        if not re.fullmatch(r"[a-z][a-z0-9_]{0,60}", table) or not self.store.db_path.exists():
-            return False
-        try:
-            with sqlite3.connect(self.store.db_path) as con:
-                cur = con.execute(f'update "{table}" set run = ?, run_finished = ? where experiment = ?',
-                                  (run["id"], run.get("finished") or now(), exp["id"]))
-                return cur.rowcount > 0
-        except sqlite3.Error:
-            return False
 
 
 def prune_runs(store: Store, trial_keep: int = TRIAL_KEEP, inside_keep: int = INSIDE_KEEP) -> dict[str, int]:

@@ -80,8 +80,16 @@ def register(mcp: FastMCP, store: Store, api: Any) -> None:
                 source = stored["source"]
         return source, exp, r, stored
 
+    def titled(exp: dict | None) -> dict | None:
+        """The experiment with each picked source's title (a result input's box names them)."""
+        if not exp or not exp.get("sources"):
+            return exp
+        names = {e["id"]: e.get("title") for e in store.list_experiments()}
+        return {**exp, "sources": {i: [{**s, "title": names.get(s["experiment"])} for s in chosen]
+                                   for i, chosen in exp["sources"].items()}}
+
     def described(src: str, exp: dict | None, r: dict | None, stored: dict | None) -> dict[str, Any]:
-        g = flow.graph(src, r, exp)
+        g = flow.graph(src, r, titled(exp))
         if stored is not None:
             g["method"].update(id=stored.get("id"), version=stored.get("version"))
         if exp is not None:
@@ -90,7 +98,7 @@ def register(mcp: FastMCP, store: Store, api: Any) -> None:
 
     @mcp.tool()
     def flow_get(
-        method: Annotated[str | None, Field(description="Method id, e.g. gc-activity-assay.")] = None,
+        method: Annotated[str | None, Field(description="Method id, e.g. survey-scores.")] = None,
         version: Annotated[int | None, Field(description="Its version; default the latest.")] = None,
         source: Annotated[str | None, Field(description="Or the method's source (e.g. unsaved in the editor).")]
         = None,
@@ -100,8 +108,9 @@ def register(mcp: FastMCP, store: Store, api: Any) -> None:
     ) -> dict[str, Any]:
         """The method's recipe as a flow: nodes (one per recipe line: a step call, or a code box for anything
         else) with their ports (wire, setting, input or a value written in place), types, the columns each step
-        reads and those missing from the incoming table; the inputs, settings (with the experiment's values and
-        where each is used), results, groups and the quality lane. With a run: each node's status, time, error and
+        reads and those missing from the incoming table; the inputs (raw files, corrections, and results of other
+        experiments: kind result, with the picked sources, and with a run the table it delivered), settings (with
+        the experiment's values and where each is used), results, groups and the quality lane. With a run: each node's status, time, error and
         the value summaries on its wires; `stale` when the method changed since that run."""
         src, exp, r, stored = context(method, version, source, experiment, run)
         return described(src, exp, r, stored)
@@ -129,8 +138,9 @@ def register(mcp: FastMCP, store: Store, api: Any) -> None:
         input|value|code}, disconnect {node, port} (back to its default), rename_wire {wire, to, node?},
         add_step also takes outs: [names] for a step that gives several,
         add_setting {name, default?|code?, label?, help?, unit?, type?, group?}, remove_setting {setting},
-        set_default {setting, value|code}, add_input {name (ends in _file), label?, types?, optional?},
-        remove_input {input}, add_result {wire, name?, label?}, remove_result {name}, new_function {name, params?,
+        set_default {setting, value|code}, add_input {name (ends in _file), label?, types?, optional?} or, for
+        results of other experiments, add_input {name, kind: "result", result? (the table it expects, e.g.
+        scores), label?, optional?}, remove_input {input}, add_result {wire, name?, label?}, remove_result {name}, new_function {name, params?,
         sentence?, body?}, group {nodes, title}, ungroup {group}, add_code {code | lines, after?}."""
         if source is None and method is None and experiment is None:
             raise LabError("Give the source to change, a method id, or an experiment (its method).")

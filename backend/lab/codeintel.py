@@ -6,8 +6,8 @@ toolbox and pandas to the installed pandas. Positions: `line` counts from 1, `co
 
 - The first answer that needs pandas takes seconds (Jedi reads pandas once); `warm()` does that in the background
   when the server starts, later answers take tens of milliseconds.
-- Columns of the tables known from the last run (`columns={"peaks": ["injection", "area", …]}`) come first after
-  `peaks.` and are the only answers inside `peaks["`.
+- Columns of the tables known from the last run (`columns={"cultures": ["culture", "od600", …]}`) come first after
+  `cultures.` and are the only answers inside `cultures["`.
 - The method's own functions and the toolbox come before everything else; names starting with `_` only when typed.
 - Code Python can't read yet (she is typing) never fails a call: the answer says what couldn't be read.
 """
@@ -54,7 +54,7 @@ from toolbox import fit_line, read_table
 def step(table):
     """A step."""
     rows = table[table.role == "sample"]
-    return rows.groupby("compound").mean()
+    return rows.groupby("group").mean()
 
 
 def recipe(table_file):
@@ -104,13 +104,17 @@ def warm(wait: bool = False) -> threading.Thread | None:
                 _script(WARM_SOURCE).complete(at, lines[at - 1].index("table.") + 6)
                 _script(WARM_SOURCE + "\nnp.").complete(len(lines) + 2, 3)
                 _script(WARM_SOURCE + "\npd.DataFrame().").complete(len(lines) + 2, 15)
-                gc = BACKEND / "lab" / "methods" / "gc-activity-assay.py"
-                if gc.exists():  # the built-in method: its untyped table inputs are the slow case
-                    text = gc.read_text("utf-8")
-                    at = next((i for i, ln in enumerate(text.splitlines(), 1) if "peaks[peaks." in ln), None)
-                    if at:
-                        _script(text).complete(at, text.splitlines()[at - 1].index("peaks[peaks.") + 12)
-                import toolbox  # noqa: F401  (its signatures are read from the functions themselves)
+                for path in sorted((BACKEND / "lab" / "methods").glob("*.py")):
+                    # a built-in method: rows picked from an untyped table input (`t[t.`) are the slow case
+                    text = path.read_text("utf-8")
+                    found = next(((i, m) for i, ln in enumerate(text.splitlines(), 1)
+                                  if (m := re.search(r"\b(\w+)\[\1\.", ln))), None)
+                    if found:
+                        _script(text).complete(found[0], found[1].end())
+                        break
+                from toolbox import registry
+
+                registry.load_addons()  # their signatures are read from the functions themselves
             WARM.update(state="warm", ms=round((time.perf_counter() - t0) * 1000))
         except Exception as e:  # a speed-up only: the first answer is then slow, nothing else
             WARM.update(state="failed", error=f"{type(e).__name__}: {e}", ms=round((time.perf_counter() - t0) * 1000))
@@ -197,9 +201,10 @@ class _File:
 
 def _toolbox_object(name: str):
     try:
-        import toolbox
+        from toolbox import registry
 
-        return getattr(toolbox, name, None) if name in toolbox.__all__ else None
+        found = registry.find(name)
+        return found[1] if found else None
     except Exception:  # the toolbox is the plugin's own code; help without it rather than fail
         return None
 
@@ -368,7 +373,7 @@ def _word_at(text: str, column: int) -> tuple[str, int, int]:
 
 
 def _column_at(text: str, column: int, columns: dict[str, list[str]]) -> dict[str, Any] | None:
-    """`peaks.area` or `peaks["area"]` under the cursor, when `area` is a known column of `peaks`."""
+    """`cultures.od600` or `cultures["od600"]` under the cursor, when `od600` is a known column of `cultures`."""
     for m in re.finditer(r"([A-Za-z_]\w*)\s*(?:\.\s*([A-Za-z_]\w*)|\[\s*(['\"])([^'\"]+)\3\s*\])", text):
         table, col = m.group(1), m.group(2) or m.group(4)
         col_start = m.start(2) if m.group(2) else m.start(4)

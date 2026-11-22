@@ -13,20 +13,19 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-from lab import standalone  # noqa: E402
+from lab import examples, standalone  # noqa: E402
 from lab.runner import Runner  # noqa: E402
-from lab.sample import make_sample  # noqa: E402
 from lab.store import Store, new_id, now  # noqa: E402
-from lab.tools import SAMPLE_PARAMS  # noqa: E402
 
 
 def test_exported_folder_gives_the_plugins_numbers(tmp_path: Path):
     store = Store(tmp_path / "lab")
-    f = make_sample(store)
+    example = examples.get("gc")
+    f = examples.stored_files(store, example)["gaml_file"]
     corrections = [{"id": "c1", "kind": "exclude", "injection": 20, "compound": "SUB", "reason": "pipetting error",
                     "status": "approved"}]
     exp = {"id": new_id("e"), "title": "Example", "method": "gc-activity-assay", "inputs": {"gaml_file": f},
-           "params": SAMPLE_PARAMS, "corrections": corrections, "created": now()}
+           "params": example.SETTINGS, "corrections": corrections, "created": now()}
     store.save_experiment(exp)
     runner = Runner(store)
     try:

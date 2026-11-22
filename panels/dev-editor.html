@@ -77,44 +77,44 @@
     <script type="module">
       import { createEditor, createMerge, highlight } from "./editor.js";
 
-      const SOURCE = `"""GC activity assay: from the integrated peaks to the activities (a sample for the editor)."""
+      const SOURCE = `"""Attitude survey: from the answers to a trend per group (a sample for the editor)."""
 from toolbox import fit_line, pick_rows, read_table
 
 
-def ratio_to_standard(peaks, standard="dodecane"):
-    """Divide each peak's area by the internal standard's area in the same injection."""
-    if standard not in set(peaks["compound"]):
-        raise ValueError(f"no peak of the internal standard {standard} in the table")
-    std = peaks[peaks["compound"] == standard][["injection", "area"]].rename(columns={"area": "std_area"})
-    out = peaks.merge(std, on="injection")
-    out["ratio"] = out["area"] / out["std_area"]
+def relative_to_baseline(answers, baseline="wave_1"):
+    """Divide each respondent's score by their score in the baseline wave."""
+    if baseline not in set(answers["wave"]):
+        raise ValueError(f"no answers of the baseline wave {baseline} in the table")
+    base = answers[answers["wave"] == baseline][["respondent", "score"]].rename(columns={"score": "base_score"})
+    out = answers.merge(base, on="respondent")
+    out["ratio"] = out["score"] / out["base_score"]
     return out
 
 
-def calibrate(ratios, levels, compound_column="compound", concentration_column="std_conc_mM", keep_outliers=False):
-    """Fit one straight line per compound through the standards' ratios against their known concentrations."""
+def trends(ratios, waves, group_column="group", time_column="weeks_since_start", keep_outliers=False, weights=None):
+    """Fit one straight line per group through the ratios against the weeks since the start."""
     lines = {}
-    for name, rows in ratios.groupby("compound"):
-        line = fit_line(rows["std_conc_mM"], rows["ratio"])
+    for name, rows in ratios.groupby("group"):
+        line = fit_line(rows["weeks_since_start"], rows["ratio"])
         lines[name] = line
     return lines
 
 
-def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
-    """The method: read, ratio, calibrate."""
-    peaks = read_table(raw_file)
-    ratios = ratio_to_standard(peaks, standard)
-    lines = calibrate(ratios, levels)
+def recipe(answers_file, baseline="wave_1", waves=(1, 2, 3, 4)):
+    """The method: read, compare, fit."""
+    answers = read_table(answers_file)
+    ratios = relative_to_baseline(answers, baseline)
+    lines = trends(ratios, waves)
     return {"lines": lines, "ratios": ratios}
 `;
       const AFTER = SOURCE.replace(
-        'out["ratio"] = out["area"] / out["std_area"]',
-        'out["ratio"] = out["area"] / out["std_area"]\n    out = out[out["ratio"] > 0]',
+        'out["ratio"] = out["score"] / out["base_score"]',
+        'out["ratio"] = out["score"] / out["base_score"]\n    out = out[out["ratio"] > 0]',
       )
-        .replace('for name, rows in ratios.groupby("compound"):', "for name, rows in ratios.groupby(compound_column):")
+        .replace('for name, rows in ratios.groupby("group"):', "for name, rows in ratios.groupby(group_column):")
         .replace(
-          '"""The method: read, ratio, calibrate."""',
-          '"""The method: read the peaks, ratio them, calibrate."""',
+          '"""The method: read, compare, fit."""',
+          '"""The method: read the answers, compare them with the baseline, fit a trend."""',
         );
 
       const log = (s) => (document.getElementById("log").textContent = s);
@@ -129,13 +129,13 @@ def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
         return t;
       };
       const NAMES = [
-        { label: "peaks", kind: "statement", detail: "table · 54 × 6" },
+        { label: "answers", kind: "statement", detail: "table · 54 × 6" },
         { label: "pick_rows", kind: "function", detail: "toolbox", doc: "Keep only the rows where a condition holds." },
         { label: "print", kind: "function", detail: "builtin" },
-        { label: "ratio_to_standard", kind: "function", detail: "this method" },
+        { label: "relative_to_baseline", kind: "function", detail: "this method" },
         { label: "read_table", kind: "function", detail: "toolbox" },
       ];
-      const COLUMNS = ["area", "compound", "injection", "retention_time_min"].map((c) => ({
+      const COLUMNS = ["group", "respondent", "score", "wave"].map((c) => ({
         label: c,
         kind: "column",
         detail: "column",
@@ -187,17 +187,17 @@ def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
         ed.setValues({
           9: [
             {
-              name: "std",
+              name: "base",
               text: "27 × 2",
               type: "table",
-              title: "the internal standard's areas",
+              title: "the scores in the baseline wave",
               card: async () =>
                 table(
-                  ["injection", "std_area"],
+                  ["respondent", "base_score"],
                   [
-                    [1, 18234.5],
-                    [2, 18101.2],
-                    [3, 17998.0],
+                    [1, 3.5],
+                    [2, 4.17],
+                    [3, 2.83],
                   ],
                 ),
             },
@@ -209,10 +209,10 @@ def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
               type: "table",
               card: () =>
                 table(
-                  ["compound", "area", "ratio"],
+                  ["group", "score", "ratio"],
                   [
-                    ["ethanol", 5021.3, 0.2754],
-                    ["acetate", 3011.9, 0.1652],
+                    ["A", 3.67, 1.048],
+                    ["B", 3.17, 0.95],
                   ],
                 ),
               onClick: () => (window.T.clicked = (window.T.clicked || 0) + 1),
@@ -225,13 +225,13 @@ def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
               type: "data",
               card: () => "slope 0.0412, intercept 0.0031, R² 0.9994",
             },
-            { name: "name", text: '"ethanol"', type: "none" },
+            { name: "name", text: '"A"', type: "none" },
           ],
-          26: [{ name: "peaks", text: "54 × 6", type: "table", card: () => "54 rows" }],
-          28: [{ name: "lines", text: "3 entries", type: "data", card: () => "ethanol, acetate, butanol" }],
+          26: [{ name: "answers", text: "54 × 6", type: "table", card: () => "54 rows" }],
+          28: [{ name: "lines", text: "3 entries", type: "data", card: () => "A, B, C" }],
           29: [{ name: "return", text: "2 results", type: "flags", card: () => "lines, ratios" }],
         });
-        ed.setFolds([{ from: 7, to: 8, label: 'stops with a message if standard not in set(peaks["compound"])' }]);
+        ed.setFolds([{ from: 7, to: 8, label: 'stops with a message if baseline not in set(answers["wave"])' }]);
         ed.setDiagnostics([
           { line: 15, level: "warning", message: "This line is longer than 120 characters." },
           { line: 19, level: "error", message: "`fit_line` takes the x values first." },
@@ -240,10 +240,10 @@ def recipe(raw_file, standard="dodecane", levels=(0.5, 1, 2, 5)):
         below.className = "below-test";
         below.append(
           table(
-            ["compound", "slope", "R²"],
+            ["group", "slope", "R²"],
             [
-              ["ethanol", 0.0412, 0.9994],
-              ["acetate", 0.0388, 0.9989],
+              ["A", 0.0412, 0.9994],
+              ["B", 0.0388, 0.9989],
             ],
           ),
         );

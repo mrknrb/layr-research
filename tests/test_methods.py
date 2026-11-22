@@ -17,7 +17,6 @@ from lab import checker, compare, latex, methodfile  # noqa: E402
 from lab.errors import LabError  # noqa: E402
 from lab.export import tex_image  # noqa: E402
 from lab.recorder import Recorder, load  # noqa: E402
-from lab.store import Store  # noqa: E402
 from lab.tools import copy_from_toolbox, replace_function  # noqa: E402
 
 GC = Path(__file__).resolve().parent.parent / "backend" / "lab" / "methods" / "gc-activity-assay.py"
@@ -88,11 +87,17 @@ def test_gc_method_settings_keep_their_names():
     old = ["channel", "sample_patterns", "compounds", "internal_standard", "rt_tolerance_min", "rt_drift_correction",
            "smoothing_points", "max_half_width_min", "lod_snr", "loq_snr", "cal_min_conc_mM", "cal_max_conc_mM",
            "cal_series", "force_zero_intercept", "concentration_factor", "rate_window_min", "biomass_gcdw_per_l",
-           "is_area_tolerance_pct", "shoulder_fwhm_ratio", "min_r2", "max_residual_pct", "max_replicate_cv_pct",
+           "biomass_by_substrate", "is_area_tolerance_pct", "shoulder_fwhm_ratio", "min_r2", "max_residual_pct",
+           "max_replicate_cv_pct",
            "cv_min_conc_mM", "mass_balance_range_pct"]
     assert list(settings) == old
-    assert settings["sample_patterns"]["type"] == "patterns" and settings["compounds"]["type"] == "compounds"
-    assert settings["biomass_gcdw_per_l"]["type"] == "biomass" and settings["biomass_gcdw_per_l"]["unit"] == "gCDW/L"
+    assert settings["sample_patterns"]["type"] == "rows" and settings["compounds"]["type"] == "rows"
+    assert [c["id"] for c in settings["sample_patterns"]["columns"]] == ["role", "regex"]
+    assert settings["compounds"]["columns"][1] == {"id": "rt_min", "label": "rt", "type": "number", "optional": False,
+                                                   "unit": "min"}
+    assert settings["compounds"]["columns"][2]["optional"]
+    assert settings["biomass_gcdw_per_l"]["type"] == "number" and settings["biomass_gcdw_per_l"]["unit"] == "gCDW/L"
+    assert settings["biomass_by_substrate"]["type"] == "rows" and settings["biomass_by_substrate"]["default"] == []
     assert settings["cal_max_conc_mM"]["type"] == "number" and settings["rt_tolerance_min"]["unit"] == "min"
     assert settings["compounds"]["required"] and settings["rate_window_min"]["default"] == [0, 30]
     assert settings["rt_tolerance_min"]["group"] == "Integration"
@@ -264,23 +269,69 @@ def test_compare_tables_pairs_rows_and_lists_moved_numbers():
     assert not same["moved"] and same["cells_changed"] == 0
 
 
-# ---------------------------------------------------------------------------------------------------- the store
+def test_compare_pairs_by_the_columns_that_tell_rows_apart():
+    """Texts, whole numbers and yes/no name rows, the most telling first, only while they tell more rows apart;
+    decimal numbers never do; without such columns rows are paired by position."""
+    a = pd.DataFrame({"note": ["x", "x", "y", "y"], "culture": ["A1", "A2", "A1", "A2"], "day": [1, 1, 2, 2],
+                      "ok": [True, True, True, True], "od600": [0.1, 0.2, 0.3, 0.4]})
+    b = a.copy()
+    b.loc[3, "od600"] = 0.5
+    r = compare.compare_tables(a, b)
+    assert r["paired_by"] == ["note", "culture"] and r["cells_changed"] == 1  # `ok` tells nothing apart, so unused
+    assert r["changes"][0]["key"] == {"note": "y", "culture": "A2"}
+    floats = pd.DataFrame({"time_h": [0.0, 1.0, 2.0], "od600": [0.1, 0.2, 0.4]})
+    moved = floats.assign(od600=[0.1, 0.25, 0.4])
+    r = compare.compare_tables(floats, moved)
+    assert r["paired_by"] == "position" and r["changes"][0]["key"] == {"row": 2}
+    twice = pd.DataFrame({"group": ["a", "a"], "value": [1.0, 2.0]})  # can't tell the two rows apart
+    assert compare.compare_tables(twice, twice.assign(value=[1.0, 3.0]))["paired_by"] == "position"
 
 
-def test_old_json_methods_are_listed_not_run(tmp_path: Path):
-    store = Store(tmp_path)
-    old = tmp_path / "methods" / "plant-growth"
-    old.mkdir(parents=True)
-    (old / "1.json").write_text(json.dumps({"id": "plant-growth", "name": "Plants (0.2)", "steps": []}), "utf-8")
-    (tmp_path / "methods" / "gc-activity-assay").mkdir()
-    (tmp_path / "methods" / "gc-activity-assay" / "2.json").write_text(json.dumps({"steps": []}), "utf-8")
-    listed = {m["id"]: m for m in store.list_methods()}
-    assert listed["plant-growth"]["legacy"] and listed["plant-growth"]["name"] == "Plants (0.2)"
-    assert listed["gc-activity-assay"]["version"] == 1 and not listed["gc-activity-assay"].get("legacy")
-    with pytest.raises(LabError, match="old step method"):
-        store.get_method("plant-growth")
-    saved = store.save_method("gc-activity-assay", GC.read_text("utf-8"), "you", "test")
-    assert saved["version"] == 3  # after the old JSON version 2, never the same number twice
+# ---------------------------------------------------------------------------------------------------- settings
+
+
+ROWS = '''"""Rows
+
+A rows setting.
+"""
+
+
+def recipe(table_file, strains=(("WT", 1.0),), groups=({"group": "a", "dilution": 2, "use": True},)):
+    """Recipe.
+
+    Settings:
+        strains (rows: strain text, dilution number): Strains.
+        groups (rows: group text, optional dilution number, optional n integer, use boolean): Groups.
+
+    Returns:
+        out: Out
+    """
+    return {"out": table_file}
+'''
+
+
+def test_rows_settings_declare_their_columns_and_check_values():
+    m = methodfile.parse(ROWS)
+    settings = {s["id"]: s for s in methodfile.settings(m)}
+    groups = settings["groups"]
+    assert groups["type"] == "rows"
+    assert groups["columns"] == [
+        {"id": "group", "label": "group", "type": "text", "optional": False},
+        {"id": "dilution", "label": "dilution", "type": "number", "optional": True},
+        {"id": "n", "label": "n", "type": "integer", "optional": True},
+        {"id": "use", "label": "use", "type": "boolean", "optional": False}]
+    assert methodfile.check_value(groups, [{"group": "b", "n": "3", "use": "yes", "dilution": ""}]) == \
+        [{"group": "b", "n": 3, "use": True}]
+    for bad, says in [({"group": "b"}, "needs its use"), ({"group": "b", "use": True, "n": 2.5}, "whole number"),
+                      ({"group": "b", "use": True, "colour": "red"}, "no column colour"),
+                      ("b", "list of rows")]:
+        with pytest.raises(ValueError, match=says):
+            methodfile.check_value(groups, [bad] if isinstance(bad, dict) else bad)
+    # a default that doesn't fit its columns (a tuple of tuples, not row dicts) is a warning; one that fits isn't
+    messages = [x["message"] for x in checker.check(ROWS)["messages"]]
+    assert any("default of `strains`" in x for x in messages) and not any("`groups`" in x for x in messages)
+    bad_spec = ROWS.replace("(rows: strain text, dilution number)", "(rows: strain colour)")
+    assert any("`strain colour` isn't a column" in x["message"] for x in checker.check(bad_spec)["messages"])
 
 
 def test_toolbox_signatures_are_shown_as_written():

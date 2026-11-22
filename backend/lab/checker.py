@@ -10,6 +10,10 @@ the user; an AI agent's change comes back with them so it fixes them):
 - imports other than the toolbox, pandas, numpy, scipy, statsmodels, scikit-learn, the standard maths modules and
   the packages the method lists in REQUIREMENTS;
 - PAGES, CORRECTIONS or REQUIREMENTS that can't be used as written (lab/pages.py);
+- a `rows` setting whose columns can't be read, or whose default doesn't fit its columns;
+- an `Inputs:` line that can't be used as written: a bracket that is neither file types (`[.csv, .xlsx]`) nor
+  `[result]` / `[result: name]`, `[result]` on a raw file or on `corrections`, a result's name that isn't one, an
+  input the recipe doesn't take, an entry that is really a setting, `[result]` written under `Settings:`;
 - reading or writing files, or the network, outside the toolbox;
 - a name used both for a function and for a result in the same function (Python then can't call the function).
 """
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 from typing import Any
 
 from . import methodfile
@@ -54,6 +59,8 @@ def check(source: str) -> dict[str, Any]:
     messages += _imports(method)
     messages += _recipe(method)
     messages += _declarations(method)
+    messages += _rows_settings(method)
+    messages += _inputs_section(method)
     names = {f.name for f in method.functions}
     formulas = {f.name for f in method.functions if f.kind == "formula"}
     for fn in method.functions:
@@ -95,15 +102,83 @@ def _declarations(method: methodfile.Method) -> list[dict[str, Any]]:
 
     fn = method.recipe_function
     outputs = set(fn.doc.returns) if fn and fn.doc.returns else None
+    inputs = {p for p in fn.params if p.endswith("_file")} if fn else None
     line = {n.targets[0].id: n.lineno for n in method.tree.body
             if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
-    out = [_msg("warning", line.get(name), p) for name, p in pages.problems(method.constants, outputs)]
+    out = [_msg("warning", line.get(name), p) for name, p in pages.problems(method.constants, outputs, inputs)]
     for n in pages.NAMES:
         if n not in method.constants and any(isinstance(x, ast.Assign) and len(x.targets) == 1 and
                                              isinstance(x.targets[0], ast.Name) and x.targets[0].id == n
                                              for x in method.tree.body):
             out.append(_msg("warning", line.get(n), f"{n} must be written as a plain value (text, numbers, lists and "
                                                      "dicts), so the panel can read it without running the method."))
+    return out
+
+
+def _rows_settings(method: methodfile.Method) -> list[dict[str, Any]]:
+    """`rows` settings whose columns can't be read, or whose default doesn't fit them."""
+    fn = method.recipe_function
+    out = []
+    for s in methodfile.settings(method):
+        if s["type"] != "rows":
+            continue
+        if s.get("problem"):
+            out.append(_msg("warning", fn.line, f"The setting `{s['id']}`: {s['problem']}", fn.name))
+            continue
+        try:
+            methodfile.check_value(s, s.get("default"))
+        except ValueError as e:
+            out.append(_msg("warning", fn.line, f"The default of `{s['id']}` doesn't fit its columns: {e}", fn.name))
+    return out
+
+
+def _inputs_section(method: methodfile.Method) -> list[dict[str, Any]]:
+    """The recipe docstring's `Inputs:` lines that can't be used as written (see the module's docstring)."""
+    fn = method.recipe_function
+    if fn is None:
+        return []
+    out = []
+    lines = fn.source.splitlines()
+
+    def warn(text: str, name: str | None = None) -> None:
+        """A warning at the docstring line of `name` (else the recipe's def line)."""
+        at = next((fn.line + i for i, ln in enumerate(lines) if name and re.match(
+            rf"\s*{re.escape(name)}\s*(\([^)]*\))?\s*:", ln) and i > 0), fn.line)
+        out.append(_msg("warning", at, text, fn.name))
+
+    for name, text in fn.doc.inputs.items():
+        _, marker = methodfile.input_marker(text)
+        is_result, wanted = methodfile.result_marker(marker)
+        if marker is not None and not is_result and not re.fullmatch(r"(\s*\.[A-Za-z0-9]+\s*,?)+", marker):
+            warn(f"The input `{name}` ends with `[{marker}]`, which is neither file types (like `[.csv, .xlsx]`) nor "
+                 "`[result]` (a result of other experiments, e.g. `[result]` or `[result: scores]`).", name)
+            continue
+        if name not in fn.params:
+            what = "a result of other experiments" if is_result else "an input"
+            warn(f"`Inputs:` lists `{name}` as {what}, but the recipe `{fn.name}` has no parameter `{name}`: add it "
+                 f"to the recipe's parameters, or remove the line.", name)
+            continue
+        if is_result and name.endswith("_file"):
+            warn(f"`{name}` is marked `[result]`, but a name ending in _file always means a raw file: rename it "
+                 f"(e.g. `{name.removesuffix('_file')}`) to take a result of other experiments.", name)
+            continue
+        if is_result and name == "corrections":
+            warn("`corrections` is marked `[result]`, but that name always gets the experiment's corrections: give "
+                 "the result input another name, e.g. `results`.", name)
+            continue
+        if is_result and wanted is not None and not methodfile.RESULT_NAME.match(wanted):
+            warn(f"In `[result: {wanted}]` of `{name}`, the name after `result:` is the name the other experiments' "
+                 "recipe returns the table under: one word like `scores` (or `step:<function>` for a step's table).",
+                 name)
+            continue
+        if not is_result and not name.endswith("_file") and name != "corrections":
+            warn(f"`Inputs:` lists `{name}`, but it is neither a raw file (its name would end in _file) nor a result "
+                 f"of other experiments (its line would end in `[result]`), so it is a setting: move it under "
+                 "`Settings:`, or end its line with `[result]`.", name)
+    for s in fn.doc.settings:
+        if methodfile.result_marker(s.get("unit"))[0]:
+            warn(f"`{s['id']}` is marked `[result]` under `Settings:`: a result of other experiments is an input; "
+                 "move its line under `Inputs:`.", s["id"])
     return out
 
 
@@ -150,7 +225,8 @@ def _imports(method: methodfile.Method) -> list[dict[str, Any]]:
             for name in imp["names"]:
                 if name != "*" and not hasattr(mod, name):
                     known = ", ".join(getattr(mod, "__all__", [])) or "see the toolbox"
-                    out.append(_msg("error", line, f"The toolbox has no `{name}`. It has: {known}."))
+                    which = "The toolbox" if module == "toolbox" else f"`{module}`"
+                    out.append(_msg("error", line, f"{which} has no `{name}`. It has: {known}."))
     return out
 
 
@@ -252,7 +328,7 @@ def _length(fn: methodfile.Function) -> list[dict[str, Any]]:
 
 
 def _names_in(target: ast.AST) -> ast.AST:
-    """The variable at the root of a target: `peaks` for peaks["x"], peaks.loc[...], peaks.x."""
+    """The variable at the root of a target: `scores` for scores["x"], scores.loc[...], scores.x."""
     while isinstance(target, (ast.Subscript, ast.Attribute)):
         target = target.value
     return target
@@ -329,8 +405,8 @@ def _file_access(fn: methodfile.Function) -> list[dict[str, Any]]:
         if what:
             out.append(_msg("warning", node.lineno, f"`{what}` (in `{fn.name}`) reads or writes files or the network. "
                                                     "Raw data comes in through the recipe's inputs (parameters "
-                                                    "ending in _file) and the toolbox's readers (read_table, "
-                                                    "read_gaml); results go out by returning them from the recipe.",
+                                                    "ending in _file) and the toolbox's readers (such as "
+                                                    "read_table); results go out by returning them from the recipe.",
                             fn.name))
         del name
     return out

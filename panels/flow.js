@@ -8,11 +8,13 @@
 //
 // The container needs a height (the flow fills it). See docs/proposals/research-flow/build-contract.md › Phase 2.
 import { createEditor, highlight } from "./editor.js";
+import { resizable } from "./resize.js";
+import { cellKind, cellText, cellTitle, createRounds, roundWords } from "./rounds.js";
+import { tableWord } from "./sources.js";
+import { splitUnit } from "./units.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
 const BOX_TYPES = new Set(["table", "flags", "data", "figure"]);
-const UNIT = /_(mM_per_min|U_per_gCDW|gCDW_per_L|g_per_L|per_h|per_min|mM|uM|nM|min|pct|ms|h|s|nm|mL|uL|mg|g)$/;
-const READERS = { gaml: "read_gaml", table: "read_table" };
 
 // -------------------------------------------------------------------------------- small helpers
 
@@ -66,10 +68,9 @@ function fmtNum(x) {
   return String(+x.toPrecision(4));
 }
 function colName(c) {
-  const m = UNIT.exec(c);
-  if (!m) return [c];
-  const unit = m[1].replace(/_per_/g, "/").replace(/^per_/, "1/").replace("pct", "%").replace("uM", "µM");
-  return [c.slice(0, m.index), h("span", { class: "fl-unit" }, unit)];
+  const [words, unit] = splitUnit(c);
+  if (!unit || !words) return [c];
+  return [words, h("span", { class: "fl-unit" }, unit)];
 }
 /**
  * A Python literal written in the code (a text in quotes, a number, True, False, None, a list or tuple of them) as a
@@ -228,9 +229,16 @@ function tableEl(columns, rows, maxCols = 99) {
 
 /**
  * The options are the contract's (build-contract.md › The flow component), and a few more a host may give:
- * `boxActions(node)` → [{label, run, title?}] (links at a box's foot), `runNote: false` (the host says itself that the
- * shown run failed), `figure({run, output})` → an image's src (a returned figure in cards and the inside panel).
- * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now) and `fit()`.
+ * `picker: "runs"` (the host picks the experiment: the bar offers only its runs), `boxActions(node)` →
+ * [{label, run, title?}] (links at a box's foot), `runNote: false` (the host says itself that the
+ * shown run failed), `figure({run, output})` → an image's src (a returned figure in cards and the inside panel),
+ * `sizes: {get(place) → px | null, set(place, px | null)}` (where the sizes she drags are remembered: the side panel's
+ * width "side", the heights of its code "code", a recipe line's code "snippet", a whole table "table" and the rounds
+ * tables "rounds"; without it they last while the flow is open), `copyLink({fn})` (a box's menu and the look-inside
+ * panel offer "Copy link" to a step of the method). `onOpen` also gets `{what: "sources", input}` (pick what a result
+ * input reads) and `{what: "experiment", experiment}` (open an experiment it reads).
+ * Beyond the contract's methods: `setProblem({line, message} | null)` (the host's code can't be read now),
+ * `setInside("panel" | "host")`, `lookInside(fn)` (a link to a step) and `fit()`.
  * Keys: Escape closes the newest thing open, Delete removes the selected box (editable), Enter or Space on a box's
  * head looks inside.
  */
@@ -266,12 +274,39 @@ export function mountFlow(container, options = {}) {
   let VIEW = null; // the last layout
   let BLOCKS = {}; // ready-made steps by function
   let BLOCK_LIST = [];
+  let READERS = []; // the readers of raw files: [{function, module, label, extensions, out, param}]
   let FUNCS = []; // the method's own functions, read from the source
   let RUNS = null; // the chosen experiment's runs
   let EXPS = null; // experiments of this method
   let editor = null; // the inside panel's code
   let destroyed = false;
   const rowsCache = new Map();
+  const roundsCache = new Map(); // "run|function|call" → the rounds tables of its loops (rounds.js), kept while open
+  // the sizes she gave the side panel and its boxes: the host remembers them (O.sizes), else they last while open
+  const memSizes = {};
+  const sizeOf = (place) => ({
+    get: () => (O.sizes ? O.sizes.get(place) : memSizes[place]) ?? null,
+    set: (px) => {
+      if (O.sizes) O.sizes.set(place, px);
+      else if (px == null) delete memSizes[place];
+      else memSizes[place] = px;
+    },
+  });
+  const tallest = () => Math.max(220, innerHeight - 90);
+  /** A box of the side panel that she can make taller (its bar under it); `place` names its remembered height. */
+  function tallBox(el, place, { scrolls = false } = {}) {
+    return resizable(el, {
+      edge: "bottom",
+      min: 90,
+      max: tallest,
+      size: sizeOf(place),
+      apply: (px) => {
+        el.style.height = px == null ? "" : `${px}px`;
+        if (scrolls) el.style.maxHeight = px == null ? "" : "none";
+      },
+      title: "Drag to make it taller or shorter · double-click for the usual height",
+    });
+  }
 
   // ---------------------------------------------------------------- the frame
   const root = h("div", { class: "fl" });
@@ -302,6 +337,20 @@ export function mountFlow(container, options = {}) {
   const sideBody = h("div", { class: "fl-sb" });
   const side = h("div", { class: "fl-side" }, sideHead, sideBody);
   const main = h("div", { class: "fl-main" }, canvas, side);
+  // its left edge is dragged to make it wider (not on a narrow screen, where it covers the flow)
+  const sideRz = resizable(side, {
+    edge: "left",
+    min: 300,
+    max: () => Math.max(300, main.clientWidth - 220),
+    enabled: () => !root.classList.contains("narrow"),
+    size: sizeOf("side"),
+    apply: (px) => {
+      side.style.width = px == null ? "" : `${px}px`;
+      side.style.maxWidth = px == null ? "" : "none";
+    },
+    onDone: () => requestAnimationFrame(() => drawMini()),
+    title: "Drag to make the side panel wider or narrower · double-click for the usual width",
+  });
   const pyHead = h("div", { class: "fl-ph" }, "The same recipe as Python. Click a line to find its box.");
   const pyBody = h("div", { class: "fl-pb" });
   const py = h("div", { class: "fl-py" }, pyHead, pyBody);
@@ -431,11 +480,15 @@ export function mountFlow(container, options = {}) {
     return n.title;
   }
   function wireValue(from, wire) {
-    if (from?.startsWith("in:")) return undefined;
+    // a result of other experiments: the table it read (with a run)
+    if (from?.startsWith("in:")) return INPUT[from.slice(3)]?.kind === "result" ? INPUT[from.slice(3)].table : undefined;
     return NODE[from]?.values?.[wire];
   }
   function wireType(from, wire) {
-    if (from?.startsWith("in:")) return INPUT[from.slice(3)]?.kind === "corrections" ? "data" : "none";
+    if (from?.startsWith("in:")) {
+      const k = INPUT[from.slice(3)]?.kind;
+      return k === "corrections" ? "data" : k === "result" ? "table" : "none";
+    }
     const n = NODE[from];
     if (!n) return "none";
     const v = n.values?.[wire];
@@ -534,6 +587,19 @@ export function mountFlow(container, options = {}) {
   }
   function inputCard(i) {
     if (!i) return null;
+    if (i.kind === "result")
+      return cardBox(
+        i.label || human(i.id),
+        (i.sources || []).length
+          ? h("ul", { class: "fl-srcs" }, i.sources.map((s) => h("li", {}, h("b", {}, s.title || s.experiment),
+            h("span", { class: "fl-dim" }, " · " + tableWord(s.result)))))
+          : h("p", { class: "fl-mono" }, G?.experiment ? "No experiment picked yet." : i.value || ""),
+        h("p", { class: "fl-dim" }, "A table other experiments made" + (i.result ? ` (usually ${tableWord(i.result)})` :
+          "") + ": each experiment picks which ones it reads. Their latest runs' tables are put one under the " +
+          "other, with a column saying which experiment each row came from."),
+        i.table ? h("p", { class: "fl-dim" }, "This run read " + longShape(i.table) + ".") : null,
+        h("p", { class: "fl-dim" }, "In the code: ", h("span", { class: "fl-mono" }, i.id)),
+      );
     return cardBox(
       i.label || human(i.id),
       i.kind === "corrections"
@@ -1026,23 +1092,29 @@ export function mountFlow(container, options = {}) {
 
   function renderInput(i) {
     const id = "in:" + i.id;
-    const file = i.kind !== "corrections";
-    const el = h("div", { class: "fl-node src", "data-id": id });
-    const head = h("div", { class: "fl-nh" }, h("span", { class: "fl-nt" }, file ? "Raw file" : "Corrections"),
-      badge(file ? "input" : "by hand"), O.editable && file ? menuButton((e) => inputMenu(e, i)) : null);
-    keyClick(head, file ? `Raw file ${i.id}` : "Corrections", (e) => boxClick(id, e));
+    const file = i.kind !== "corrections" && i.kind !== "result";
+    const result = i.kind === "result";
+    const el = h("div", { class: "fl-node src" + (result ? " from" : ""), "data-id": id });
+    const title = result ? "From experiments" : file ? "Raw file" : "Corrections";
+    const head = h("div", { class: "fl-nh" }, h("span", { class: "fl-nt" }, title),
+      badge(result ? "results" : file ? "input" : "by hand"),
+      O.editable && (file || result) ? menuButton((e) => inputMenu(e, i)) : null);
+    keyClick(head, file ? `Raw file ${i.id}` : result ? `From other experiments: ${i.id}` : "Corrections",
+      (e) => boxClick(id, e));
     card.attach(head, () => inputCard(i));
     el.append(head);
     if (file) el.append(h("div", { class: "fl-port set" }, h("span", { class: "fl-sl fl-file" },
       i.value || (G?.experiment ? "no file chosen" : i.label || ""))));
+    else if (result) el.append(h("div", { class: "fl-port set" }, h("span", { class: "fl-sl fl-file" },
+      G?.experiment ? ((i.sources || []).length ? i.value : "no experiment picked") : i.label || "")));
     else if (i.value != null) el.append(h("div", { class: "fl-port set" }, h("span", { class: "fl-sl" },
       plural(i.value, "approved correction"))));
-    const t = file ? "none" : "data";
+    const type = result ? "table" : file ? "file" : "data";
     const row = h("div", { class: "fl-out", "data-out": i.id }, h("span", { class: "fl-on" }, i.id),
-      h("i", { class: "fl-dot t-" + t, "data-drag": "1" }), O.editable ? plusButton({ from: id, wire: i.id,
-        type: file ? "file" : "data" }, "Add a step that reads it") : null);
+      h("i", { class: "fl-dot t-" + (result ? "table" : file ? "none" : "data"), "data-drag": "1" }),
+      O.editable ? plusButton({ from: id, wire: i.id, type }, "Add a step that reads it") : null);
     card.attach(row, () => inputCard(i));
-    if (O.editable) row.addEventListener("pointerdown", (e) => startConnect(e, id, i.id, file ? "file" : "data"));
+    if (O.editable) row.addEventListener("pointerdown", (e) => startConnect(e, id, i.id, type));
     el.append(row);
     add(el, actionsRow({ id, input: i }));
     return el;
@@ -1357,9 +1429,9 @@ export function mountFlow(container, options = {}) {
     empty.classList.toggle("open", nothing);
     if (!nothing) return;
     put(empty, h("div", { class: "fl-empty-in" }, h("b", {}, "Nothing here yet."),
-      h("p", {}, O.editable ? "Start with the raw file your instrument gives you; then add the steps that work on it." :
-        "This method has no steps yet."),
-      O.editable ? h("button", { class: "layr-button primary", onclick: (e) => addRawFile(e) }, "Add a raw file")
+      h("p", {}, O.editable ? "Start with what it reads: the raw file your instrument gives you, or a result of other " +
+        "experiments; then add the steps that work on it." : "This method has no steps yet."),
+      O.editable ? h("button", { class: "layr-button primary", onclick: (e) => addInputMenu(e) }, "Add an input")
         : null));
   }
 
@@ -1572,8 +1644,8 @@ export function mountFlow(container, options = {}) {
         draw();
       } }, S.quality ? "Fold the checks" : `Unfold the checks (${G.quality.length})`));
     if (O.editable && G) {
-      kids.push(h("button", { class: "layr-button small", title: "A raw file the method reads (the reader step is " +
-        "added with it)", onclick: (e) => addRawFile(e) }, "+ Raw file"));
+      kids.push(h("button", { class: "layr-button small", title: "Something the method reads: a raw file (its " +
+        "reader step comes with it) or a result of other experiments", onclick: (e) => addInputMenu(e) }, "+ Input"));
       kids.push(h("button", { class: "layr-button small", title: "A setting the method's steps can use",
         onclick: (e) => addSetting(e) }, "+ Setting"));
       if (S.multi.size > 1)
@@ -1593,6 +1665,7 @@ export function mountFlow(container, options = {}) {
   }
   function picker() {
     const box = h("span", { class: "fl-pick" });
+    if (O.picker === "runs") return runPicker(box);
     const methodName = G?.method?.name;
     if (EXPS === null) {
       box.append(h("b", { class: "fl-title" }, methodName || ""));
@@ -1610,19 +1683,22 @@ export function mountFlow(container, options = {}) {
       EXPS.map((e) => h("option", { value: e.experiment, selected: e.experiment === S.experiment }, e.title)));
     exp.addEventListener("change", () => pick(exp.value || null, null));
     box.append(h("span", { class: "fl-dim fl-lab" }, "Data"), exp);
-    if (S.experiment) {
-      const runs = (RUNS || []).filter((r) => !r.trial);
-      if (!runs.length) box.append(h("span", { class: "fl-dim" }, RUNS === null ? "…" : "not calculated yet"));
-      else {
-        const trial = S.run && !runs.some((r) => r.id === S.run);
-        const sel = h("select", { class: "layr-select fl-sel", title: "Which calculation of it" },
-          trial ? h("option", { value: S.run }, "Your change, calculated just now") : null,
-          runs.map((r, i) => h("option", { value: i === 0 ? "" : r.id },
-            `${i === 0 ? "Latest · " : ""}${when(r.started)}${statusWord(r.status)}`)));
-        sel.value = trial || (S.run && S.run !== runs[0].id) ? S.run : "";
-        sel.addEventListener("change", () => pick(S.experiment, sel.value || null));
-        box.append(sel);
-      }
+    return runPicker(box);
+  }
+  /** Which calculation of the chosen experiment flows through: its latest run, an earlier one, or a trial run. */
+  function runPicker(box) {
+    if (!S.experiment) return box;
+    const runs = (RUNS || []).filter((r) => !r.trial);
+    if (!runs.length) box.append(h("span", { class: "fl-dim" }, RUNS === null ? "…" : "not calculated yet"));
+    else {
+      const trial = S.run && !runs.some((r) => r.id === S.run);
+      const sel = h("select", { class: "layr-select fl-sel", title: "Which calculation of it", "aria-label": "Run" },
+        trial ? h("option", { value: S.run }, "Your change, calculated just now") : null,
+        runs.map((r, i) => h("option", { value: i === 0 ? "" : r.id },
+          `${i === 0 ? "Latest · " : ""}${when(r.started)}${statusWord(r.status)}`)));
+      sel.value = trial || (S.run && S.run !== runs[0].id) ? S.run : "";
+      sel.addEventListener("change", () => pick(S.experiment, sel.value || null));
+      box.append(sel);
     }
     return box;
   }
@@ -1674,9 +1750,10 @@ export function mountFlow(container, options = {}) {
       !side.contains(document.activeElement) ? document.activeElement : null;
     side.classList.add("open");
     root.classList.add("side-open");
+    sideRz.refresh();
     side.setAttribute("aria-label", title);
     put(sideHead, h("span", { class: "fl-st", title }, title), buttons,
-      h("button", { class: "layr-button small ghost icon", title: "Close", "aria-label": "Close",
+      h("button", { class: "layr-button small ghost icon fl-close", title: "Close", "aria-label": "Close",
         onclick: () => closeSide(true) }, "✕"));
     put(sideBody, crumbs);
     sideBody.scrollTop = 0;
@@ -1699,6 +1776,15 @@ export function mountFlow(container, options = {}) {
   function destroyEditor() {
     if (editor) editor.destroy();
     editor = null;
+    S.roundsRedraw = null;
+  }
+  /** The rounds tables of a function's loops in this run (rounds.js), made once per call and kept with their pages. */
+  function roundsOf(fn, f) {
+    const key = `${f.run}|${fn}|${f.call?.id ?? ""}`;
+    if (!roundsCache.has(key))
+      roundsCache.set(key, createRounds({ call: read, args: { run: f.run }, f, fmt: fmtNum, height: sizeOf("rounds"),
+        onChange: () => S.roundsRedraw?.() }));
+    return roundsCache.get(key);
   }
   function traceButton() {
     if (!S.sel) return null;
@@ -1748,7 +1834,10 @@ export function mountFlow(container, options = {}) {
         "layr-button small", title: a.title || null, onclick: (e) => a.run(e) }, a.label)) : null,
       ownFn ? h("button", { class: "layr-button small", title: "Open it in the " +
         "code editor", onclick: () => O.onOpen?.({ what: "function", fn, line: S.side?.line ?? node?.line ?? null }) },
-      "Edit this step") : null],
+      "Edit this step") : null,
+      ownFn && O.copyLink ? h("button", { class: "layr-button small ghost fl-copylink", title: "Copy a link to " +
+        "this step for a Wiki page: its code with this run's values", onclick: () => O.copyLink({ fn }) },
+      "Copy link") : null],
     });
     body.append(h("div", { class: "fl-wait" }, "…"));
     const mine = ++S.insideTicket;
@@ -1794,6 +1883,7 @@ export function mountFlow(container, options = {}) {
       add(body, sec(toolbox ? "Its code (read only; copy it into the method to change it)" : "The code"));
       const box = h("div", { class: "fl-editor" });
       body.append(box);
+      tallBox(box, "code");
       editor = createEditor(box, { doc: ex.code, readOnly: true, chipsBelow: true,
         firstLine: !toolbox && ex.line ? ex.line : 1 });
     }
@@ -1833,9 +1923,11 @@ export function mountFlow(container, options = {}) {
     const args = f.call?.args || {};
     if (Object.keys(args).length) add(body, sec("What went in"), valueChips(args));
 
-    // the code with its values
+    // the code with its values; each `for` loop's rounds in a table under it (a row picked there is shown in the code)
     const base = f.line;
-    const loops = (f.statements || []).filter((s) => s.loop || s.n > 1);
+    const R = roundsOf(fn, f);
+    // lines that ran more than once outside a `for` (a `while`): their kept rounds are stepped through as before
+    const loops = (f.statements || []).filter((s) => (s.loop || s.n > 1) && !R?.at(s));
     const kept = [...new Set(loops.flatMap((s) => (s.rounds || []).map((r) => r.round)))].sort((a, b) => a - b);
     const total = Math.max(0, ...loops.map((s) => s.n || 0));
     let round = S.round[fn] && kept.includes(S.round[fn]) ? S.round[fn] : kept[0] || 1;
@@ -1848,7 +1940,9 @@ export function mountFlow(container, options = {}) {
     add(body, sec("The code, with this run's values", " ", nav, " ", guardsBtn));
     const box = h("div", { class: "fl-editor" });
     body.append(box);
+    tallBox(box, "code");
     editor = createEditor(box, { doc: f.code || "", readOnly: true, firstLine: base, chipsBelow: true });
+    if (R) add(body, sec(R.count > 1 ? "Its loops, round by round" : "Its loop, round by round"), R.el);
     const lineOf = (n) => n - base + 1;
     const step = (dir) => {
       const i = kept.indexOf(round);
@@ -1856,22 +1950,46 @@ export function mountFlow(container, options = {}) {
       S.round[fn] = round;
       chips();
     };
+    const fullChips = (list, st, r, roundNote) => {
+      for (const [name, v] of Object.entries(r.values || {})) {
+        const t = kindOf(v);
+        list.push({ name, text: shape(v), type: dotOf(t), title: `${name} · ${longShape(v)}${roundNote}`,
+          card: v && typeof v === "object" ? () => valueBody(v) : undefined,
+          onClick: v && v.kind === "table" && v.file ? () => openValue(name, v) : undefined });
+      }
+      if (r.error || r.failed) list.push({ name: "", text: "stopped here", type: "none", title:
+        stepError(r.error || f.error || f.call?.error) || "The step stopped at this line." });
+    };
     const chips = () => {
       const map = {};
       for (const st of f.statements || []) {
+        const list = (map[lineOf(st.end_line || st.line)] ||= []);
+        const now = R?.at(st);
+        if (now) {
+          // a line of a `for` loop: the round picked in its table
+          const words = roundWords(now);
+          const roundNote = words ? ` · ${words.title}` : "";
+          if (st.loop && words)
+            list.push({ name: "", text: words.chip, type: "none", title: `The code shows ${words.title}: pick ` +
+              "another round in the table under the code", onClick: () => R.reveal(st.line) });
+          if (now.kind === "full") fullChips(list, st, now.round, roundNote);
+          else if (now.kind === "light")
+            for (const [name, v] of Object.entries(now.values)) {
+              const more = cellTitle(v, fmtNum);
+              list.push({ name, text: cellText(v, fmtNum), type: dotOf(cellKind(v)), title: `${name}${roundNote}` +
+                (more ? ` · ${more}` : "") + (more && v.preview == null ? " (whole values are kept for the first " +
+                  "and last rounds)" : "") });
+            }
+          else if (now.kind === "inner")
+            list.push({ name: "", text: `${plural(now.rounds, "round")} in round ${now.outer}`, type: "none",
+              title: "This loop's rounds in that round: click to see them in its table", onClick: now.open });
+          continue;
+        }
         const rs = st.rounds || [];
         const r = rs.find((x) => x.round === round) || (st.loop || st.n > 1 ? rs.filter((x) => x.round <= round).pop() :
           null) || rs[0];
         if (!r) continue;
-        const list = (map[lineOf(st.end_line || st.line)] ||= []);
-        for (const [name, v] of Object.entries(r.values || {})) {
-          const t = kindOf(v);
-          list.push({ name, text: shape(v), type: dotOf(t), title: `${name} · ${longShape(v)}` + (st.n > 1 ?
-            ` · round ${r.round} of ${st.n}` : ""), card: v && typeof v === "object" ? () => valueBody(v) : undefined,
-          onClick: v && v.kind === "table" && v.file ? () => openValue(name, v) : undefined });
-        }
-        if (r.error || r.failed) list.push({ name: "", text: "stopped here", type: "none", title:
-          stepError(r.error || f.error || f.call?.error) || "The step stopped at this line." });
+        fullChips(list, st, r, st.n > 1 ? ` · round ${r.round} of ${st.n}` : "");
         if (st.loop && st.n > 1) list.push({ name: "", text: `${ord(r.round)} of ${st.n}`, type: "none",
           title: "Click for the next round that was kept", onClick: () => step(kept.indexOf(round) >= kept.length - 1 ?
             -kept.length : 1) });
@@ -1883,12 +2001,13 @@ export function mountFlow(container, options = {}) {
         if (at > 0) (map[at] ||= []).push({ name: "return", text: shape(f.returned), type: dotOf(kindOf(f.returned)),
           card: f.returned && typeof f.returned === "object" ? () => valueBody(f.returned) : undefined });
       }
-      editor.setValues(map);
+      editor?.setValues(map);
       put(nav, kept.length > 1 ? [h("button", { class: "layr-button small icon ghost", title: "Previous round",
         onclick: () => step(-1) }, "‹"), h("span", { class: "fl-dim" }, `round ${round} of ${total}`),
       h("button", { class: "layr-button small icon ghost", title: "Next round", onclick: () => step(1) }, "›")]
         : null);
     };
+    S.roundsRedraw = chips;
     chips();
     const folds = [];
     if (f.docstring)
@@ -1952,6 +2071,8 @@ export function mountFlow(container, options = {}) {
     add(body, h("div", { class: "fl-chips" }, badge("code"), h("span", { class: "fl-dim" }, `line ${n.line}`)),
       h("p", { class: "fl-dim" }, "Lines of the recipe that aren't one step: they are shown as they are."),
       h("div", { class: "fl-snippet" }, highlight(n.code, { lineNumbers: true, firstLine: n.line })));
+    const snippet = body.querySelector(".fl-snippet .cmx-highlight");
+    if (snippet) tallBox(snippet, "snippet", { scrolls: true });
     const ins = {};
     for (const p of n.ports) if (p.source === "wire") ins[p.wire] = wireValue(p.from, p.wire);
     if (Object.keys(ins).length) add(body, sec("What it reads"), valueChips(ins));
@@ -1959,13 +2080,52 @@ export function mountFlow(container, options = {}) {
     if (Object.keys(outs).length) add(body, sec("What it makes"), valueChips(outs));
     if (n.error) body.append(h("div", { class: "fl-err" }, n.error));
   }
-  function openSideInput(i) {
+  function openSideInput(i, offset = 0) {
     if (!i) return;
+    if (i.kind === "result") return openSideResult(i, offset);
     S.side = { kind: "input" };
     const body = openSide(i.kind === "corrections" ? "Corrections" : "Raw file");
     body.append(inputCard(i));
     if (i.kind === "corrections") body.append(h("button", { class: "layr-button small", onclick: () =>
       O.onOpen?.({ what: "corrections" }) }, "Open the corrections"));
+  }
+  /**
+   * A result of other experiments: which experiments and tables are read (each opens that experiment), the button to
+   * pick them (the host's picker), and the table this run read, page by page.
+   */
+  async function openSideResult(i, offset = 0) {
+    S.side = { kind: "input", input: i.id };
+    const users = (USERS["in:" + i.id + "|" + i.id] || []).map(titleOf);
+    const body = openSide(i.label || "From other experiments", {
+      buttons: G?.experiment ? h("button", { class: "layr-button small", title: "Pick the experiments and the " +
+        "table of each that this experiment reads", onclick: () => O.onOpen?.({ what: "sources", input: i.id }) },
+      "Pick experiments…") : null,
+    });
+    add(body, h("div", { class: "fl-chips" }, badge("from other experiments"), h("span", { class: "fl-chip" }, i.id),
+      i.table ? badge(longShape(i.table)) : null));
+    if (!G?.experiment) {
+      body.append(h("p", { class: "fl-dim" }, "Each experiment of this method picks the experiments it reads " +
+        "(and a table of each)" + (i.result ? `, usually their ${tableWord(i.result)}` : "") + ". Pick an " +
+        "experiment above to see what it reads."));
+      return;
+    }
+    const srcs = i.sources || [];
+    body.append(sec(srcs.length ? `It reads ${plural(srcs.length, "experiment")}` : "It reads nothing yet"));
+    if (srcs.length)
+      body.append(h("div", { class: "fl-srcpicks" }, srcs.map((s, k) => h("button", { class: "fl-srcchip",
+        title: `Open ${s.title || s.experiment}`, onclick: () => O.onOpen?.({ what: "experiment",
+          experiment: s.experiment }) }, h("span", { class: "fl-dim" }, `${k + 1}.`), h("b", {}, s.title ||
+        s.experiment), h("span", { class: "fl-dim" }, " · " + tableWord(s.result))))));
+    else body.append(h("p", { class: "fl-dim" }, "Pick the experiments whose table it reads: Pick experiments…"));
+    body.append(h("p", { class: "fl-dim" }, "Their tables are put one under the other, with the columns experiment " +
+      "(the title) and experiment_id in front." + (users.length ? ` Used by ${users.join(", ")}.` : "")));
+    if (!i.table) {
+      if (srcs.length) body.append(h("p", { class: "fl-dim" }, runId() ? "This run didn't read them: run the " +
+        "experiment again." : "Not calculated yet: run the experiment to see the table it reads."));
+      return;
+    }
+    body.append(sec("The table this run read"));
+    await tableInto(body, i.table, offset, null, (o) => openSideResult(i, o));
   }
 
   /** A table in full, with pages. */
@@ -2018,7 +2178,9 @@ export function mountFlow(container, options = {}) {
       h("button", { class: "layr-button small", title: "Later rows", disabled: offset + LIMIT >= total,
         onclick: () => go(offset + LIMIT) }, "›"),
       r.stored === "sampled" ? h("span", { class: "fl-dim" }, "· only the first rows were kept") : null);
-    wait.replaceWith(pager, h("div", { class: "fl-scroll big" }, tableEl(r.columns || v.columns, r.rows || [])));
+    const scroller = h("div", { class: "fl-scroll big" }, tableEl(r.columns || v.columns, r.rows || []));
+    wait.replaceWith(pager, scroller);
+    tallBox(scroller, "table", { scrolls: true });
   }
 
   // ---------------------------------------------------------------- the Python strip
@@ -2140,6 +2302,8 @@ export function mountFlow(container, options = {}) {
   /** Runs an edit from a form: its error is shown in the form (the form stays open). */
   const tryEdit = (ops, where, opts) => edit(ops, where, opts).then(() => true, () => false);
 
+  /** A box that calls one of the method's own functions (a link can name it; a toolbox function it can't). */
+  const ownFunction = (n) => n.kind === "call" && !!n.fn && !["toolbox", "class", "builtin"].includes(n.fn_kind);
   function nodeMenu(e, n) {
     const items = [];
     if (n.kind === "call" && O.inside === "panel") items.push(["Look inside", () => selectBox(n.id, true)]);
@@ -2153,6 +2317,8 @@ export function mountFlow(container, options = {}) {
     if (n.kind === "call" && (n.fn_kind === "step" || n.fn_kind === "helper"))
       items.push(["Edit this step", () => O.onOpen?.({ what: "function", fn: n.fn, line: null })]);
     else items.push(["Show it in the code", () => O.onOpen?.({ what: "function", fn: null, line: n.line })]);
+    if (O.copyLink && ownFunction(n)) items.push(["Copy link to this step", () => O.copyLink({ fn: n.fn }), "",
+      "For a Wiki page: its code with this run's values"]);
     if (O.editable) {
       items.push("-");
       for (const o of n.outs)
@@ -2187,11 +2353,15 @@ export function mountFlow(container, options = {}) {
     if (b && /feeds/.test(b.textContent)) b.classList.toggle("active", S.trace);
   }
   function inputMenu(e, i) {
+    const result = i.kind === "result";
     menu(e, [
-      ["Add a step that reads it", (ev) => openAddMenu(ev, { from: "in:" + i.id, wire: i.id, type: "file" })],
+      ...(result && G?.experiment ? [["Pick experiments…", () => O.onOpen?.({ what: "sources", input: i.id }), "",
+        "Which experiments it reads, and which table of each"], "-"] : []),
+      ["Add a step that reads it", (ev) => openAddMenu(ev, { from: "in:" + i.id, wire: i.id,
+        type: result ? "table" : "file" })],
       "-",
-      ["Remove this raw file", () => edit([{ op: "remove_input", input: i.id, name: i.id }], e.target).catch(() => {}),
-        "danger"],
+      [result ? "Remove this input" : "Remove this raw file", () =>
+        edit([{ op: "remove_input", input: i.id, name: i.id }], e.target).catch(() => {}), "danger"],
     ]);
   }
   function portMenu(e, n, p) {
@@ -2422,7 +2592,7 @@ export function mountFlow(container, options = {}) {
     const own = FUNCS.filter((f) => f.params.length);
     if (own.length && type !== "file") {
       items.push("-", { head: "This method's own functions" });
-      const cols = src.from?.startsWith("in:") ? [] : columnsOf(src.from, src.wire);
+      const cols = columnsOf(src.from, src.wire);
       const scored = own.map((f) => ({ f, s: f.params.filter((p) => cols.includes(p) || p === src.wire).length }))
         .sort((a, b) => b.s - a.s).slice(0, 8);
       for (const { f } of scored) items.push([human(f.name), (ev) => ownStep(ev, f, src), "", f.sentence]);
@@ -2440,7 +2610,7 @@ export function mountFlow(container, options = {}) {
     return src.from?.startsWith("in:") ? { input: src.wire } : { wire: src.wire };
   }
   function blockForm(e, b, src) {
-    const cols = src.from?.startsWith("in:") ? [] : columnsOf(src.from, src.wire);
+    const cols = columnsOf(src.from, src.wire);
     const firstTable = b.fields.find((f) => f.kind === "table" || f.kind === "file");
     const tableWires = [];
     for (const n of G.nodes) for (const o of n.outs) if (["table", "flags"].includes(n.types?.[o])) tableWires.push(o);
@@ -2572,7 +2742,7 @@ export function mountFlow(container, options = {}) {
     });
   }
   function describeStep(e, src) {
-    const cols = src.from?.startsWith("in:") ? [] : columnsOf(src.from, src.wire);
+    const cols = columnsOf(src.from, src.wire);
     ask(e, {
       title: "Describe the step: Claude writes it",
       text: `It takes ${src.wire}${cols.length ? ` (columns: ${cols.slice(0, 12).join(", ")}` +
@@ -2591,33 +2761,75 @@ export function mountFlow(container, options = {}) {
       },
     });
   }
-  function addRawFile(e) {
+  /** "Add an input": a raw file of one of the kinds the toolbox reads, or a result of other experiments. */
+  function addInputMenu(e) {
+    // the kinds of file are the readers the toolbox and its add-ons announce (blocks › readers)
+    if (!READERS.length) {
+      bubble(e.currentTarget || e.target, "The toolbox's readers aren't known yet: try again in a moment.");
+      loadBlocks(true);
+      return;
+    }
+    const el = menu(e, [
+      { head: "A raw file (a step that reads it comes with it)" },
+      ...READERS.map((r) => [r.label, (ev) => addRawFile(ev, r), "", (r.extensions || []).join(" ")]),
+      "-",
+      { head: "What other experiments made" },
+      ["A result of other experiments", (ev) => addResultInput(ev), "", "A table their runs made: each experiment " +
+        "picks which ones it reads"],
+    ]);
+    el.classList.add("wide");
+  }
+  function addRawFile(e, reader = READERS[0]) {
+    const readerOf = (fn) => READERS.find((r) => r.function === fn) || READERS[0];
     ask(e, {
       title: "Add a raw file",
       text: "The file your instrument or spreadsheet gives you. A step that reads it is added with it.",
       fields: [
-        { name: "name", label: "What it holds", value: "", placeholder: "e.g. plate reads", help: "A short name: " +
-          "it becomes plate_reads_file in the code." },
-        { name: "kind", label: "Kind of file", kind: "select", value: "table", options: [["table",
-          "A table (CSV, TSV, Excel, SPSS, Stata)"], ["gaml", "A GC sequence (GAML from Chromeleon)"]] },
+        { name: "kind", label: "Kind of file", kind: "select", value: reader.function,
+          options: READERS.map((r) => [r.function, r.label]) },
+        { name: "name", label: "What it holds (optional)", value: "", placeholder: "e.g. plate reads", help: "A short " +
+          "name: it becomes plate_reads_file in the code. Empty: the reader's usual name." },
       ],
       submit: "Add it",
       run: (v, where) => {
+        const r = readerOf(v.kind);
         const slug = v.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
           .replace(/_file$/, "");
-        if (!slug) {
-          bubble(where, "Say in a word or two what the file holds.");
-          return Promise.resolve(false);
-        }
-        const name = (/^\d/.test(slug) ? "f_" + slug : slug) + "_file";
-        const reader = READERS[v.kind];
-        const readerParam = BLOCKS[reader]?.fields.find((f) => f.kind === "file")?.name ||
-          (v.kind === "gaml" ? "gaml_file" : "table_file");
-        const types = v.kind === "gaml" ? [".gaml"] : [".csv", ".tsv", ".xlsx", ".sav", ".dta"];
-        return tryEdit([{ op: "add_input", name, types, label: v.name.trim() },
-          { op: "add_step", function: reader, args: { [readerParam]: { input: name } },
-            out: v.kind === "gaml" ? (G.nodes.some((n) => n.outs.includes("injections")) ? undefined : "injections") :
-              slug.replace(/^\d/, "t_$&") }], where);
+        const free = (n) => !G.nodes.some((x) => x.outs.includes(n)) && !(G.inputs || []).some((i) => i.id === n);
+        const base = slug ? (/^\d/.test(slug) ? "f_" + slug : slug) + "_file" : r.param;
+        let name = base;
+        for (let i = 2; INPUT[name]; i++) name = base.replace(/_file$/, `_${i}_file`);
+        const out = slug ? slug.replace(/^\d/, "t_$&") : r.out;
+        const readerParam = BLOCKS[r.function]?.fields.find((f) => f.kind === "file")?.name || r.param;
+        return tryEdit([{ op: "add_input", name, types: r.extensions, label: v.name.trim() || undefined },
+          { op: "add_step", function: r.function, args: { [readerParam]: { input: name } },
+            out: out && free(out) ? out : undefined }], where);
+      },
+    });
+  }
+  /** An input that reads a table other experiments made (`[result]` in the recipe's docstring). */
+  function addResultInput(e) {
+    ask(e, {
+      title: "Add a result of other experiments",
+      text: "A table other experiments made: each experiment of this method picks, in its settings, which " +
+        "experiments it reads. Their tables come in one under the other, with a column saying which experiment " +
+        "each row came from.",
+      fields: [
+        { name: "label", label: "What it holds", value: "", placeholder: "e.g. Scores of each survey wave" },
+        { name: "name", label: "Name in the code (optional)", value: "", placeholder: "e.g. waves",
+          help: "Letters, digits and _. Empty: made from what it holds." },
+        { name: "result", label: "The table it usually reads (optional)", value: "",
+          placeholder: "e.g. scores, or step:scale_scores", help: "Offered first when an experiment picks." },
+      ],
+      submit: "Add it",
+      run: (v, where) => {
+        const slug = (v.name.trim() || v.label.trim()).toLowerCase().replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "").replace(/_file$/, "").replace(/^\d/, "t_$&").slice(0, 40) || "results";
+        const taken = (n) => !!INPUT[n] || G.nodes.some((x) => x.outs.includes(n)) || !!SET[n];
+        let name = slug;
+        for (let i = 2; taken(name); i++) name = `${slug}_${i}`;
+        return tryEdit([{ op: "add_input", name, kind: "result", result: v.result.trim() || undefined,
+          label: v.label.trim() || undefined }], where);
       },
     });
   }
@@ -2626,7 +2838,7 @@ export function mountFlow(container, options = {}) {
       title: "Add a setting",
       text: "A number or a choice the experiment can change. Connect it to a step's input afterwards.",
       fields: [
-        { name: "label", label: "What it is", value: "", placeholder: "e.g. Smallest peak area" },
+        { name: "label", label: "What it is", value: "", placeholder: "e.g. Lowest score kept" },
         { name: "name", label: "Name in the code", value: "", placeholder: "e.g. min_area",
           help: "Letters, digits and _." },
         { name: "value", label: "Its usual value", value: "", placeholder: "e.g. 5, or \"sample\"" },
@@ -2778,21 +2990,29 @@ export function mountFlow(container, options = {}) {
     if (S.source != null) FUNCS = functionsOf(S.source);
     S.pending = {};
     rowsCache.clear();
+    if (runId() !== S.roundsRun) {
+      // another run: its loops' rounds are other ones (the same run drawn again keeps the rounds picked)
+      for (const r of roundsCache.values()) r?.destroy();
+      roundsCache.clear();
+      S.roundsRun = runId();
+    }
     figures.clear();
     draw();
     if (S.side?.kind === "inside" && S.stack.length) {
       const top = S.stack[S.stack.length - 1];
       openInside(top.fn, { keep: true, call: null, node: NODE[S.side.node] || null });
     } else if (S.side?.kind === "data") openData(S.side.from, S.side.wire);
+    else if (S.side?.kind === "input" && INPUT[S.side.input]?.kind === "result") openSideResult(INPUT[S.side.input]);
     loadPicker(mine).finally(() => mine === S.loadTicket && root.classList.remove("settling"));
     if (S.python) ensureSource().then(() => drawPython());
   }
-  async function loadBlocks() {
-    if (BLOCK_LIST.length) return;
+  async function loadBlocks(again = false) {
+    if (BLOCK_LIST.length && !again) return;
     try {
       const r = await call("blocks", {});
       BLOCK_LIST = r.blocks || [];
       BLOCKS = Object.fromEntries(BLOCK_LIST.map((b) => [b.function, b]));
+      READERS = r.readers || [];
     } catch {
       /* the palette is optional for drawing */
     }
@@ -2800,7 +3020,7 @@ export function mountFlow(container, options = {}) {
   async function loadPicker(mine) {
     const methodId = G?.method?.id || S.method;
     try {
-      if (EXPS === null || S.refreshExps) {
+      if (O.picker !== "runs" && (EXPS === null || S.refreshExps)) {
         const all = await read("experiments", {});
         EXPS = methodId ? all.filter((e) => e.method === methodId) : [];
         S.refreshExps = false;
@@ -2817,7 +3037,11 @@ export function mountFlow(container, options = {}) {
 
   // ---------------------------------------------------------------- size changes
   const ro = new ResizeObserver(() => {
+    const wasNarrow = root.classList.contains("narrow");
     root.classList.toggle("narrow", root.clientWidth < 700);
+    // the side panel's width again, once this round of size changes is over (a change in here would loop)
+    if (wasNarrow !== root.classList.contains("narrow") || side.classList.contains("open"))
+      requestAnimationFrame(() => !destroyed && sideRz.refresh());
     root.classList.toggle("short", root.clientHeight < 360);
     root.classList.toggle("tight", canvas.clientHeight < 440 || canvas.clientWidth < 560);
     if (G && S.drawLater && root.clientWidth > 0) draw();
@@ -2874,6 +3098,15 @@ export function mountFlow(container, options = {}) {
       S.problem = p || null;
       drawNote();
     },
+    /**
+     * Where looking inside a box happens: "panel" (the flow's own side panel) or "host" (the host shows the box's
+     * function itself, e.g. in its code editor; the side panel closes).
+     */
+    setInside(mode) {
+      if (mode === O.inside) return;
+      O.inside = mode;
+      if (mode !== "panel" && side.classList.contains("open")) closeSide();
+    },
     /** Select a box by its node id, or by a line of the method file. */
     select(x) {
       if (!G) return;
@@ -2882,6 +3115,31 @@ export function mountFlow(container, options = {}) {
       if (!id) return;
       selectBox(rep(id), false);
       centre(id);
+    },
+    /**
+     * Looks inside a function (a link to a step): its box is selected and opened in the side panel; a function
+     * without its own box (a formula a step calls) opens in the side panel by itself. → false when the flow has no
+     * such function to show.
+     */
+    lookInside(fn) {
+      if (!G || !fn) return false;
+      const n = (G.nodes || []).find((x) => x.kind === "call" && x.fn === fn);
+      if (n) {
+        // its own box shows: the quality checks or its group unfolded
+        let redraw = false;
+        if (!S.quality && (G.quality || []).includes(n.id)) redraw = S.quality = true;
+        for (const g of G.groups || []) if (g.nodes.includes(n.id) && S.folded.delete(g.id)) redraw = true;
+        if (redraw) draw();
+        S.multi.clear();
+        selectBox(n.id, O.inside === "panel");
+        centre(n.id);
+        return true;
+      }
+      if (O.inside !== "panel") return false;
+      S.sel = null;
+      classes();
+      openInside(fn);
+      return true;
     },
     /** For tests and the host: the graph as drawn. */
     get graph() {
@@ -2895,6 +3153,8 @@ export function mountFlow(container, options = {}) {
       destroyed = true;
       ro.disconnect();
       destroyEditor();
+      sideRz.destroy();
+      for (const r of roundsCache.values()) r?.destroy();
       closePop();
       root.remove();
     },

@@ -1,5 +1,5 @@
-The Research plugin's code editor (cm6.js) bundles these packages, unchanged, by
-scripts/vendor-research-editor.mjs. Their licences follow.
+The Research plugin's code editor (cm6.js) is a prebuilt bundle of these packages, unchanged, made
+once from npm outside the plugin. Their licences follow.
 
 - @codemirror/autocomplete 6.20.4 (MIT)
 - @codemirror/commands 6.11.1 (MIT)

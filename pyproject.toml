@@ -1,7 +1,7 @@
 [project]
 name = "layr-research"
-version = "0.5.0"
-description = "layr research plugin: explainable analysis methods as plain Python (any table data, surveys, GC-FID assays), pages made of cards, quick stats and plots."
+version = "0.6.0"
+description = "layr research plugin: explainable analysis methods as plain Python for any table data, experiments that read each other, pages made of cards, quick stats and plots."
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=1.12,<2",
@@ -19,7 +19,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "websockets>=17.4",
+]
 
 [tool.uv]
 package = false

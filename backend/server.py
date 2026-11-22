@@ -1,7 +1,9 @@
-"""layr research backend: an MCP server (FastMCP, stdio) for small data analyses.
+"""layr research backend: an MCP server (FastMCP, stdio) for explainable data analysis.
 
-Load a CSV table, look at it (describe), draw charts (plot) and compare groups (ttest, anova). Every result is kept
-in a history, so the panel shows what an AI agent did too. Files live in LAYR_DATA_DIR:
+The methods, experiments and runs of the Experiments panel are the tools of `lab/` (lab/tools.py and the modules it
+registers, lab/ref_tools.py), with their files under LAYR_DATA_DIR/lab (see lab/store.py). This file adds the quick
+analyses of the Quick analysis panel: load a CSV table, look at it (describe), draw charts (plot) and compare groups
+(ttest, anova). Every quick result is kept in a history, so the panel shows what an AI agent did too. Their files:
 
     datasets/<id>.csv + <id>.json   the loaded tables (normalized CSV) and what we know about them
     plots/<id>.png                  every chart drawn
@@ -58,13 +60,14 @@ mcp = FastMCP(
     "research",
     instructions=(
         "Explainable data analysis for a researcher learning Python: any study whose data fits in tables (surveys, "
-        "lab measurements, GC-FID activity assays...). Two parts. (1) Methods and experiments: a method is one plain Python file (methods, method_get "
-        "show the source and its outline; toolbox_docs the ready-made functions it imports from `toolbox`); an "
+        "lab measurements, instrument exports...). Two parts. (1) Methods and experiments: a method is one plain "
+        "Python file (methods, method_get show the source and its outline; toolbox_docs the ready-made functions it "
+        "imports from `toolbox` and its add-ons `toolbox.<add-on>`); an "
         "experiment applies a method's recipe to raw files with settings and corrections (experiments, "
         "experiment_create, experiment_update); run computes it in a separate process; result_table, figure, explain "
         "(each step, its formulas drawn from the code, this run's numbers), explain_function and provenance read the "
-        "results; database_query compares results across all experiments; compare_runs lists numbers that moved. "
-        "Rules: every number you tell the user comes from result_table / provenance / database_query, with the run "
+        "results; compare_runs lists numbers that moved; examples and lab_sample make a ready example to try. "
+        "Rules: every number you tell the user comes from result_table / provenance, with the run "
         "id; never compute statistics yourself. Change a method only with method_write (the whole file, or one "
         "function): your change is a DRAFT that counts only when the user accepts it in the panel; method_write "
         "returns the style checker's warnings: fix them (write again) before you tell the user it is ready; "
@@ -77,18 +80,23 @@ mcp = FastMCP(
         "(no transform, set_index().map(), index tricks); never change a table you were given (copy it); about 25 "
         "lines at most, else split. The recipe (the last function, or RECIPE = 'name'): only calls steps, keeps "
         "their results and returns a dict of named results; its parameters are the inputs (names ending in _file are "
-        "raw files; `corrections` gets the approved corrections) and the settings (defaults; keep existing setting "
+        "raw files; a parameter whose Inputs: line ends in [result] or [result: scores] reads results of other "
+        "experiments: the experiment picks them with experiment_create/experiment_update sources={input: "
+        "[{experiment, result}]} and the recipe gets one table, the picked tables stacked with the columns "
+        "experiment and experiment_id in front; `corrections` gets the approved corrections) and the settings "
+        "(defaults; keep existing setting "
         "names so stored experiments still work); its docstring documents them (Inputs:, Settings: with groups, "
         "Returns:). Every function starts with a docstring whose first line is one plain sentence; put a Formula: "
         "block in it for what isn't one expression. Units go in names (conc_mM, time_min, rate_mM_per_min). Imports: "
         "toolbox, pandas, numpy, scipy, statsmodels, scikit-learn (sklearn), matplotlib and the maths modules; any "
         "other package from PyPI goes into the method's REQUIREMENTS (method_declare what=requirements; installed "
         "before its next run); no file or network access (raw files come in through the recipe, read_table reads "
-        "CSV, Excel, SPSS, Stata; results go out by returning them: tables, figures, single values, texts such as a "
+        "CSV, Excel, SPSS, Stata, SAS and JSON; results go out by returning them: tables, figures, single values, texts such as a "
         "model's summary). Quality checks: return a table named flags (toolbox flag(level, category, message, "
         "respondent=17) names any item). Corrections are of the kinds the method declares in CORRECTIONS "
-        "(correction_kinds lists them; the GC assay's: rename, exclude, manual_integration); each needs a reason and "
-        "stays proposed until the user approves it; don't call correction_decide yourself unless the user asks. "
+        "(correction_kinds lists them; a method that declares none takes none); propose one with "
+        "correction_propose: each needs a reason and stays proposed until the user approves it; don't call "
+        "correction_decide yourself unless the user asks. "
         "Each experiment has pages the method declares in PAGES, made of cards (text, number, table, figure, chart, "
         "review: a curve per item with regions to correct); change them, the kinds of correction or the packages "
         "only with method_declare (a draft for you, like method_write). "
@@ -100,10 +108,17 @@ mcp = FastMCP(
         "input or a result, group steps), call flow_edit: it returns the new source and saves nothing; then save it "
         "with method_write(source=...), which is a draft for you like any change. To see what happened inside a "
         "step in a run: function_inside (its code with the values of every line, loops' first and last rounds); "
+        "loop_rounds gives every round of one of its loops as a table (a row per round, a column per name); "
         "a value with a `file` is a table: read its rows with value_get. run(source=..., settings=...) is a trial "
         "run of an unsaved change: it saves nothing and isn't the experiment's latest run; run(fresh=true) "
         "calculates every step again. Numbers you report still come only from runs (result_table, provenance, "
         "value_get, function_inside), with the run id. "
+        "An experiment that reads others is `outdated` (experiments, experiment_get say why) when a source has newer "
+        "numbers; it is never rerun by itself: run it when the user wants the new numbers. experiment_delete "
+        "refuses to delete an experiment others read unless force=true (ask the user first). To compare experiments, "
+        "use the built-in method compare-experiments (lab_sample which=compare shows it). "
+        "To refer to a result, a number, a step or a method from another plugin (a Wiki page), put the markdown of "
+        "reference_make there (a layr://research/open/... link); reference_get shows what a reference shows now. "
         "(2) Quick one-off analyses: load_csv (or load_sample) returns a dataset id; then describe, plot, ttest or "
         "anova it; list_datasets shows what is loaded."
     ),
@@ -909,22 +924,28 @@ def remove_dataset(dataset: Annotated[str, Field(description="The dataset id to 
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lab import ref_tools  # noqa: E402
 from lab import tools as lab_tools  # noqa: E402
 from lab.events import Emitter  # noqa: E402
+from lab.runner import Pool  # noqa: E402
 
 HUB = _Hub()
 EVENTS = Emitter(HUB.send, _hub_known)
-LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic))
+POOL = Pool()  # no calculation process yet: the server warms one when it runs, a run starts one when it needs it
+LAB = lab_tools.register(mcp, DATA, lambda topic, data: _emit_soon(data, topic), POOL)
+ref_tools.register(mcp, LAB)
 
 
 def _warm() -> None:
-    """Read the slow parts once in the background (Jedi's pandas, the GC method's flow): the first completion and
-    the first flow otherwise take seconds."""
+    """Read the slow parts once in the background (Jedi's pandas, the first built-in method's flow): the first
+    completion and the first flow otherwise take seconds."""
     from lab import codeintel, flow
 
     try:
         codeintel.warm()
-        flow.graph(LAB.get_method("gc-activity-assay")["source"])
+        first = next((m for m in LAB.list_methods() if m.get("builtin")), None)
+        if first:
+            flow.graph(LAB.get_method(first["id"])["source"])
     except Exception as e:  # only a head start; the tools do the same work when asked
         log.info("warming up failed: %s", e)
 
@@ -933,6 +954,7 @@ if __name__ == "__main__":
     log.info("research backend starting; data in %s", DATA)
     import threading
 
+    threading.Thread(target=POOL.warm, daemon=True).start()  # the first run doesn't wait for pandas and SciPy
     threading.Thread(target=_warm, daemon=True).start()
 
     async def _serve() -> None:

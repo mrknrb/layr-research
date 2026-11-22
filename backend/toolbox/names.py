@@ -18,9 +18,9 @@ def match_name(name: str, patterns: list[dict]) -> tuple[str, dict[str, str]]:
     the regular expression, like (?P<time_min>\\d+), become the parts. A name no pattern matches gives
     ("unknown", {}).
 
-    Example: match_name("Act.Assay_WT_5min_R2_HAME", [{"role": "sample", "regex":
-    r"^Act\\.Assay_(?P<strain>\\w+)_(?P<time_min>\\d+)min_R(?P<replicate>\\d+)_(?P<substrate>\\w+)$"}])
-    gives ("sample", {"strain": "WT", "time_min": "5", "replicate": "2", "substrate": "HAME"}).
+    Example: match_name("Growth_WT_5h_R2", [{"role": "sample", "regex":
+    r"^Growth_(?P<strain>\\w+)_(?P<time_h>\\d+)h_R(?P<replicate>\\d+)$"}])
+    gives ("sample", {"strain": "WT", "time_h": "5", "replicate": "2"}).
     """
     for pattern in patterns:
         try:

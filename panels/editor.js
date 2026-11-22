@@ -1,7 +1,9 @@
-// The Research plugin's code editor: CodeMirror 6 (vendor/cm6/cm6.js, built by scripts/vendor-research-editor.mjs)
-// set up for method files, with the things the plugin draws into the code: values at the end of a line, folded checks,
-// a block under a line, diagnostics, and a merge view to review a draft. It knows nothing about the plugin's tools:
-// completion, hover and call signatures come from functions the page passes in. Load editor.css with it.
+// The Research plugin's code editor: CodeMirror 6 (vendor/cm6/cm6.js, a prebuilt bundle of CodeMirror 6 and Lezer made
+// once from their npm packages outside the plugin and copied in unchanged; versions and licences are in
+// vendor/cm6/LICENSE) set up for method files, with the things the plugin draws into the code: values at the end of a
+// line, folded checks, a block under a line, diagnostics, and a merge view to review a draft. It knows nothing about
+// the plugin's tools: completion, hover and call signatures come from functions the page passes in. Load editor.css
+// with it.
 //
 //   import { createEditor, createMerge, highlight } from "./editor.js";
 //
@@ -294,16 +296,6 @@ function cardManager() {
   /** Hides the card if it is showing (a scroll moves the chip away from it); a card about to show still shows. */
   const hideOpen = () => card?.classList.contains("open") && hide();
   return { open, hide, hideOpen, hideSoon, attach, destroy: () => (hide(), card?.remove(), (card = null)) };
-}
-
-/**
- * Gives any element the editor's hover card: `make()` returns an element, a string or a promise of one.
- * Returns a function that removes the card from the page. For the flow and other places that want the same card.
- */
-export function attachCard(target, make) {
-  const cards = cardManager();
-  cards.attach(target, make);
-  return cards.destroy;
 }
 
 // -------------------------------------------------------------------------------- values at line ends
@@ -746,10 +738,19 @@ function placeChips(view) {
       }
       return out;
     },
-    write(list) {
+    write(list, v) {
+      let moved = false;
       for (const { w, below, indent } of list) {
+        moved ||= w.classList.contains("below") !== below;
         w.classList.toggle("below", below);
         w.style.paddingLeft = below ? `calc(${indent}ch + 2px)` : "";
+      }
+      // lines got taller or shorter (the editor became narrower or wider): their heights are measured again, so the
+      // line numbers in the gutter stay beside their lines (CodeMirror skips a size change right after an update,
+      // and this one always is: its own flag for "measure the lines" is set)
+      if (moved) {
+        if (v.viewState) v.viewState.mustMeasureContent = true;
+        v.requestMeasure();
       }
     },
   });
