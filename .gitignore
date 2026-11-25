@@ -1,7 +1,4 @@
+node_modules/
 .venv/
 __pycache__/
 *.pyc
-.pytest_cache/
-.layr-data/
-tests/panel/out/
-.ruff_cache/
